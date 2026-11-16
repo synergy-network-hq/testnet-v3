@@ -21,6 +21,8 @@ UPGRADE_INTENT = 'evidence/upgrade-intent.json'
 UPGRADE_COMPLETED = 'evidence/upgrade-completed.json'
 REPLACEMENT_INTENT = 'evidence/application-replacement-intent.json'
 AUTHORITY_RECOVERY_INTENT = 'evidence/authority-recovery-intent.json'
+AUTONOMOUS_EPOCH_INTENT = 'evidence/autonomous-epoch-intent.json'
+AUTONOMOUS_EPOCH_ARTIFACT = 'network/autonomous-epoch-activation.json'
 
 
 def guard_dependencies(root):
@@ -356,6 +358,8 @@ def _start_check_locked(root):
     require(not (root/REPLACEMENT_INTENT).exists(), 'finish application replacement before startup')
     require(not (root/AUTHORITY_RECOVERY_INTENT).exists() and not (root/AUTHORITY_RECOVERY_INTENT).is_symlink(),
             'finish authority recovery before startup')
+    require(not (root/AUTONOMOUS_EPOCH_INTENT).exists() and not (root/AUTONOMOUS_EPOCH_INTENT).is_symlink(),
+            'finish autonomous epoch activation before startup')
     receipt, _ = _sealed_receipt(root)
     _attributed_units(root)
     recover_consensus_archives(root)
@@ -368,6 +372,7 @@ def _start_check_locked(root):
             and policy.get('all_pairs_vpn_verified') is True, 'complete signed-authority installation and VPN readiness required')
     config = read(root/'config/node.json')
     verify_authority_recovery_pin(root,config,receipt,policy)
+    verify_autonomous_epoch_pin(root,config,receipt,policy)
     from apqe_layout import selected, PUBLIC
     public_names=set(PUBLIC) if selected(config) else {'genesis.json','authority.json','authority-root.pub',
             'network-manifest.json','p2p-bindings.json','transport-registry.json'}
@@ -408,11 +413,30 @@ def verify_authority_recovery_pin(root,config,receipt,policy=None):
             and 0 < metadata.st_size <= 8*1024*1024 and digest(canonical)==expected,
             'recovery certificate differs from activation pin')
 
+def verify_autonomous_epoch_pin(root,config,receipt,policy):
+    activation=config.get('consensus',{}).get('autonomous_epoch_activation')
+    expected=receipt.get('autonomous_epoch_activation_sha256')
+    startup=policy.get('autonomous_epoch_activation_sha256')
+    artifact=root/AUTONOMOUS_EPOCH_ARTIFACT
+    if activation is None:
+        require(expected is None and startup is None and not artifact.exists() and not artifact.is_symlink(),
+                'unconfigured autonomous epoch artifact or pin')
+        return
+    require(activation=={'path':str(artifact),'sha256':expected}
+            and isinstance(expected,str) and re.fullmatch('[0-9a-f]{64}',expected)
+            and startup==expected and receipt.get('chain_id')==99999 and receipt.get('role')=='validator',
+            'autonomous activation pins or installation scope differ')
+    metadata=artifact.lstat()
+    require(stat.S_ISREG(metadata.st_mode) and not artifact.is_symlink()
+            and metadata.st_uid==os.geteuid() and not metadata.st_mode & 0o022
+            and 0 < metadata.st_size <= 4*1024*1024 and digest(artifact)==expected,
+            'autonomous epoch artifact differs from activation pin')
+
 
 def relay_start_check(root):
     _require_operator(linux=False)
     with _lifecycle_lock(root):
-        for name in (UPGRADE_INTENT,REPLACEMENT_INTENT,AUTHORITY_RECOVERY_INTENT):
+        for name in (UPGRADE_INTENT,REPLACEMENT_INTENT,AUTHORITY_RECOVERY_INTENT,AUTONOMOUS_EPOCH_INTENT):
             require(not (root/name).exists() and not (root/name).is_symlink(),
                     'finish recorded lifecycle intent before relay startup')
         receipt,_=_sealed_receipt(root)
@@ -475,7 +499,8 @@ def _assert_no_application_processes(root, vpn_pid=None, proc=Path('/proc'), inv
             and any(value in ('upgrade','uninstall','replace-application','finish-replacement','retire-delivery-stage') for value in arguments)
             and '--root' in arguments and str(root) in arguments)
         invokes_recovery=(str(root/'tools/activate_authority_recovery.py') in arguments
-            and 'apply' in arguments and '--root' in arguments and str(root) in arguments)
+            and any(v in ('apply','apply-successor','apply-autonomous') for v in arguments)
+            and '--root' in arguments and str(root) in arguments)
         invokes_controller=(arguments[-4:] == ['/usr/bin/python3','-I','-B',str(root/'tmp/controller/controller.py')])
         if int(process.name) in ancestors and (invokes_lifecycle or invokes_controller or invokes_recovery) and (
                 Path(native_image).name == 'sudo' or Path(native_image).name.startswith('python')): continue

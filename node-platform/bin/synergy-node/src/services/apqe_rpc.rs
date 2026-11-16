@@ -245,7 +245,8 @@ fn snapshot(config: &NodeConfiguration) -> Result<Snapshot, String> {
 }
 
 fn authority_material(config: &NodeConfiguration) -> Result<(Vec<u8>, Vec<Vec<u8>>), String> {
-    let current = authority::load(config)?.ok_or("RPC requires authenticated frozen authority")?;
+    let current =
+        authority::load_signed(config)?.ok_or("RPC requires authenticated frozen authority")?;
     let keys = current
         .registry
         .active()

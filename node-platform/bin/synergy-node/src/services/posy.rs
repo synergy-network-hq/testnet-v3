@@ -81,11 +81,60 @@ impl ConsensusSigner for LocalConsensusSigner {
     }
 }
 
+fn verify_durable_autonomous_tail(
+    transition: &authority::VerifiedTransitionContext,
+    certificates: &VerifiedQuorumCertificateStore,
+) -> Result<(), String> {
+    let previous = transition.previous_authority();
+    for expected in transition.certificates() {
+        let height = expected.context.height;
+        let stored = certificates
+            .get_verified(
+                height,
+                &previous.epoch,
+                &previous.registry,
+                previous.as_ref(),
+            )
+            .map_err(|error| {
+                format!("verify durable autonomous predecessor QC H{height}: {error}")
+            })?
+            .ok_or_else(|| {
+                format!("autonomous startup requires durable predecessor QC H{height}")
+            })?;
+        // Compatible proof rounds and signer subsets may certify the same subject.
+        if stored.reference().map_err(|error| error.to_string())?
+            != expected.reference().map_err(|error| error.to_string())?
+        {
+            return Err(format!(
+                "durable predecessor QC H{height} conflicts with autonomous witness"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 pub fn registration_with_preparation(
     configuration: &NodeConfiguration,
     authority: Arc<VerifiedAuthority>,
     ingress: AuthenticatedIngress,
     preparation: Option<super::preparation::Handle>,
+) -> Result<(ServiceSpec, Box<dyn ManagedService>), String> {
+    registration_with_authority_transition(
+        configuration,
+        authority,
+        ingress,
+        preparation,
+        Default::default(),
+    )
+}
+
+pub fn registration_with_authority_transition(
+    configuration: &NodeConfiguration,
+    authority: Arc<VerifiedAuthority>,
+    ingress: AuthenticatedIngress,
+    preparation: Option<super::preparation::Handle>,
+    transition_signal: authority::AuthorityTransitionSignal,
 ) -> Result<(ServiceSpec, Box<dyn ManagedService>), String> {
     let authority = VerifiedAuthority::owner_context(&authority)?;
     let preparation = preparation
@@ -130,6 +179,8 @@ pub fn registration_with_preparation(
         .map_err(|error| format!("open PoSy finality store: {error:?}"))?;
     let delivery_transition =
         authority::load_transition_context(configuration, authority.as_ref())?;
+    let certificates = VerifiedQuorumCertificateStore::new(&root)
+        .map_err(|error| format!("open PoSy verified-QC store: {error:?}"))?;
     if let Some(transition) = delivery_transition.as_ref() {
         let finalized = transition.finalized();
         let committed = finality
@@ -139,10 +190,18 @@ pub fn registration_with_preparation(
         if &committed != finalized {
             return Err("epoch transition witness conflicts with durable PoSy finality".into());
         }
+        if transition.is_autonomous()
+            && finality
+                .get(authority.epoch.epoch_start_height)
+                .map_err(|error| format!("load successor finality commit: {error}"))?
+                .is_none()
+        {
+            // The bootstrap tail seeds in-memory finality. Execution and
+            // historical admission still read their QCs from durable storage.
+            verify_durable_autonomous_tail(transition, &certificates)?;
+        }
         transition.seed_successor(authority.as_ref(), &mut state_machine)?;
     }
-    let certificates = VerifiedQuorumCertificateStore::new(&root)
-        .map_err(|error| format!("open PoSy verified-QC store: {error:?}"))?;
     let atomic_transitions = AtomicConsensusTransitionStore::new(&root)
         .map_err(|error| format!("open atomic PoSy transition store: {error:?}"))?;
     let timeout_certificates = VerifiedTimeoutCertificateStore::new(&root)
@@ -261,6 +320,13 @@ pub fn registration_with_preparation(
         },
         super::owned_service::production(
             Box::new(PosyService {
+                autonomous_boundary: consensus.autonomous_epoch_activation.as_ref().map(|_| {
+                    AutonomousBoundary {
+                        proof_root: layout.consensus().join("autonomous-epochs"),
+                        candidate_root: layout.blocks().join("execution-candidates"),
+                        signal: transition_signal,
+                    }
+                }),
                 mode: consensus.mode,
                 preparation,
                 authority_binding,
@@ -871,6 +937,7 @@ struct PreparedConsensus {
 }
 
 struct PosyService {
+    autonomous_boundary: Option<AutonomousBoundary>,
     preparation: Option<super::preparation::Owner<PreparedConsensus>>,
     mode: ConsensusMode,
     authority_binding: std::path::PathBuf,
@@ -904,6 +971,12 @@ struct PosyService {
     round_deadline: Instant,
     started: bool,
     failure: Option<String>,
+}
+
+struct AutonomousBoundary {
+    proof_root: std::path::PathBuf,
+    candidate_root: std::path::PathBuf,
+    signal: authority::AuthorityTransitionSignal,
 }
 
 /// Transport-only bounded scan of immutable originals. At most one historical
@@ -951,6 +1024,78 @@ enum RetryFrame {
 }
 
 impl PosyService {
+    fn publish_autonomous_successor(&self) -> Result<(), String> {
+        let Some(owner) = self.autonomous_boundary.as_ref() else {
+            return Ok(());
+        };
+        if !self.driver.state_machine().epoch_complete() {
+            return Ok(());
+        }
+        let height = self
+            .authority
+            .epoch
+            .epoch_end_height
+            .checked_sub(2)
+            .ok_or("autonomous boundary height underflow")?;
+        let Some((executed, world)) = self.ingress.processing_finalized_world()? else {
+            return Ok(());
+        };
+        if executed < height {
+            return Ok(());
+        }
+        if executed != height {
+            return Err("execution crossed an unpublished autonomous epoch".into());
+        }
+        let (record, witness) = committed_recovery_witness(
+            height,
+            &self.authority,
+            &self.certificates,
+            &self.timeout_certificates,
+            self.finality
+                .as_ref()
+                .ok_or("autonomous boundary has no finality store")?,
+        )?;
+        // The two certified tail Worlds still belong to the predecessor.
+        // Let its Execution owner finish and authenticate the exact terminal
+        // parent before releasing its journal and rebinding the runtime.
+        let Some(terminal) = self.ingress.processing_certified_parent()? else {
+            return Ok(());
+        };
+        let last_qc = &witness.quorum_certificates[2];
+        if terminal.height < last_qc.context.height {
+            return Ok(());
+        }
+        if terminal.height != last_qc.context.height
+            || terminal.block_id != last_qc.block_id
+            || terminal.protected_execution_root != last_qc.protected_execution_root
+        {
+            return Err("autonomous successor has another certified execution parent".into());
+        }
+        let store = synergy_execution::BudgetedCandidateStore::new_budgeted(
+            &owner.candidate_root,
+            Arc::clone(self.ingress.world_budget()),
+        )?;
+        let candidate = match store.get_budgeted(height) {
+            Ok(Some(candidate)) => candidate,
+            Err(synergy_execution::CandidateResourceError::Resource(
+                synergy_state::world_resources::WorldResourceError::Capacity { .. },
+            )) => return Ok(()),
+            Ok(None) => return Err("autonomous boundary lacks its executed candidate".into()),
+            Err(error) => return Err(error.to_string()),
+        };
+        if candidate.state.as_ref().as_ref() != world.as_ref().as_ref() {
+            return Err("autonomous boundary candidate differs from committed World".into());
+        }
+        let epoch = authority::recovery::successor::persist_native_successor(
+            &owner.proof_root,
+            &self.authority,
+            record,
+            witness,
+            &candidate,
+        )?;
+        owner.signal.stage(epoch)
+    }
+
     fn retry_payload(&mut self, slot: (u64, u64, u8)) -> Result<Vec<u8>, String> {
         let (summary, fingerprint) = match self.retry_frames.get(&slot) {
             Some(RetryFrame::Bytes(bytes)) => return Ok(bytes.clone()),
@@ -3710,6 +3855,7 @@ impl ManagedService for PosyService {
         self.drain_deferred_sync()?;
         #[cfg(any(test, feature = "qualification-timing"))]
         operation_trace.completed("deferred-sync");
+        self.publish_autonomous_successor()?;
         self.retry_delivery()?;
         #[cfg(any(test, feature = "qualification-timing"))]
         operation_trace.completed("retry-delivery");

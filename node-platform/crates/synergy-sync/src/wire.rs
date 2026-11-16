@@ -371,6 +371,23 @@ pub fn decode_budgeted_candidate_response(
     bytes: &[u8],
     budget: &Arc<WorldResourceBudget>,
 ) -> Result<DecodedBudgetedSync<BudgetedFinalizedCandidateResponse>, SyncResourceError> {
+    decode_candidate_response(bytes, budget, None)
+}
+
+pub fn decode_budgeted_epoch_candidate_response(
+    bytes: &[u8],
+    budget: &Arc<WorldResourceBudget>,
+    height: u64,
+    subject_root: &str,
+) -> Result<DecodedBudgetedSync<BudgetedFinalizedCandidateResponse>, SyncResourceError> {
+    decode_candidate_response(bytes, budget, Some((height, subject_root)))
+}
+
+fn decode_candidate_response(
+    bytes: &[u8],
+    budget: &Arc<WorldResourceBudget>,
+    epoch_closure: Option<(u64, &str)>,
+) -> Result<DecodedBudgetedSync<BudgetedFinalizedCandidateResponse>, SyncResourceError> {
     let mut metadata = scanner_reservation(bytes, budget)?;
     let candidate = required_field(bytes, JsonObjectField::Candidate, budget)?;
     let request = required_field(bytes, JsonObjectField::Request, budget)?;
@@ -406,7 +423,18 @@ pub fn decode_budgeted_candidate_response(
     {
         return Err(decode_error("processing replay exceeds transport bound"));
     }
-    let candidate = decode_budgeted_candidate(candidate, budget)?;
+    let candidate = match epoch_closure {
+        Some((height, subject_root)) if envelope.request.height == height => {
+            synergy_execution::decode_budgeted_epoch_close_candidate(
+                candidate,
+                budget,
+                height,
+                subject_root,
+            )?
+        }
+        Some(_) => return Err(decode_error("epoch closure differs from solicited height")),
+        None => decode_budgeted_candidate(candidate, budget)?,
+    };
     metadata.resize(owned)?;
     Ok(DecodedBudgetedSync {
         value: FinalizedCandidateResponse {

@@ -447,14 +447,96 @@ def apply(root, stage, expected, successor=False):
                 'services_started':False,'vpn_reset':False}
 
 
+def apply_autonomous(root, stage, artifact_sha, package_sha):
+    """Commit the exact one-time bootstrap, preserving signed network inputs."""
+    life._require_operator()
+    require(root not in (stage, *stage.parents) and stage not in root.parents,
+            'autonomous stage must be outside the installation')
+    require_frozen_tree(stage)
+    require({p.name for p in stage.iterdir()} == {'bootstrap.json'},
+            'use an exact one-file autonomous staging directory')
+    require(all(re.fullmatch('[0-9a-f]{64}', value or '')
+                for value in (artifact_sha,package_sha)), 'independent artifact and package pins required')
+    marker=root/life.AUTONOMOUS_EPOCH_INTENT
+    artifact=root/life.AUTONOMOUS_EPOCH_ARTIFACT
+    with life._lifecycle_lock(root):
+        receipt,_=life._sealed_receipt(root)
+        require(receipt.get('package_sha256')==package_sha and receipt.get('chain_id')==99999
+                and receipt.get('role')=='validator','installed package or activation scope mismatch')
+        require(not any((root/name).exists() or (root/name).is_symlink()
+                for name in (life.UPGRADE_INTENT,life.REPLACEMENT_INTENT,life.AUTHORITY_RECOVERY_INTENT)),
+                'finish other lifecycle intent first')
+        life._reject_installation_mounts(root)
+        staged=stage/'bootstrap.json'
+        raw=checked(staged)
+        require(sha(raw)==artifact_sha and len(raw)<=4*1024*1024,'staged autonomous artifact differs from pin')
+        config=json.loads(checked(root/CONFIG))
+        policy=json.loads(checked(root/START))
+        require(config.get('chain_id')==99999 and config.get('network_id')==receipt.get('network_id')
+                and policy.get('chain_id')==99999 and policy.get('network_id')==receipt.get('network_id'),
+                'activation targets another runtime')
+        old_pin=sha(checked(root/AUTHORITY))
+        for name in PUBLIC:
+            require(policy.get('public_file_sha256',{}).get(name)==sha(checked(root/'network'/name)),
+                    'signed network inputs differ from startup policy')
+        fact={'format':'synergy-autonomous-epoch-activation-v1','root':str(root),'chain_id':99999,
+              'package_sha256':package_sha,'bootstrap_sha256':artifact_sha,'origin_sha256':old_pin}
+        wanted={'path':str(artifact),'sha256':artifact_sha}
+        prior=checked(marker,optional=True)
+        config_pin=config['consensus'].get('autonomous_epoch_activation')
+        startup_pin=policy.get('autonomous_epoch_activation_sha256')
+        receipt_pin=receipt.get('autonomous_epoch_activation_sha256')
+        installed=checked(artifact,optional=True)
+        if prior is None and config_pin==wanted:
+            life.verify_autonomous_epoch_pin(root,config,receipt,policy)
+            return {'activation_installed':True,'repeated':True,'services_started':False}
+        require(prior is not None or (config_pin is None and startup_pin is None and receipt_pin is None
+                                     and installed is None),'autonomous changes lack a recorded lifecycle intent')
+        require(prior is None or json.loads(prior)==fact,'interrupted activation requires its exact prior pins')
+        require(config_pin in (None,wanted) and startup_pin in (None,artifact_sha)
+                and receipt_pin in (None,artifact_sha) and installed in (None,raw),
+                'installed autonomous inputs differ from authorized intent')
+        stopped(root)
+        proof=json.loads(native([root/'bin/synergy-node','authority-successor','check-autonomous-local',root/CONFIG,staged]))
+        require(proof.get('status')=='autonomous-bootstrap-local-boundary-verified'
+                and proof.get('autonomous_bootstrap_sha256')==artifact_sha
+                and proof.get('previous_authority_sha256')==old_pin and proof.get('epoch')==6
+                and proof.get('finalized',{}).get('height')==22998 and proof.get('activated') is False,
+                'native verifier did not verify exact local autonomous boundary')
+        require(checked(staged)==raw, 'staged activation changed during native verification')
+        if prior is None: life._replace_bytes(root,marker,encode(fact),0o600,artifact_sha)
+        config['consensus']['autonomous_epoch_activation']=wanted
+        policy['autonomous_epoch_activation_sha256']=artifact_sha
+        receipt['autonomous_epoch_activation_sha256']=artifact_sha
+        for name, data in ((life.AUTONOMOUS_EPOCH_ARTIFACT,raw),(CONFIG,encode(config)),
+                           (START,encode(policy)),(RECEIPT,encode(receipt))):
+            path=root/name
+            if checked(path,optional=True)!=data:
+                life._replace_bytes(root,path,data,0o600,artifact_sha)
+        life.verify_autonomous_epoch_pin(root,config,receipt,policy)
+        checked_preflight=json.loads(native([root/'bin/synergy-node','preflight','--config',root/CONFIG]))
+        require(checked_preflight.get('signed_genesis_verified') is True
+                and checked_preflight.get('signed_authority_verified') is True
+                and checked_preflight.get('validator_membership_verified') is True
+                and checked_preflight.get('authority_epoch')==proof['epoch']
+                and checked_preflight.get('authority_context_root')==proof['context_root'],
+                'native preflight rejected installed autonomous activation')
+        marker.unlink();life._sync_directory(marker.parent)
+        return {'activation_installed':True,'repeated':prior is not None,'native_preflight_passed':True,
+                'services_started':False,'vpn_reset':False}
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command',choices=('plan','apply','plan-successor','apply-successor'))
+    parser.add_argument('command',choices=('plan','apply','plan-successor','apply-successor','apply-autonomous'))
     parser.add_argument('--root',required=True);parser.add_argument('--staged',type=Path,required=True)
     parser.add_argument('--plan-sha256')
+    parser.add_argument('--package-sha256')
     args=parser.parse_args();root=safe_root(args.root);stage=args.staged.absolute()
     successor=args.command.endswith('-successor')
-    result=prepare(root,stage,successor) if args.command.startswith('plan') else apply(root,stage,args.plan_sha256,successor)
+    result=(apply_autonomous(root,stage,args.plan_sha256,args.package_sha256) if args.command=='apply-autonomous'
+            else prepare(root,stage,successor) if args.command.startswith('plan')
+            else apply(root,stage,args.plan_sha256,successor))
     print(json.dumps(result,sort_keys=True))
 
 

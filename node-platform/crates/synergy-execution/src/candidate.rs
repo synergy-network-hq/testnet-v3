@@ -106,6 +106,35 @@ pub fn decode_budgeted_candidate(
     bytes: &[u8],
     budget: &Arc<WorldResourceBudget>,
 ) -> Result<BudgetedExecutionCandidate, CandidateResourceError> {
+    decode_candidate(bytes, budget, false)
+}
+
+pub(crate) fn decode_archived_candidate(
+    bytes: &[u8],
+    budget: &Arc<WorldResourceBudget>,
+) -> Result<BudgetedExecutionCandidate, CandidateResourceError> {
+    decode_candidate(bytes, budget, true)
+}
+
+/// Only an authenticated native epoch context may supply this expected subject.
+pub fn decode_budgeted_epoch_close_candidate(
+    bytes: &[u8],
+    budget: &Arc<WorldResourceBudget>,
+    height: u64,
+    subject_root: &str,
+) -> Result<BudgetedExecutionCandidate, CandidateResourceError> {
+    let candidate = decode_archived_candidate(bytes, budget)?;
+    candidate
+        .validate_epoch_close(height, subject_root)
+        .map_err(CandidateResourceError::Decode)?;
+    Ok(candidate)
+}
+
+fn decode_candidate(
+    bytes: &[u8],
+    budget: &Arc<WorldResourceBudget>,
+    archive: bool,
+) -> Result<BudgetedExecutionCandidate, CandidateResourceError> {
     let scanner = bytes
         .len()
         .checked_mul(3)
@@ -156,9 +185,12 @@ pub fn decode_budgeted_candidate(
         state,
     };
     let _root_scratch = budget.reserve(8192)?;
-    candidate
-        .validate()
-        .map_err(CandidateResourceError::Invalid)?;
+    if archive {
+        candidate.validate_archived()
+    } else {
+        candidate.validate()
+    }
+    .map_err(CandidateResourceError::Invalid)?;
     permit.shrink(metadata)?;
     let mut candidate = candidate;
     candidate.resource_permit = Some(Arc::new(permit));
@@ -298,22 +330,33 @@ pub(crate) fn candidate_metadata_charge(bytes: &[u8]) -> Result<usize, Candidate
 impl<W: AsRef<WorldState>> ExecutionCandidate<W> {
     /// Verifies structural, account-root, and canonical block commitments.
     pub fn validate(&self) -> Result<(), String> {
-        self.validate_with_world_size().map(|_| ())
+        let root = hash_block_bytes(
+            &self
+                .protected_material
+                .commitment_bytes()
+                .map_err(|e| format!("encode protected candidate material: {e:?}"))?,
+        );
+        self.validate_committed_body(&root).map(|_| ())
     }
 
     pub(crate) fn validate_with_world_size(&self) -> Result<usize, String> {
         let protected_root = hash_block_bytes(
             &self
                 .protected_material
-                .commitment_bytes()
+                .archived_commitment_bytes()
                 .map_err(|e| format!("encode protected candidate material: {e:?}"))?,
         );
         self.validate_committed_body(&protected_root)
     }
 
-    /// Explicit engineering-only epoch-close validation. Ordinary decode,
-    /// replay, and durable storage still reject this candidate version.
-    pub(crate) fn validate_epoch_close(
+    /// Integrity only; no consensus or processing authority is inferred.
+    pub fn validate_archived(&self) -> Result<(), String> {
+        self.validate_with_world_size().map(|_| ())
+    }
+
+    /// Native epoch-close validation. The subject must come from the
+    /// independently authenticated authority, never the candidate itself.
+    pub fn validate_epoch_close(
         &self,
         expected_height: u64,
         expected_subject: &str,

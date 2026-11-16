@@ -15,7 +15,50 @@ use crate::services::processing_proposals::{
 };
 use std::sync::Mutex;
 use synergy_etdag::execution::ProcessingOrderGroup;
-use synergy_execution::{ProcessingCandidateContext, ProcessingCandidateError};
+use synergy_execution::{
+    ProcessingCandidateContext, ProcessingCandidateError, ProcessingEpochClose,
+};
+
+fn execute_native_processing(
+    scheduler: &BlockExecutionScheduler<CanonicalExecutionDispatcher, TransactionPqvmVerifier>,
+    authority: &VerifiedAuthority,
+    context: ProcessingCandidateContext<'_>,
+    parent: &NativeProcessingParent<'_>,
+    publications: &[synergy_execution::ProcessingReadyRecord],
+    pipeline: &NativeProcessingPipeline<'_>,
+) -> Result<ExecutionCandidate, ProcessingCandidateError> {
+    let subject = authority
+        .epoch_close_subject_at(context.height)
+        .map_err(ProcessingCandidateError::Invalid)?;
+    match subject {
+        Some(subject_root) => {
+            if parent.epoch_transition().is_some() {
+                return Err(ProcessingCandidateError::Invalid(
+                    "closing subject cannot apply an opening processing transition".into(),
+                ));
+            }
+            scheduler.execute_processing_epoch_close(
+                ProcessingEpochClose {
+                    epoch_end_height: authority.epoch.epoch_end_height,
+                    subject_root: &subject_root,
+                },
+                context,
+                parent.world(),
+                publications,
+                pipeline,
+                pipeline,
+            )
+        }
+        None => scheduler.execute_processing_candidate_with_epoch_transition(
+            context,
+            parent.world(),
+            publications,
+            pipeline,
+            pipeline,
+            parent.epoch_transition(),
+        ),
+    }
+}
 
 pub(super) struct ProcessingExecutionState {
     pub(super) store: Arc<Mutex<ProcessingProposalStore>>,
@@ -28,6 +71,48 @@ pub(super) struct PreviousProcessingState {
     pub(super) authority: Arc<VerifiedAuthority>,
     pub(super) store: Arc<Mutex<ProcessingProposalStore>>,
     pub(super) transition: super::super::authority::VerifiedTransitionContext,
+}
+
+impl PreviousProcessingState {
+    pub(super) fn verify_autonomous_startup_replay(
+        &self,
+        finalized_height: u64,
+    ) -> Result<(), String> {
+        if !self.transition.is_autonomous()
+            || finalized_height > self.authority.epoch.epoch_end_height
+        {
+            return Ok(());
+        }
+        let store = self
+            .store
+            .lock()
+            .map_err(|_| "predecessor processing proposal journal lock poisoned")?;
+        for qc in self
+            .transition
+            .certificates()
+            .iter()
+            .filter(|qc| qc.context.height >= finalized_height)
+        {
+            let height = qc.context.height;
+            // This checks the original persisted inputs as well as the
+            // independently authenticated VC, without using either to write state.
+            store
+                .try_with_validation(&qc.block_id, |vc| {
+                    if vc.context.height != height
+                        || vc.candidate.block_id != qc.block_id
+                        || vc.candidate.parent_block_id != qc.parent_block_id
+                        || vc.candidate.protected_execution_root != qc.protected_execution_root
+                    {
+                        return Err("predecessor execution inputs/VC conflict with autonomous QC".into());
+                    }
+                    Ok(())
+                })
+                .map_err(|error| {
+                    format!("autonomous startup requires exact predecessor execution inputs/VC H{height}: {error}")
+                })?;
+        }
+        Ok(())
+    }
 }
 
 impl ProcessingExecutionState {
@@ -135,11 +220,15 @@ mod slot_regression {
             replay_block,
         )
         .unwrap());
-        assert!(processing_build_is_obsolete(replay_tip, request_parent, replay_tip, replay_block)
-            .unwrap_err()
-            .contains("conflicts with execution parent at height 12076"));
-        assert!(!processing_build_is_obsolete(replay_tip, replay_block, replay_tip, replay_block)
-            .unwrap());
+        assert!(
+            processing_build_is_obsolete(replay_tip, request_parent, replay_tip, replay_block)
+                .unwrap_err()
+                .contains("conflicts with execution parent at height 12076")
+        );
+        assert!(
+            !processing_build_is_obsolete(replay_tip, replay_block, replay_tip, replay_block)
+                .unwrap()
+        );
         assert!(!processing_build_is_obsolete(
             replay_tip + 1,
             "requires-next-certified-parent",
@@ -294,27 +383,25 @@ impl ExecutionService {
             return Ok(None);
         };
         let limits = authority.protected_parameters()?;
-        let result = self
-            .scheduler
-            .execute_processing_candidate_with_epoch_transition(
-                ProcessingCandidateContext {
-                    ordered_group: inputs.ordered_group.as_ref(),
-                    height: inputs.context.height,
-                    parent_block_id: inputs.parent.block_id(),
-                    network: &self.network,
-                    consensus_timestamp_unix: authority
-                        .consensus_timestamp_unix(inputs.context.height)?,
-                    namespace_root: &namespace,
-                    maximum_gas: limits.max_protected_gas,
-                    maximum_bytes: limits.max_protected_bytes,
-                    finalized_authorization_state: &self.finalized_state,
-                },
-                parent.world(),
-                &inputs.publications,
-                &pipeline,
-                &pipeline,
-                parent.epoch_transition(),
-            );
+        let result = execute_native_processing(
+            &self.scheduler,
+            authority,
+            ProcessingCandidateContext {
+                ordered_group: inputs.ordered_group.as_ref(),
+                height: inputs.context.height,
+                parent_block_id: inputs.parent.block_id(),
+                network: &self.network,
+                consensus_timestamp_unix: authority
+                    .consensus_timestamp_unix(inputs.context.height)?,
+                namespace_root: &namespace,
+                maximum_gas: limits.max_protected_gas,
+                maximum_bytes: limits.max_protected_bytes,
+                finalized_authorization_state: &self.finalized_state,
+            },
+            &parent,
+            &inputs.publications,
+            &pipeline,
+        );
         let candidate = match result {
             Ok(c) => c,
             Err(e) if retryable(&e) => return Ok(None),
@@ -853,28 +940,26 @@ impl ExecutionService {
                 );
             }
             let group = (!group.members.is_empty() || open).then_some(group);
-            let candidate = match self
-                .scheduler
-                .execute_processing_candidate_with_epoch_transition(
-                    ProcessingCandidateContext {
-                        ordered_group: group.as_ref(),
-                        height: request.context.height,
-                        parent_block_id: request.parent.block_id(),
-                        network: &self.network,
-                        consensus_timestamp_unix: self
-                            .authority
-                            .consensus_timestamp_unix(request.context.height)?,
-                        namespace_root: &namespace,
-                        maximum_gas: limits.max_protected_gas,
-                        maximum_bytes: limits.max_protected_bytes,
-                        finalized_authorization_state: &self.finalized_state,
-                    },
-                    parent.world(),
-                    &publications,
-                    &pipeline,
-                    &pipeline,
-                    parent.epoch_transition(),
-                ) {
+            let candidate = match execute_native_processing(
+                &self.scheduler,
+                self.authority.as_ref(),
+                ProcessingCandidateContext {
+                    ordered_group: group.as_ref(),
+                    height: request.context.height,
+                    parent_block_id: request.parent.block_id(),
+                    network: &self.network,
+                    consensus_timestamp_unix: self
+                        .authority
+                        .consensus_timestamp_unix(request.context.height)?,
+                    namespace_root: &namespace,
+                    maximum_gas: limits.max_protected_gas,
+                    maximum_bytes: limits.max_protected_bytes,
+                    finalized_authorization_state: &self.finalized_state,
+                },
+                &parent,
+                &publications,
+                &pipeline,
+            ) {
                 Ok(c) => Arc::new(c),
                 Err(e) if retryable(&e) => return Ok(()),
                 Err(e) => return Err(e.to_string()),

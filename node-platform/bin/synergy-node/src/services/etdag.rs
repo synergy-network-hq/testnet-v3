@@ -833,6 +833,15 @@ impl LocalEtdagSigner {
         context_root: EtdagDigest,
         vertex_id: EtdagDigest,
     ) -> Result<AvailabilityVote, String> {
+        self.sign_availability_vote_for_epoch(context_root, vertex_id, self.epoch)
+    }
+
+    fn sign_availability_vote_for_epoch(
+        &self,
+        context_root: EtdagDigest,
+        vertex_id: EtdagDigest,
+        source_epoch: u64,
+    ) -> Result<AvailabilityVote, String> {
         let mut vote = AvailabilityVote {
             context_root,
             vertex_id,
@@ -857,7 +866,7 @@ impl LocalEtdagSigner {
                 &SigningContext {
                     domain: "SYNERGY-ETDAG-SIGNATURE-V1".into(),
                     chain_id: self.chain_id,
-                    epoch: Some(self.epoch),
+                    epoch: Some(source_epoch),
                     height: None,
                 },
                 &bytes,

@@ -225,11 +225,8 @@ impl FinalityHistory {
     ) -> Result<Option<synergy_posy::SimplifiedQuorumCertificate>, String> {
         // Select only by signed epoch ranges, then retain the store's complete
         // canonical-record and signature verification under that exact epoch.
-        let selected = if (self.authority.epoch.epoch_start_height
-            ..=self.authority.epoch.epoch_end_height)
-            .contains(&height)
-        {
-            &self.authority
+        let selected = if let Some(selected) = self.authority.authenticated_history_at(height) {
+            selected
         } else if let Some(transition) = &self.transition {
             transition.verify_current(&self.authority)?;
             let previous = transition.previous_authority();
@@ -245,7 +242,12 @@ impl FinalityHistory {
         // RPC/source workers must not share the supervisor's nonblocking engine.
         let authority = super::authority::VerifiedAuthority::worker_context(selected)?;
         store
-            .get_verified(height, &authority.epoch, &authority.registry, authority.as_ref())
+            .get_verified(
+                height,
+                &authority.epoch,
+                &authority.registry,
+                authority.as_ref(),
+            )
             .map_err(|error| error.to_string())
     }
 }
@@ -1997,7 +1999,7 @@ impl AuthenticatedIngress {
         durable: super::processing_proposals::DurableProcessingCandidate,
     ) -> Result<(), String> {
         let (request, candidate) = durable.into_parts();
-        candidate.validate()?;
+        candidate.validate_archived()?;
         if candidate.height != request.context.height
             || !Arc::ptr_eq(candidate.state.budget(), self.world_budget())
             || candidate.parent_block_id != request.parent.block_id()
@@ -2225,6 +2227,22 @@ impl AuthenticatedIngress {
         Ok(())
     }
 
+    pub(super) fn sync_epoch_close_subject(&self, height: u64) -> Result<Option<String>, String> {
+        let history = self
+            .0
+            .lock()
+            .map_err(|_| "runtime pipeline lock poisoned")?
+            .finality_history
+            .clone();
+        let Some(history) = history else {
+            return Ok(None);
+        };
+        match history.authority.autonomous_authority_at(height) {
+            Some(authority) => authority.epoch_close_subject_at(height),
+            None => Ok(None),
+        }
+    }
+
     /// Historical target admission reuses verified durable three-QC evidence,
     /// never a peer height or an unauthenticated cached record after restart.
     pub fn finalized_record(&self, height: u64) -> Result<Option<FinalizedBlockRecord>, String> {
@@ -2256,8 +2274,7 @@ impl AuthenticatedIngress {
             .ok_or("historical finality height overflow")?;
         let mut finality = synergy_posy::ThreeQcFinality::default();
         for certified_height in height..=end {
-            let Some(qc) = history.verified_qc(&qcs, certified_height)?
-            else {
+            let Some(qc) = history.verified_qc(&qcs, certified_height)? else {
                 return Err("historical finality lacks verified three-QC witness".into());
             };
             finality.accept(qc).map_err(|e| e.to_string())?;
@@ -2314,7 +2331,8 @@ impl AuthenticatedIngress {
             .checked_add(2)
             .ok_or("source witness height overflow")?;
         for certified_height in height..=end {
-            let qc = history.verified_qc(&qcs, certified_height)?
+            let qc = history
+                .verified_qc(&qcs, certified_height)?
                 .ok_or("source finality lacks durable verified QC")?;
             finality.accept(qc.clone()).map_err(|e| e.to_string())?;
             witness.push(qc);

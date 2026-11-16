@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use crate::{ServiceObservation, ServiceReadiness, SupervisorError};
@@ -182,6 +182,93 @@ impl Supervisor {
             })?;
         self.states.insert(id.clone(), ServiceState::Restarting);
         self.start_one(id)
+    }
+
+    /// Quiesce only owners that depend on the superseded epoch. The main
+    /// cancellation token and independent transport/listener owners stay live.
+    pub fn stop_for_rebind(
+        &mut self,
+        selected: &BTreeSet<ServiceId>,
+    ) -> Result<(), SupervisorError> {
+        if self.cancellation.is_cancelled() {
+            return Err(SupervisorError::Cancelled);
+        }
+        for id in selected {
+            if self.service_state(id) != Some(ServiceState::Running) {
+                return Err(SupervisorError::InvalidState {
+                    service: id.clone(),
+                    operation: "rebind non-running",
+                });
+            }
+        }
+        for id in self.graph.startup_order() {
+            if !selected.contains(id)
+                && self.graph.spec(id).is_some_and(|spec| {
+                    spec.dependencies
+                        .iter()
+                        .any(|dependency| selected.contains(dependency))
+                })
+            {
+                return Err(SupervisorError::InvalidState {
+                    service: id.clone(),
+                    operation: "leave running during dependency rebind",
+                });
+            }
+        }
+        let order = self.graph.startup_order().to_vec();
+        for id in order.iter().rev().filter(|id| selected.contains(*id)) {
+            self.states.insert(id.clone(), ServiceState::Stopping);
+            if let Err(message) = self
+                .services
+                .get_mut(id)
+                .ok_or_else(|| SupervisorError::ServiceUnavailable(id.clone()))?
+                .stop()
+            {
+                self.states.insert(id.clone(), ServiceState::Failed);
+                return Err(SupervisorError::StopFailed {
+                    service: id.clone(),
+                    message,
+                });
+            }
+            self.states.insert(id.clone(), ServiceState::Stopped);
+        }
+        Ok(())
+    }
+
+    pub fn start_rebound(
+        &mut self,
+        selected: &BTreeSet<ServiceId>,
+        replacements: impl IntoIterator<Item = (ServiceSpec, Box<dyn ManagedService>)>,
+    ) -> Result<(), SupervisorError> {
+        let mut new = BTreeMap::new();
+        for (spec, service) in replacements {
+            if !selected.contains(&spec.id)
+                || self.graph.spec(&spec.id) != Some(&spec)
+                || self.service_state(&spec.id) != Some(ServiceState::Stopped)
+            {
+                return Err(SupervisorError::InvalidState {
+                    service: spec.id,
+                    operation: "replace without matching stopped registration",
+                });
+            }
+            if new.insert(spec.id.clone(), service).is_some() {
+                return Err(SupervisorError::DuplicateService(spec.id));
+            }
+        }
+        for id in selected {
+            if !new.contains_key(id) {
+                return Err(SupervisorError::ServiceUnavailable(id.clone()));
+            }
+        }
+        let order = self.graph.startup_order().to_vec();
+        for id in order.into_iter().filter(|id| selected.contains(id)) {
+            let replacement = new
+                .remove(&id)
+                .ok_or_else(|| SupervisorError::ServiceUnavailable(id.clone()))?;
+            self.services.insert(id.clone(), replacement);
+            self.start_one(&id)?;
+        }
+        Ok(())
     }
 
     pub fn service_state(&self, id: &ServiceId) -> Option<ServiceState> {

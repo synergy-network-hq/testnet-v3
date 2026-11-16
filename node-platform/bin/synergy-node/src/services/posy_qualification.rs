@@ -161,6 +161,7 @@ impl Fleet {
             }
         }
         PosyService {
+            autonomous_boundary: None,
             preparation: None,
             mode: ConsensusMode::ValidateAndVote,
             authority_binding: root.join("unused-test-binding"),
@@ -409,6 +410,7 @@ fn verified_sync_delivery_retains_exact_candidate_under_execution_backpressure()
     // A real native-authority observer needs no signing key to deliver an
     // already verified candidate. No embedded verifier/signer is constructed.
     let mut node = PosyService {
+        autonomous_boundary: None,
         preparation: None,
         mode: ConsensusMode::Observe,
         authority_binding: configuration.consensus.authority_binding.clone().unwrap(),

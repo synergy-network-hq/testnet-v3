@@ -119,6 +119,7 @@ pub(crate) fn qualification_authority_with_provider(
         registry,
         epoch,
         timeout_predecessor: None,
+        autonomous_closure: None,
         anchor_parent: SimplifiedFinalityParent::Genesis {
             genesis_hash: "c".repeat(64),
             block_id: "qualification-genesis".into(),
@@ -180,6 +181,7 @@ pub struct VerifiedAuthority {
     pub anchor_parent: SimplifiedFinalityParent,
     // Only a verified, sequential transition can attach the previous epoch.
     timeout_predecessor: Option<Arc<VerifiedAuthority>>,
+    autonomous_closure: Option<Arc<VerifiedAutonomousClosure>>,
     verifier: PqvmVerifier,
     wallet_verifier: PqvmVerifier,
     identity_verifier: Option<synergy_aegis::ApqeIdentityVerifier>,
@@ -195,6 +197,124 @@ thread_local! {
     static WORKER_AUTHORITY: std::cell::RefCell<Option<(std::sync::Weak<VerifiedAuthority>, Arc<VerifiedAuthority>)>> = const { std::cell::RefCell::new(None) };
 }
 impl VerifiedAuthority {
+    /// Includes verified signed predecessors as well as derived successors.
+    /// This selects historical certificate authority, never a live processing
+    /// namespace or spending policy.
+    pub(super) fn authenticated_history_at(self: &Arc<Self>, height: u64) -> Option<&Arc<Self>> {
+        let mut selected = self;
+        loop {
+            if selected.epoch.contains_height(height) {
+                return Some(selected);
+            }
+            selected = selected.timeout_predecessor.as_ref()?;
+        }
+    }
+    pub(super) fn authenticated_history_ref_at(&self, height: u64) -> Option<&Self> {
+        let mut selected = self;
+        loop {
+            if selected.epoch.contains_height(height) {
+                return Some(selected);
+            }
+            selected = selected.timeout_predecessor.as_deref()?;
+        }
+    }
+    /// Runtime-only descent through authenticated autonomous closures. Never
+    /// treat an unrelated signed authority as part of this processing lineage.
+    pub(super) fn autonomous_processing_origin(&self) -> &Self {
+        let mut authority = self;
+        while authority.autonomous_closure.is_some() {
+            authority = authority
+                .timeout_predecessor
+                .as_deref()
+                .expect("verified autonomous closure has a predecessor");
+        }
+        authority
+    }
+
+    pub(super) fn autonomous_authority_at(&self, height: u64) -> Option<&Self> {
+        self.autonomous_authority_ref_at(height)
+    }
+
+    fn autonomous_authority_ref_at(&self, height: u64) -> Option<&Self> {
+        let mut authority = self;
+        loop {
+            if authority.epoch.contains_height(height) {
+                return Some(authority);
+            }
+            if authority.autonomous_closure.is_none() {
+                return None;
+            }
+            authority = authority.timeout_predecessor.as_deref()?;
+        }
+    }
+
+    pub(super) fn autonomous_authority_arc_at(self: &Arc<Self>, height: u64) -> Option<&Arc<Self>> {
+        let mut authority = self;
+        loop {
+            if authority.epoch.contains_height(height) {
+                return Some(authority);
+            }
+            if authority.autonomous_closure.is_none() {
+                return None;
+            }
+            authority = authority.timeout_predecessor.as_ref()?;
+        }
+    }
+
+    /// Advertise the earliest still-needed certified boundary to a peer that
+    /// cannot verify the current head yet. It derives the successor itself.
+    pub(super) fn next_autonomous_sync_boundary(
+        &self,
+        known_height: Option<u64>,
+    ) -> Option<(&FinalizedBlockRecord, &[SimplifiedQuorumCertificate; 3])> {
+        let mut authority = self;
+        let mut needed = None;
+        while let Some(closure) = authority.autonomous_closure.as_ref() {
+            if known_height.is_some_and(|height| height >= closure.finalized.height) {
+                break;
+            }
+            needed = Some((&closure.finalized, &closure.witness.quorum_certificates));
+            authority = authority.timeout_predecessor.as_deref()?;
+        }
+        needed
+    }
+
+    /// A client must verify this artifact from its independently trusted
+    /// origin. Do not expose proof files that were not authenticated on load.
+    pub(super) fn public_autonomous_proof(
+        &self,
+        epoch: u64,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let mut authority = self;
+        while let Some(closure) = authority.autonomous_closure.as_ref() {
+            if authority.epoch.epoch == epoch {
+                let public = closure
+                    .public
+                    .as_ref()
+                    .ok_or("authenticated epoch proof is not published")?;
+                let bytes = super::apqe_transport::read(&public.path, 4 * 1024 * 1024, false)?;
+                if super::apqe_transport::sha256(&bytes) != public.sha256 {
+                    return Err("published epoch proof changed after authentication".into());
+                }
+                let artifact = String::from_utf8(bytes).map_err(|e| e.to_string())?;
+                return Ok(Some(serde_json::json!({
+                    "chain_id":authority.epoch.chain_id,
+                    "network_id":authority.epoch.network_id,
+                    "epoch":epoch,
+                    "epoch_context_root":authority.epoch.root().map_err(|e| e.to_string())?,
+                    "kind":public.kind,
+                    "sha256":public.sha256,
+                    "artifact_json":artifact,
+                })));
+            }
+            authority = authority
+                .timeout_predecessor
+                .as_deref()
+                .ok_or("authenticated epoch lineage lacks a predecessor")?;
+        }
+        Ok(None)
+    }
+
     /// Independent engines for one long-lived consuming owner. This is
     /// intentionally uncached: registrations run on the same supervisor thread.
     pub(super) fn owner_context(source: &Arc<Self>) -> Result<Arc<Self>, String> {
@@ -263,6 +383,7 @@ impl Clone for VerifiedAuthority {
             epoch: self.epoch.clone(),
             anchor_parent: self.anchor_parent.clone(),
             timeout_predecessor: self.timeout_predecessor.clone(),
+            autonomous_closure: self.autonomous_closure.clone(),
             verifier: self.verifier.clone(),
             wallet_verifier: self.wallet_verifier.clone(),
             identity_verifier: self.identity_verifier.clone(),
@@ -654,6 +775,23 @@ fn read_bounded(path: &std::path::Path, maximum: u64, label: &str) -> Result<Vec
 }
 
 pub fn load(configuration: &NodeConfiguration) -> Result<Option<Arc<VerifiedAuthority>>, String> {
+    let origin = load_signed(configuration)?;
+    match configuration.consensus.autonomous_epoch_activation.as_ref() {
+        None => Ok(origin),
+        Some(activation) => recovery::successor::load_autonomous(
+            configuration,
+            activation,
+            origin.ok_or("autonomous epochs require their authenticated signed origin")?,
+        )
+        .map(Some),
+    }
+}
+
+/// Authenticate the original transport trust document independently of the
+/// current PoSy epoch. It never supplies derived consensus authority.
+pub(super) fn load_signed(
+    configuration: &NodeConfiguration,
+) -> Result<Option<Arc<VerifiedAuthority>>, String> {
     let Some(binding_path) = configuration.consensus.authority_binding.as_ref() else {
         return Ok(None);
     };
@@ -662,11 +800,22 @@ pub fn load(configuration: &NodeConfiguration) -> Result<Option<Arc<VerifiedAuth
     }
     let bytes = read_bounded(binding_path, MAX_AUTHORITY_BYTES, "PoSy authority binding")?;
     let mut authority = verify_binding_bytes(configuration, bytes)?;
-    if let Some(path) = transition_witness_path(configuration, &authority)? {
+    let mut lineage = Vec::new();
+    while let Some(path) = transition_witness_path(configuration, &authority)? {
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(format!("inspect signed authority history: {error}")),
+            Ok(_) => {}
+        }
         // Read the immutable published witness without claiming its writer lock.
         let bytes = read_bounded(&path, 4 * 1024 * 1024, "authority transition witness")?;
         let transition = verify_stored_transition(configuration, &authority, &bytes)?;
-        Arc::make_mut(&mut authority).timeout_predecessor = Some(transition.previous);
+        lineage.push(authority);
+        authority = transition.previous;
+    }
+    for mut current in lineage.into_iter().rev() {
+        Arc::make_mut(&mut current).timeout_predecessor = Some(authority);
+        authority = current;
     }
     Ok(Some(authority))
 }
@@ -683,7 +832,12 @@ pub fn verify_binding_bytes(
     let trust_key = read_bounded(trust_path, MAX_TRUST_KEY_BYTES, "authority trust key")?;
     let binding: SignedAuthorityBinding = serde_json::from_slice(&bytes)
         .map_err(|e| format!("decode authority for trust selection: {e}"))?;
-    if binding.payload.epoch > 1 && configuration.consensus.authority_recovery_certificate_path.is_some() {
+    if binding.payload.epoch > 1
+        && configuration
+            .consensus
+            .authority_recovery_certificate_path
+            .is_some()
+    {
         return recovery::verify_recovered_binding(configuration, bytes);
     }
     verify_binding_with_explicit_key(configuration, bytes, &trust_key)
@@ -786,6 +940,7 @@ fn verify_binding_with_explicit_key(
         registry,
         epoch,
         timeout_predecessor: None,
+        autonomous_closure: None,
         anchor_parent: binding.payload.anchor_parent,
         verifier,
         wallet_verifier: super::apqe_provider::verifier(
@@ -849,9 +1004,30 @@ pub(super) struct VerifiedTransitionContext {
     finalized: FinalizedBlockRecord,
     certificates: [SimplifiedQuorumCertificate; 3],
     current_epoch_root: String,
+    autonomous_closure: Option<Arc<VerifiedAutonomousClosure>>,
+}
+
+#[derive(Debug)]
+struct VerifiedAutonomousClosure {
+    authorization: EpochTransitionAuthorization,
+    finalized: FinalizedBlockRecord,
+    witness: synergy_posy::FinalitySyncWitness,
+    subject_root: String,
+    public: Option<AutonomousProofFile>,
+}
+
+#[derive(Debug)]
+struct AutonomousProofFile {
+    path: std::path::PathBuf,
+    sha256: String,
+    kind: &'static str,
 }
 
 impl VerifiedTransitionContext {
+    pub(super) fn is_autonomous(&self) -> bool {
+        self.autonomous_closure.is_some()
+    }
+
     pub(super) fn previous_authority(&self) -> &Arc<VerifiedAuthority> {
         &self.previous
     }
@@ -871,6 +1047,19 @@ impl VerifiedTransitionContext {
     ) -> Result<(), String> {
         self.verify_current(current)?;
         let previous = self.previous_authority();
+        if let Some(closure) = &self.autonomous_closure {
+            return machine
+                .restore_derived_epoch_transition(
+                    &closure.authorization,
+                    &previous.epoch,
+                    &previous.registry,
+                    closure.finalized.clone(),
+                    closure.witness.clone(),
+                    &closure.subject_root,
+                    previous.as_ref(),
+                )
+                .map_err(|e| format!("restore autonomous epoch finality: {e}"));
+        }
         let authorization = EpochTransitionAuthorization {
             previous_epoch: previous.epoch.epoch,
             previous_epoch_context_root: previous.epoch.root().map_err(|e| e.to_string())?,
@@ -915,6 +1104,18 @@ pub(super) fn load_transition_context(
     configuration: &NodeConfiguration,
     current: &VerifiedAuthority,
 ) -> Result<Option<VerifiedTransitionContext>, String> {
+    if let Some(closure) = &current.autonomous_closure {
+        return Ok(Some(VerifiedTransitionContext {
+            previous: current
+                .timeout_predecessor
+                .clone()
+                .ok_or("derived predecessor missing")?,
+            finalized: closure.finalized.clone(),
+            certificates: closure.witness.quorum_certificates.clone(),
+            current_epoch_root: current.epoch.root().map_err(|e| e.to_string())?,
+            autonomous_closure: Some(Arc::clone(closure)),
+        }));
+    }
     if current.epoch.epoch <= 1 {
         return Ok(None);
     }
@@ -947,9 +1148,12 @@ pub(super) fn transition_witness_path(
     }
     let layout = NodeStorageLayout::new(configuration.storage.data_directory.clone())
         .map_err(|error| format!("construct canonical storage layout: {error}"))?;
-    Ok(Some(layout.consensus().join("authority-transitions").join(
-        format!("epoch-{:020}.json", current.epoch.epoch),
-    )))
+    Ok(Some(
+        layout
+            .consensus()
+            .join("authority-transitions")
+            .join(format!("epoch-{:020}.json", current.epoch.epoch)),
+    ))
 }
 
 /// The transition owner publishes this single immutable witness with
@@ -967,8 +1171,7 @@ pub(super) fn verify_stored_transition(
     }
     let previous = verify_binding_bytes(configuration, stored.previous_authority_binding)?;
     if previous.epoch.epoch.checked_add(1) != Some(current.epoch.epoch)
-        || previous.epoch.epoch_end_height.checked_add(1)
-            != Some(current.epoch.epoch_start_height)
+        || previous.epoch.epoch_end_height.checked_add(1) != Some(current.epoch.epoch_start_height)
     {
         return Err("stored authority transition is not sequential".into());
     }
@@ -994,6 +1197,7 @@ pub(super) fn verify_stored_transition(
         finalized: stored.finalized,
         certificates,
         current_epoch_root: current.epoch.root().map_err(|e| e.to_string())?,
+        autonomous_closure: None,
     })
 }
 
@@ -1005,6 +1209,13 @@ pub fn verify_and_persist_transition(
     next_binding_bytes: Vec<u8>,
     signal: &AuthorityTransitionSignal,
 ) -> Result<Arc<VerifiedAuthority>, String> {
+    if configuration
+        .consensus
+        .autonomous_epoch_activation
+        .is_some()
+    {
+        return Err("signed successor cannot replace the autonomous trust origin".into());
+    }
     let certificates = verify_transition_witness(current, finalized, finality_witness)?;
     let boundary = certificates
         .last()
@@ -1057,12 +1268,20 @@ pub fn verify_and_persist_transition(
     let transition_path = format!("epoch-{:020}.json", next.epoch.epoch);
     let transition_bytes = serde_json::to_vec(&transition)
         .map_err(|error| format!("encode authority transition witness: {error}"))?;
-    if transition_store.exists(&transition_path).map_err(|e| e.to_string())? {
-        if transition_store.read_bounded(&transition_path).map_err(|e| e.to_string())? != transition_bytes {
+    if transition_store
+        .exists(&transition_path)
+        .map_err(|e| e.to_string())?
+    {
+        if transition_store
+            .read_bounded(&transition_path)
+            .map_err(|e| e.to_string())?
+            != transition_bytes
+        {
             return Err("existing authority transition witness conflicts with activation".into());
         }
     } else {
-        transition_store.write_atomic(&transition_path, &transition_bytes)
+        transition_store
+            .write_atomic(&transition_path, &transition_bytes)
             .map_err(|error| format!("persist authority transition witness: {error}"))?;
     }
     persist_binding(configuration, &next_binding_bytes, next.epoch.epoch)?;
@@ -1218,7 +1437,9 @@ impl ConsensusSignatureVerifier for VerifiedAuthority {
             || self.anchor_parent.quorum_certificate_reference().as_ref()
                 != Some(&proof.reference()?)
         {
-            return Err(PosyError::invalid("timeout parent differs from authenticated epoch anchor"));
+            return Err(PosyError::invalid(
+                "timeout parent differs from authenticated epoch anchor",
+            ));
         }
         // The stable QC ID does not commit to signatures. Verify the complete
         // supplied QC, including its actual quorum, using the previous roster.
@@ -1235,7 +1456,13 @@ impl ConsensusSignatureVerifier for VerifiedAuthority {
         signature: &[u8],
     ) -> PosyResult<()> {
         self.verify_consensus_signature_in_epoch(
-            domain, payload, validator, key_id, self.epoch.epoch, epoch, signature,
+            domain,
+            payload,
+            validator,
+            key_id,
+            self.epoch.epoch,
+            epoch,
+            signature,
         )
     }
 }
@@ -1764,6 +1991,73 @@ mod signature_cache_storage_tests {
 mod native_worker_isolation_tests {
     use super::*;
     use synergy_posy::ValidatorStatus;
+    #[test]
+    #[ignore = "requires explicitly authenticated immutable APQE native artifacts"]
+    fn historical_lookup_crosses_multiple_signed_predecessors_without_relabeling_processing() {
+        let provider = synergy_config::ApqeProviderConfiguration {
+            report_path: std::env::var("APQE_TRUSTED_NATIVE_REPORT").unwrap().into(),
+            authenticated_report_sha256: std::env::var("APQE_AUTHENTICATED_REPORT_SHA256").unwrap(),
+        };
+        let engine = super::super::apqe_provider::load_selected(&provider).unwrap();
+        let records = (0..5)
+            .map(|index| {
+                (
+                    ValidatorRecord {
+                        validator_id: format!("history-{index}"),
+                        consensus_key_id: format!("history-key-{index}"),
+                        frozen_voting_weight: 1,
+                        status: ValidatorStatus::Active,
+                    },
+                    vec![1; 32],
+                )
+            })
+            .collect();
+        let oldest = qualification_authority_with_provider(records, Some(engine));
+        let mut middle = oldest.as_ref().clone();
+        middle.epoch.epoch = 2;
+        middle.epoch.epoch_start_height = 10001;
+        middle.epoch.epoch_end_height = 11000;
+        middle.timeout_predecessor = Some(oldest.clone());
+        let middle = Arc::new(middle);
+        let mut current = middle.as_ref().clone();
+        current.epoch.epoch = 3;
+        current.epoch.epoch_start_height = 11001;
+        current.epoch.epoch_end_height = 12000;
+        current.timeout_predecessor = Some(middle);
+        let current = Arc::new(current);
+        assert_eq!(
+            current.authenticated_history_at(9999).unwrap().epoch.epoch,
+            1
+        );
+        assert_eq!(
+            current
+                .authenticated_history_ref_at(10000)
+                .unwrap()
+                .epoch
+                .epoch,
+            1
+        );
+        assert_eq!(
+            current
+                .authenticated_history_ref_at(10001)
+                .unwrap()
+                .epoch
+                .epoch,
+            2
+        );
+        assert_eq!(
+            current
+                .authenticated_history_ref_at(11001)
+                .unwrap()
+                .epoch
+                .epoch,
+            3
+        );
+        assert!(current.authenticated_history_at(0).is_none());
+        assert!(current.authenticated_history_at(12001).is_none());
+        assert!(current.autonomous_authority_at(9999).is_none());
+        assert_eq!(current.autonomous_processing_origin().epoch.epoch, 3);
+    }
     #[test]
     #[ignore = "requires explicitly authenticated immutable APQE native artifacts"]
     fn native_execution_sync_and_ingress_history_verify_with_parent_provider_held() {

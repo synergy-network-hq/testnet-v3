@@ -588,14 +588,17 @@ impl AdmissionHandle {
 
     /// ETDAG owner only: restore observations before publishing any admission context.
     pub fn bind_receipt_journal(&self, root: &Path, namespace: String) -> Result<(), String> {
-        let (journal, restored) = ReceiptJournal::open(root, namespace)?;
         let mut state = self.0.lock().map_err(|_| "admission lock poisoned")?;
-        if !state.pending.is_empty()
-            || !state.processing_pending.is_empty()
-            || state.journal.is_some()
-        {
+        if let Some(journal) = &state.journal {
+            if journal.namespace == namespace && journal.root == root.join(&namespace) {
+                return Ok(());
+            }
+            return Err("cannot replace active receipt journal".into());
+        }
+        if !state.pending.is_empty() || !state.processing_pending.is_empty() {
             return Err("receipt journal already active".into());
         }
+        let (journal, restored) = ReceiptJournal::open(root, namespace)?;
         state.receipts = restored;
         state.journal = Some(Arc::new(journal));
         Ok(())

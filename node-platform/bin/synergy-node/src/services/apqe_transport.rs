@@ -178,8 +178,8 @@ impl Snapshot {
         let (genesis_hash, network) =
             crate::commands::selected_network::verify_with_custody_binding(config)?;
         let genesis_bytes = read(genesis_path, 16 * 1024 * 1024, false)?;
-        let current =
-            authority::load(config)?.ok_or("canary requires authenticated PoSy membership")?;
+        let current = authority::load_signed(config)?
+            .ok_or("canary requires authenticated PoSy membership")?;
         // Successor membership requires the canonical durable finalized transition
         // witness. A freshly root-signed epoch alone cannot activate membership.
         if let Some(witness) = authority::transition_witness_path(config, &current)? {

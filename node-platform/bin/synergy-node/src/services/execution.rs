@@ -1109,6 +1109,9 @@ pub fn registration(
     } else {
         None
     };
+    if let Some(previous) = &previous_processing {
+        previous.verify_autonomous_startup_replay(finalized_height)?;
+    }
     let processing = if authority.processing_profile_enabled() {
         let namespace =
             super::processing_pipeline::processing_namespace(&authority, ingress.world_budget())?;
@@ -1170,7 +1173,7 @@ pub fn registration(
             .get_budgeted(finalized_height)
             .map_err(|error| error.to_string())?
             .ok_or("processing finalized state lacks durable candidate")?;
-        candidate.validate()?;
+        candidate_authority.verify_processing_candidate(&candidate)?;
         if record.block_id != candidate.block_id
             || record.protected_execution_root != candidate.protected_execution_root
             || candidate.state.as_ref().as_ref() != recovered_state.as_ref().as_ref()
@@ -1290,6 +1293,7 @@ pub fn registration(
                 state: recovered_state,
                 finalized_state: finalized_authorization_state,
                 candidate_store,
+                blocks_root: layout.blocks(),
                 sxcp_outbox,
                 qc_store,
                 timeout_store,
@@ -1351,6 +1355,7 @@ struct ExecutionService {
     state: Arc<BudgetedWorld>,
     finalized_state: Arc<BudgetedWorld>,
     candidate_store: CandidateStore,
+    blocks_root: std::path::PathBuf,
     sxcp_outbox: SxcpRelayOutbox,
     qc_store: VerifiedQuorumCertificateStore,
     timeout_store: VerifiedTimeoutCertificateStore,
@@ -1612,7 +1617,6 @@ pub(super) fn load_sync_witness(
     timeout_store: &VerifiedTimeoutCertificateStore,
     height: u64,
 ) -> Result<FinalitySyncWitness, String> {
-    let authority = VerifiedAuthority::worker_context(authority)?;
     let middle = height
         .checked_add(1)
         .ok_or("Sync witness height overflow")?;
@@ -1620,12 +1624,16 @@ pub(super) fn load_sync_witness(
         .checked_add(2)
         .ok_or("Sync witness height overflow")?;
     let qc = |height, missing| {
+        let selected = authority
+            .autonomous_authority_arc_at(height)
+            .ok_or("Sync QC has no authenticated original authority")?;
+        let selected = VerifiedAuthority::worker_context(selected)?;
         qc_store
             .get_verified(
                 height,
-                &authority.epoch,
-                &authority.registry,
-                authority.as_ref(),
+                &selected.epoch,
+                &selected.registry,
+                selected.as_ref(),
             )
             .map_err(|error| format!("load Sync QC witness: {error}"))?
             .ok_or_else(|| String::from(missing))
@@ -1635,14 +1643,33 @@ pub(super) fn load_sync_witness(
         qc(middle, "finalized candidate lacks middle QC witness")?,
         qc(newest, "finalized candidate lacks newest QC witness")?,
     ];
-    FinalitySyncWitness::from_verified_certificates(
-        certificates,
-        timeout_store,
-        &authority.epoch,
-        &authority.registry,
-        authority.as_ref(),
-    )
-    .map_err(|error| format!("assemble Sync lease timeout witness: {error}"))
+    let mut timeouts = BTreeMap::new();
+    for qc in &certificates {
+        let selected = authority
+            .autonomous_authority_arc_at(qc.context.height)
+            .ok_or("Sync takeover has no authenticated original authority")?;
+        let selected = VerifiedAuthority::worker_context(selected)?;
+        for tc in FinalitySyncWitness::collect_verified_timeouts(
+            qc,
+            timeout_store,
+            &selected.epoch,
+            &selected.registry,
+            selected.as_ref(),
+        )
+        .map_err(|error| format!("assemble Sync lease timeout witness: {error}"))?
+        {
+            if timeouts
+                .insert((tc.context.height, tc.context.round), tc.clone())
+                .is_some_and(|existing| existing != tc)
+            {
+                return Err("Sync certificates reference conflicting takeover proofs".into());
+            }
+        }
+    }
+    Ok(FinalitySyncWitness {
+        quorum_certificates: certificates,
+        timeout_certificates: timeouts.into_values().collect(),
+    })
 }
 
 impl ExecutionService {
@@ -1981,6 +2008,12 @@ impl ExecutionService {
                 );
                 continue;
             }
+            let Some(original) = self.authority.autonomous_authority_arc_at(request.height) else {
+                // Old ranges outside retained authenticated history are not
+                // service errors and cannot be used for replay.
+                self.report_sync_candidate(&peer, &request, "authority-unavailable", 0);
+                continue;
+            };
             let candidate = match self.candidate_store.get_budgeted(request.height) {
                 Ok(Some(candidate)) => candidate,
                 Ok(None) => {
@@ -2026,7 +2059,43 @@ impl ExecutionService {
                 );
                 continue;
             }
-            let processing_replay = if let Some(owner) = &self.processing {
+            let processing_replay = if original.epoch.epoch != self.authority.epoch.epoch {
+                let path = super::processing_proposals::epoch_store_path(
+                    &self.blocks_root,
+                    original.epoch.epoch,
+                );
+                if !std::fs::symlink_metadata(&path)
+                    .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+                {
+                    self.report_sync_candidate(
+                        &peer,
+                        &request,
+                        "historical-processing-unavailable",
+                        0,
+                    );
+                    continue;
+                }
+                let budget = self.ingress.world_budget();
+                let original = VerifiedAuthority::worker_context(original)?;
+                let historical = super::processing_proposals::ProcessingProposalStore::open(
+                    &path,
+                    super::processing_pipeline::processing_namespace(&original, budget)?,
+                    budget,
+                    original,
+                )?;
+                match historical.try_export_sync(&candidate.block_id) {
+                    Ok(proof) => Some(proof),
+                    Err(_) => {
+                        self.report_sync_candidate(
+                            &peer,
+                            &request,
+                            "historical-processing-unavailable",
+                            0,
+                        );
+                        continue;
+                    }
+                }
+            } else if let Some(owner) = &self.processing {
                 Some(
                     owner
                         .store

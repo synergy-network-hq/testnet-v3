@@ -176,7 +176,7 @@ try:
    telemetry=json.loads(data).get('result')
    if isinstance(telemetry,dict) and telemetry.get('schema_version')==1:
     commitment=telemetry.get('common_finalized_commitment') or {}
-    if telemetry.get('network_identity')==configuration['network_id'] and telemetry.get('process_id')==int(service['MainPID']) and commitment.get('height')==height and commitment.get('block_id')==observed.get('finalized_block_id') and commitment.get('state_root')==observed.get('state_root'):
+    if telemetry.get('network_identity')==configuration['network_id'] and telemetry.get('chain_id')==configuration['chain_id'] and telemetry.get('genesis_hash')==genesis['genesis_hash'] and telemetry.get('process_id')==int(service['MainPID']) and commitment.get('height')==height and commitment.get('block_id')==observed.get('finalized_block_id') and commitment.get('state_root')==observed.get('state_root'):
      result['chain_telemetry']=telemetry
 except Exception:pass
 # Pruned history cannot establish a chain-wide cumulative transaction count.
@@ -291,11 +291,49 @@ def current_proposer(states):
     return {'address': owners.pop(), 'height': latest[0], 'round': latest[1]}
 
 def active_network(states):
-    ids={v.get('network_id') for v in states.values()}
-    genesis={v.get('genesis_hash') for v in states.values()}
-    if set(states)!=set(range(2,7)) or len(ids)!=1 or not all(isinstance(v,str) and re.fullmatch(r'[A-Za-z0-9._-]{1,256}',v) for v in ids) or len(genesis)!=1 or not all(isinstance(v,str) and re.fullmatch(r'[0-9a-f]{64}',v) for v in genesis):
-        raise ValueError('all five active configurations must identify one selected genesis and network')
-    return next(iter(ids))
+    if set(states)!=set(range(2,7)):
+        raise ValueError('five roster observations are required, including unavailable hosts')
+    verified={}
+    selected=set()
+    for number,state in states.items():
+        if state.get('service',{}).get('SubState')!='running':
+            continue
+        network,genesis=state.get('network_id'),state.get('genesis_hash')
+        if not (isinstance(network,str) and re.fullmatch(r'[A-Za-z0-9._-]{1,256}',network)
+                and isinstance(genesis,str) and re.fullmatch(r'[0-9a-f]{64}',genesis)):
+            raise ValueError('running validator has invalid network or genesis identity')
+        selected.add((network,genesis))
+        native=safe_native_telemetry(state)
+        if (native is not None and native.get('genesis_hash')==genesis
+                and type(native.get('chain_id')) is int and state.get('block')
+                and type(state.get('address')) is str and state['address']):
+            verified[number]=state
+    if len(selected)!=1:
+        raise ValueError('running validators must identify one selected genesis and network')
+    if (len(verified)<4 or len({s['address'] for s in verified.values()})!=len(verified)
+            or len({s['chain_telemetry']['chain_id'] for s in verified.values()})!=1):
+        raise ValueError('at least four distinct running validators must verify the selected chain')
+    network,genesis=next(iter(selected))
+    return network,genesis,verified
+
+
+def roster_observations(states, verified, network, genesis):
+    # Never let retained or foreign inactive data influence live aggregation.
+    result={}
+    for number,state in states.items():
+        if number in verified:
+            result[number]=state
+            continue
+        same_chain=(state.get('network_id'),state.get('genesis_hash'))==(network,genesis)
+        result[number]={
+            'service':state.get('service',{}), 'height':None,'block':None,
+            'wallets':None,'transactions':None,'release_id':None,
+            'observed_at':state.get('observed_at'),
+            'address':state.get('address') if same_chain else None,
+            'vpn_ip':state.get('vpn_ip') if same_chain else None,
+        }
+    return result
+
 
 def baseline_status(report, states, network_id, now):
     empty={'status':'pending','label':'No completed TPS baseline reported. Observed rates are not maximum capacity.',
@@ -425,6 +463,14 @@ def run(report=None, once=False, test_plan=None):
     while True:
         with ThreadPoolExecutor(max_workers=5) as pool:
             states = dict(pool.map(read, [(n, transaction_cursors.get(n), anchor_height) for n in range(2,7)]))
+        try:
+            network_id,genesis_hash,verified=active_network(states)
+        except ValueError as error:
+            print(json.dumps({"telemetry_unverified":str(error)}),flush=True)
+            if once:raise
+            time.sleep(10)
+            continue
+        states=roster_observations(states,verified,network_id,genesis_hash)
         for n, state in states.items():
             cursor = state.pop('_transaction_cursor', None)
             if cursor is not None:
@@ -454,17 +500,16 @@ def run(report=None, once=False, test_plan=None):
             throughput_peaks[n] = peak
         now = datetime.datetime.now(datetime.timezone.utc)
         timestamp = now.isoformat()
-        try:network_id=active_network(states)
-        except ValueError as error:
-            print(json.dumps({"telemetry_unverified":str(error)}),flush=True);time.sleep(10);continue
         healthy = [(n,s) for n,s in states.items() if s['block']]
         tip_n, tip_state = max(healthy,key=lambda pair:pair[1]['height'],default=(None,None))
         height = tip_state['height'] if tip_state else None
         speed = None
+        if previous and (network_id,genesis_hash)!=(previous[2],previous[3]):
+            previous=None
         if previous and height is not None and height>previous[1]:
             speed = (now.timestamp()-previous[0])*1000/(height-previous[1])
         if height is not None and (not previous or height>previous[1]):
-            previous = (now.timestamp(),height)
+            previous = (now.timestamp(),height,network_id,genesis_hash)
         nodes = []
         for n,s in states.items():
             gap = height-s['height'] if height is not None and s['block'] else None
@@ -476,7 +521,6 @@ def run(report=None, once=False, test_plan=None):
             native=safe_native_telemetry(s)
 
             nodes.append({'id':f'val{n}','address':s.get('address'),'public_ip':ips[n],'vpn_ip':s.get('vpn_ip'),'status':status,'height':s['height'] if s['block'] else None,'finalized_height':s['height'] if s['block'] else None,'gap':gap,'peers':authenticated_peer_count(s),'updated_at':s.get('observed_at'),'error':status_error,'finalized_block_id':b.get('block_hash'),'state_root':b.get('state_root'),'service_pid':int(s['service'].get('MainPID',0)),'restarts':int(s['service'].get('NRestarts',0)),'release_id':s['release_id']})
-        genesis_hash=next(iter(states.values())).get('genesis_hash')
         tests=live_canary_checks(network_id,genesis_hash,nodes,timestamp,states)
         if test_plan:
             plan=json.loads(test_plan.read_bytes())

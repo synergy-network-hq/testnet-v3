@@ -1037,10 +1037,19 @@ impl CompletedCandidate {
         }
         let response = match self.payload {
             CompletedCandidatePayload::Raw(bytes) => {
-                match synergy_sync::decode_budgeted_candidate_response(
-                    &bytes,
-                    ingress.world_budget(),
-                ) {
+                let decoded = match ingress.sync_epoch_close_subject(self.request.height)? {
+                    Some(root) => synergy_sync::decode_budgeted_epoch_candidate_response(
+                        &bytes,
+                        ingress.world_budget(),
+                        self.request.height,
+                        &root,
+                    ),
+                    None => synergy_sync::decode_budgeted_candidate_response(
+                        &bytes,
+                        ingress.world_budget(),
+                    ),
+                };
+                match decoded {
                     Ok(decoded) => {
                         let (response, metadata) = decoded.into_parts();
                         FinalizedCandidateResponse {
@@ -1259,6 +1268,46 @@ impl SyncService {
                 .get(peer)
                 .is_some_and(|(current, _)| current == session)
         });
+        // A peer still on a previous authority cannot authenticate our tip.
+        // Send the next terminal three-QC proof under keys it already has.
+        let mut current_recipients = Vec::new();
+        for (peer_id, (session, known)) in peers {
+            let boundary = self
+                .authority
+                .as_ref()
+                .and_then(|authority| authority.next_autonomous_sync_boundary(known));
+            let Some((terminal, certificates)) = boundary else {
+                current_recipients.push((peer_id, (session, known)));
+                continue;
+            };
+            if self.advertised.get(&peer_id) == Some(&(session, terminal.height)) {
+                continue;
+            }
+            let claim = HeadClaim {
+                peer_id: self.local_peer_id.clone(),
+                chain_id: self.manifest.chain_id,
+                genesis_hash: self.manifest.genesis_hash.clone(),
+                finalized_height: terminal.height,
+                finalized_hash: terminal.block_id.clone(),
+                finality_evidence_id: terminal.finality_certificate_id.clone(),
+                finality_witness: Some(
+                    serde_json::to_vec(certificates).map_err(|e| e.to_string())?,
+                ),
+            };
+            self.outbox.publish(
+                &self.ingress,
+                OutboundFrame {
+                    peer_id: peer_id.clone(),
+                    protocol: ProtocolKind::Sync,
+                    payload: serde_json::to_vec(&SyncWireMessage::Head(claim))
+                        .map_err(|e| e.to_string())?,
+                },
+            )?;
+            self.advertised.insert(peer_id, (session, terminal.height));
+            if self.outbox.has_pending() {
+                return Ok(());
+            }
+        }
         let needs_head = |peer: &String, session: SessionId, height: u64| {
             !self
                 .advertised
@@ -1267,7 +1316,7 @@ impl SyncService {
                     *sent_session == session && *sent_height >= height
                 })
         };
-        let recipients: Vec<_> = peers
+        let recipients: Vec<_> = current_recipients
             .into_iter()
             .filter(|(peer, (session, _))| needs_head(peer, *session, tip.height))
             .collect();
@@ -1612,6 +1661,14 @@ impl SyncService {
         &mut self,
         authenticated: &BTreeSet<String>,
     ) -> Result<bool, String> {
+        if self
+            .configuration
+            .consensus
+            .autonomous_epoch_activation
+            .is_some()
+        {
+            return Ok(false);
+        }
         let Some(authority) = self.authority.as_ref() else {
             return Ok(false);
         };

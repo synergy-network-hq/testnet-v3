@@ -79,7 +79,11 @@ pub(super) fn processing_namespace(
         "SYNERGY_ETDAG_PROCESSING_NAMESPACE_V1",
         &(
             synergy_etdag::PROCESSING_PROFILE_ID,
-            authority.epoch.root().map_err(err)?,
+            authority
+                .autonomous_processing_origin()
+                .epoch
+                .root()
+                .map_err(err)?,
             authority
                 .protected_ingress_registry()?
                 .root()
@@ -112,7 +116,11 @@ pub(super) fn try_processing_namespace(
         "SYNERGY_ETDAG_PROCESSING_NAMESPACE_V1",
         &(
             synergy_etdag::PROCESSING_PROFILE_ID,
-            authority.epoch.root().map_err(err)?,
+            authority
+                .autonomous_processing_origin()
+                .epoch
+                .root()
+                .map_err(err)?,
             registry.root().map_err(err)?,
         ),
     )
@@ -161,11 +169,31 @@ impl std::ops::Deref for ProcessingSourceWorld<'_> {
 pub(super) struct NativeProcessingContext<'a> {
     context: &'a ProcessingContext,
     authority: &'a VerifiedAuthority,
+    lineage: &'a VerifiedAuthority,
     world: ProcessingSourceWorld<'a>,
     timestamp: u64,
     _permit: WorldResourcePermit,
 }
 impl<'a> NativeProcessingContext<'a> {
+    pub(super) fn with_lineage(mut self, tip: &'a VerifiedAuthority) -> Result<Self, String> {
+        let selected = tip
+            .autonomous_authority_at(self.context.authority.target_height)
+            .ok_or("retained processing source is outside the authenticated lineage")?;
+        if selected.epoch.root().map_err(err)? != self.authority.epoch.root().map_err(err)? {
+            return Err(
+                "retained processing source belongs to another authenticated lineage".into(),
+            );
+        }
+        self.lineage = tip;
+        Ok(self)
+    }
+
+    fn reveal_authority(&self, height: u64) -> Result<&VerifiedAuthority, String> {
+        self.lineage
+            .autonomous_authority_at(height)
+            .ok_or_else(|| "processing reveal lacks its authenticated authority".into())
+    }
+
     pub(super) fn authorization_root(&self) -> String {
         let bytes = self
             .world
@@ -212,6 +240,7 @@ impl<'a> NativeProcessingContext<'a> {
         Ok(Self {
             context,
             authority,
+            lineage: authority,
             timestamp,
             world: ProcessingSourceWorld::Shared(Arc::clone(&candidate.state)),
             _permit: permit,
@@ -274,11 +303,19 @@ impl<'a> NativeProcessingContext<'a> {
                             .ok_or("processing witness overflow")?,
                     )
                     .map_err(err)?;
-                candidate.validate()?;
+                authority
+                    .authenticated_history_ref_at(candidate.height)
+                    .or_else(|| {
+                        transition.map(|historical| historical.previous_authority().as_ref())
+                    })
+                    .ok_or("processing source World lacks its original authority")?
+                    .verify_processing_candidate(candidate)?;
                 let mut finality = ThreeQcFinality::default();
                 for qc in witness {
-                    let original = if authority.epoch.contains_height(qc.context.height) {
-                        authority
+                    let original = if let Some(original) =
+                        authority.authenticated_history_ref_at(qc.context.height)
+                    {
+                        original
                     } else {
                         let previous = transition
                             .ok_or("processing source lacks authenticated historical authority")?;
@@ -322,6 +359,7 @@ impl<'a> NativeProcessingContext<'a> {
         Ok(Self {
             context,
             authority,
+            lineage: authority,
             world: ProcessingSourceWorld::Borrowed(world),
             timestamp,
             _permit: permit,
@@ -593,7 +631,7 @@ impl<'a> NativeProcessingParent<'a> {
                     .ok_or("processing validation proof overflow")?,
             )
             .map_err(err)?;
-        candidate.validate()?;
+        authority.verify_processing_candidate(candidate)?;
         certificate
             .verify(&authority.epoch, &authority.registry, authority)
             .map_err(err)?;
@@ -668,6 +706,16 @@ impl<'a> NativeProcessingParent<'a> {
         }
         let mut verified = Self::verify(candidate, certificate, previous)?;
         let next_namespace = processing_namespace(current, candidate.state.budget())?;
+        if transition.is_autonomous() {
+            if next_namespace != verified.namespace {
+                return Err(
+                    "autonomous processing handoff cannot change its authenticated namespace"
+                        .into(),
+                );
+            }
+            verified.authority = current;
+            return Ok(verified);
+        }
         let epoch_transition = synergy_execution::propose_empty_processing_epoch_transition(
             candidate.state.as_ref().as_ref(),
             &verified.namespace,
@@ -1350,7 +1398,7 @@ impl super::processing_store::ProcessingAdmissionAuthenticator
             self.reveal_parent
                 .ok_or("processing progress lacks exact reveal World")?,
             vc,
-            self.source.authority,
+            self.source.reveal_authority(vc.context.height)?,
             budget,
         )?;
         let permission = parent.reveal_permission_in(&verified, budget)?;
@@ -1512,7 +1560,8 @@ impl NativeProcessingRecovery<'_> {
         let parent = NativeProcessingParent::verify_in(
             self.reveal_parent,
             &evidence.reveal_validation,
-            self.source.authority,
+            self.source
+                .reveal_authority(evidence.reveal_validation.context.height)?,
             budget,
         )?;
         let completion =
@@ -1670,8 +1719,11 @@ impl NativeProcessingRetirement {
         ];
         let mut verified = Vec::with_capacity(3);
         for value in heights {
+            let selected = authority
+                .autonomous_authority_at(value)
+                .ok_or("processing retirement QC lacks its authenticated authority")?;
             verified.push(
-                qcs.get_verified(value, &authority.epoch, &authority.registry, authority)
+                qcs.get_verified(value, &selected.epoch, &selected.registry, selected)
                     .map_err(err)?
                     .ok_or("processing retirement QC is unavailable")?,
             );
@@ -1716,8 +1768,15 @@ impl NativeProcessingRetirement {
             ),
             budget,
         )?;
-        candidate.validate()?;
-        parent.validate()?;
+        authority
+            .autonomous_authority_at(candidate.height)
+            .ok_or("processing retirement candidate lacks its authenticated authority")?
+            .verify_processing_candidate(candidate)?;
+        if let Some(selected) = authority.autonomous_authority_at(parent.height) {
+            selected.verify_processing_candidate(parent)?;
+        } else {
+            parent.validate()?;
+        }
         if parent.height.checked_add(1) != Some(candidate.height)
             || candidate.parent_block_id != parent.block_id
         {
@@ -1725,7 +1784,10 @@ impl NativeProcessingRetirement {
         }
         let mut finality = ThreeQcFinality::default();
         for qc in witness {
-            qc.verify(&authority.epoch, &authority.registry, authority)
+            let selected = authority
+                .autonomous_authority_at(qc.context.height)
+                .ok_or("processing retirement witness lacks its authenticated authority")?;
+            qc.verify(&selected.epoch, &selected.registry, selected)
                 .map_err(err)?;
             finality.accept(qc.clone()).map_err(err)?;
         }

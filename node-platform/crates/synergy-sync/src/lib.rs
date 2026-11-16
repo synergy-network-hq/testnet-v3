@@ -47,9 +47,9 @@ pub use state::{
 };
 pub use status::{SyncPhase, SyncStatus};
 pub use wire::{
-    decode_budgeted_candidate_response, decode_budgeted_sync_wire,
-    BudgetedFinalizedCandidateResponse, BudgetedSyncWireMessage, DecodedBudgetedSync,
-    EpochAuthorityRequest, EpochAuthorityResponse, FinalizedCandidateRequest,
+    decode_budgeted_candidate_response, decode_budgeted_epoch_candidate_response,
+    decode_budgeted_sync_wire, BudgetedFinalizedCandidateResponse, BudgetedSyncWireMessage,
+    DecodedBudgetedSync, EpochAuthorityRequest, EpochAuthorityResponse, FinalizedCandidateRequest,
     FinalizedCandidateResponse, SnapshotChunkRequest, SnapshotChunkResponse, SyncResourceError,
     SyncWireMessage,
 };

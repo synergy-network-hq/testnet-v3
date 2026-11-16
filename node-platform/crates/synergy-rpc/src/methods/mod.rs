@@ -30,6 +30,7 @@ pub const PROCESSING_TRANSACTION_SUBMIT_V1: &str = "synergy_submitProcessingTran
 
 pub const PROTECTED_ADMISSION_CONTEXT_V2: &str = "synergy_getProtectedAdmissionContextV2";
 pub const CHAIN_TELEMETRY: &str = "synergy_chainTelemetry";
+pub const EPOCH_TRANSITION_PROOF_V1: &str = "synergy_getEpochTransitionProofV1";
 
 pub const PROTECTED_ADMISSION_CONTEXT: &str = "synergy_getProtectedAdmissionContext";
 pub const PROTECTED_TRANSACTION_SUBMIT: &str = "synergy_submitProtectedTransaction";
@@ -54,6 +55,7 @@ pub fn method_access(method: &str) -> crate::auth::RpcAccess {
         | PROCESSING_CONTEXT_V1
         | PROCESSING_TRANSACTION_SUBMIT_V1
         | CHAIN_TELEMETRY
+        | EPOCH_TRANSITION_PROOF_V1
         | PROTECTED_TRANSACTION_SUBMIT
         | PROTECTED_ADMISSION_RECEIPT
         | PROTECTED_ADMISSION_STATS => crate::auth::RpcAccess::Public,

@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -26,6 +26,31 @@ use crate::services::{
 
 pub type ServiceRegistration = (ServiceSpec, Box<dyn ManagedService>);
 
+struct RuntimeChannels {
+    ingress: ingress::AuthenticatedIngress,
+    admission: Option<protected_admission::AdmissionHandle>,
+    live_epoch: Arc<AtomicU64>,
+    live_authority: Arc<RwLock<Option<Arc<authority::VerifiedAuthority>>>>,
+}
+
+impl RuntimeChannels {
+    fn new(configuration: &NodeConfiguration) -> Self {
+        Self {
+            ingress: ingress::AuthenticatedIngress::with_world_budget(
+                synergy_state::world_resources::WorldResourceBudget::new(
+                    configuration.storage.world_memory_budget_bytes,
+                ),
+            ),
+            admission: configuration
+                .etdag
+                .enabled
+                .then(protected_admission::AdmissionHandle::default),
+            live_epoch: Arc::new(AtomicU64::new(0)),
+            live_authority: Arc::new(RwLock::new(None)),
+        }
+    }
+}
+
 /// A node whose configuration, lifecycle, and concrete service graph have
 /// passed startup. The caller must retain this value for the process lifetime.
 pub struct StartedNode {
@@ -39,6 +64,7 @@ pub struct StartedNode {
     has_external_services: bool,
     authorized_production_consensus: bool,
     preparation: preparation::Pool,
+    channels: RuntimeChannels,
     #[cfg(feature = "qualification-timing")]
     qualification_timing: Option<crate::services::qualification_timing::QualificationTiming>,
 }
@@ -111,18 +137,75 @@ impl StartedNode {
                     .into(),
             ));
         }
-        let loaded = authority::load(&self.configuration)
+        let autonomous = self
+            .configuration
+            .consensus
+            .autonomous_epoch_activation
+            .is_some();
+        let loaded = if autonomous {
+            let previous = self
+                .channels
+                .live_authority
+                .read()
+                .map_err(|_| StartError::RuntimeViewPoisoned)?
+                .clone()
+                .ok_or_else(|| {
+                    StartError::AuthorityTransition("active predecessor unavailable".into())
+                })?;
+            authority::recovery::successor::load_next_runtime_autonomous(
+                &self.configuration,
+                previous,
+                expected_epoch,
+            )
             .map_err(StartError::AuthorityTransition)?
-            .ok_or_else(|| {
-                StartError::AuthorityTransition(
-                    "persisted successor authority binding is unavailable".into(),
-                )
-            })?;
+        } else {
+            authority::load(&self.configuration)
+                .map_err(StartError::AuthorityTransition)?
+                .ok_or_else(|| {
+                    StartError::AuthorityTransition(
+                        "persisted successor authority binding is unavailable".into(),
+                    )
+                })?
+        };
         if loaded.epoch.epoch != expected_epoch {
             return Err(StartError::AuthorityTransition(format!(
                 "persisted authority epoch {} differs from staged epoch {expected_epoch}",
                 loaded.epoch.epoch
             )));
+        }
+        if autonomous {
+            let selected = ["sync", "etdag", "execution", "posy", "admin-api"]
+                .into_iter()
+                .map(ServiceId::new)
+                .collect::<Result<BTreeSet<_>, _>>()
+                .map_err(StartError::AuthorityTransition)?;
+            self.supervisor
+                .stop_for_rebind(&selected)
+                .map_err(StartError::Supervisor)?;
+            let mut registrations = Vec::new();
+            let authorized = register_builtin_services(
+                &self.configuration,
+                &self.verified_genesis_hash,
+                &self.runtime_view,
+                &mut registrations,
+                self.authority_transition.clone(),
+                self.preparation.handle(),
+                &self.channels,
+                Some(Arc::clone(&loaded)),
+            )?;
+            self.supervisor
+                .start_rebound(&selected, registrations)
+                .map_err(StartError::Supervisor)?;
+            self.authorized_production_consensus = authorized;
+            *self
+                .channels
+                .live_authority
+                .write()
+                .map_err(|_| StartError::RuntimeViewPoisoned)? = Some(loaded);
+            self.channels
+                .live_epoch
+                .store(expected_epoch, Ordering::Release);
+            return self.refresh_runtime_view();
         }
         let report = self.supervisor.shutdown();
         if !report.clean() {
@@ -132,6 +215,7 @@ impl StartedNode {
             .shutdown()
             .map_err(StartError::AuthorityTransition)?;
         self.preparation = preparation::Pool::new().map_err(StartError::AuthorityTransition)?;
+        self.channels = RuntimeChannels::new(&self.configuration);
         let mut registrations = Vec::new();
         self.authorized_production_consensus = false;
         let authorized_production_consensus = register_builtin_services(
@@ -141,6 +225,8 @@ impl StartedNode {
             &mut registrations,
             self.authority_transition.clone(),
             self.preparation.handle(),
+            &self.channels,
+            None,
         )?;
         require_complete_service_set(&self.startup_plan, &registrations)?;
         let mut supervisor = Supervisor::new(registrations).map_err(StartError::Supervisor)?;
@@ -267,6 +353,8 @@ pub fn preflight(config_path: &Path) -> Result<serde_json::Value, String> {
         "signed_genesis_verified": true,
         "genesis_hash": genesis_hash,
         "signed_authority_verified": verified_authority.is_some(),
+        "authority_epoch": verified_authority.as_ref().map(|a| a.epoch.epoch),
+        "authority_context_root": verified_authority.as_ref().map(|a| a.epoch.root()).transpose().map_err(|e| e.to_string())?,
         "startup_plan_verified": true,
         "network_id": configuration.network_id,
         "chain_id": configuration.chain_id,
@@ -341,6 +429,7 @@ pub fn start_with_services(
     let has_external_services = !registrations.is_empty();
     let authority_transition = authority::AuthorityTransitionSignal::default();
     let preparation = preparation::Pool::new().map_err(StartError::AuthorityTransition)?;
+    let channels = RuntimeChannels::new(&configuration);
     let mut lifecycle = LifecycleController::new();
     lifecycle
         .transition(NodeLifecycleState::Configured)
@@ -359,6 +448,8 @@ pub fn start_with_services(
         &mut registrations,
         authority_transition.clone(),
         preparation.handle(),
+        &channels,
+        None,
     )?;
     let startup_plan = build_startup_plan(&configuration)?;
     require_complete_service_set(&startup_plan, &registrations)?;
@@ -403,6 +494,7 @@ pub fn start_with_services(
         has_external_services,
         authorized_production_consensus: authorized_production_consensus && !has_external_services,
         preparation,
+        channels,
         #[cfg(feature = "qualification-timing")]
         qualification_timing,
     })
@@ -415,49 +507,60 @@ fn register_builtin_services(
     registrations: &mut Vec<ServiceRegistration>,
     authority_transition: authority::AuthorityTransitionSignal,
     preparation: preparation::Handle,
+    channels: &RuntimeChannels,
+    rebind: Option<Arc<authority::VerifiedAuthority>>,
 ) -> Result<bool, StartError> {
     let mut authorized_production_consensus = false;
-    let authenticated_ingress = ingress::AuthenticatedIngress::with_world_budget(
-        synergy_state::world_resources::WorldResourceBudget::new(
-            configuration.storage.world_memory_budget_bytes,
-        ),
-    );
-    let wallet_admission = configuration
-        .etdag
-        .enabled
-        .then(protected_admission::AdmissionHandle::default);
-    let verified_authority =
-        authority::load(configuration).map_err(|reason| StartError::ServiceRegistration {
-            service: "authority",
-            reason,
-        })?;
-    push_builtin(
-        registrations,
-        "identity",
-        identity::registration(&configuration.public_identity_path, configuration.role).map_err(
-            |error| StartError::ServiceRegistration {
-                service: "identity",
-                reason: error.to_string(),
-            },
-        )?,
-    )?;
-    let storage_registration = storage::registration(&configuration.storage).map_err(|error| {
-        StartError::ServiceRegistration {
-            service: "storage",
-            reason: error.to_string(),
-        }
-    })?;
-    push_builtin(registrations, "storage", storage_registration)?;
-    push_builtin(
-        registrations,
-        "network",
-        network::registration(configuration, authenticated_ingress.clone()).map_err(|reason| {
-            StartError::ServiceRegistration {
-                service: "network",
+    let authenticated_ingress = &channels.ingress;
+    let wallet_admission = &channels.admission;
+    let rebind_only = rebind.is_some();
+    let verified_authority = match rebind {
+        Some(verified) => Some(verified),
+        None => {
+            authority::load(configuration).map_err(|reason| StartError::ServiceRegistration {
+                service: "authority",
                 reason,
-            }
-        })?,
-    )?;
+            })?
+        }
+    };
+    if !rebind_only {
+        *channels
+            .live_authority
+            .write()
+            .map_err(|_| StartError::RuntimeViewPoisoned)? = verified_authority.clone();
+        if let Some(authority) = &verified_authority {
+            channels
+                .live_epoch
+                .store(authority.epoch.epoch, Ordering::Release);
+        }
+        push_builtin(
+            registrations,
+            "identity",
+            identity::registration(&configuration.public_identity_path, configuration.role)
+                .map_err(|error| StartError::ServiceRegistration {
+                    service: "identity",
+                    reason: error.to_string(),
+                })?,
+        )?;
+        let storage_registration =
+            storage::registration(&configuration.storage).map_err(|error| {
+                StartError::ServiceRegistration {
+                    service: "storage",
+                    reason: error.to_string(),
+                }
+            })?;
+        push_builtin(registrations, "storage", storage_registration)?;
+        push_builtin(
+            registrations,
+            "network",
+            network::registration(configuration, authenticated_ingress.clone()).map_err(
+                |reason| StartError::ServiceRegistration {
+                    service: "network",
+                    reason,
+                },
+            )?,
+        )?;
+    }
     if configuration.etdag.enabled {
         let authority =
             verified_authority
@@ -491,7 +594,7 @@ fn register_builtin_services(
                 })?,
         )?;
     }
-    if configuration.vpn.mode != VpnMode::Disabled {
+    if !rebind_only && configuration.vpn.mode != VpnMode::Disabled {
         push_builtin(
             registrations,
             "vpn",
@@ -512,7 +615,7 @@ fn register_builtin_services(
         sync::registration_with_preparation(
             configuration,
             verified_authority.clone(),
-            authority_transition,
+            authority_transition.clone(),
             authenticated_ingress.clone(),
             Some(preparation.clone()),
         )
@@ -539,7 +642,7 @@ fn register_builtin_services(
         push_builtin(
             registrations,
             "posy",
-            posy::registration_with_preparation(
+            posy::registration_with_authority_transition(
                 configuration,
                 verified_authority
                     .clone()
@@ -549,6 +652,7 @@ fn register_builtin_services(
                     })?,
                 authenticated_ingress.clone(),
                 Some(preparation.clone()),
+                authority_transition,
             )
             .map_err(|reason| StartError::ServiceRegistration {
                 service: "posy",
@@ -559,6 +663,9 @@ fn register_builtin_services(
         // consensus-key possession. Role placement alone cannot set this marker.
         authorized_production_consensus =
             configuration.consensus.mode == ConsensusMode::ValidateAndVote;
+    }
+    if rebind_only {
+        return Ok(authorized_production_consensus);
     }
     if configuration.rpc.enabled {
         let query_store: Arc<dyn synergy_rpc::provider::CanonicalReadProvider> = Arc::new(
@@ -597,6 +704,13 @@ fn register_builtin_services(
                     .map(|authority| rpc::VerifiedRpcNetwork {
                         network_id: authority.epoch.network_id.clone(),
                         epoch: authority.epoch.epoch,
+                        live_epoch: Some(Arc::clone(&channels.live_epoch)),
+                        live_authority: Some(Arc::clone(&channels.live_authority)),
+                        autonomous_bootstrap_sha256: configuration
+                            .consensus
+                            .autonomous_epoch_activation
+                            .as_ref()
+                            .map(|activation| activation.sha256.clone()),
                         genesis_hash: verified_genesis_hash.to_owned(),
                     }),
             )

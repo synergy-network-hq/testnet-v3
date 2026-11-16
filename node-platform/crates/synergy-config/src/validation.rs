@@ -230,6 +230,25 @@ impl NodeConfiguration {
             ));
         }
 
+        if let Some(activation) = &self.consensus.autonomous_epoch_activation {
+            require_absolute(
+                "consensus.autonomous_epoch_activation.path",
+                &activation.path,
+            )?;
+            if self.consensus.mode == ConsensusMode::Disabled
+                || !self.etdag.enabled
+                || activation.sha256.len() != 64
+                || !activation
+                    .sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(invalid(
+                    "consensus.autonomous_epoch_activation",
+                    "requires active consensus, ETDAG, and an exact lowercase SHA-256 pin",
+                ));
+            }
+        }
         if self.consensus.proposal_timeout_ms < 100
             || self.consensus.round_timeout_ms < self.consensus.proposal_timeout_ms
             || self.consensus.max_rounds_behind == 0

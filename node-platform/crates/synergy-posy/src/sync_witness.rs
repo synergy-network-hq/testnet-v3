@@ -114,42 +114,56 @@ impl FinalitySyncWitness {
     ) -> PosyResult<Self> {
         let mut timeouts = BTreeMap::new();
         for qc in &quorum_certificates {
-            qc.verify(epoch, validators, verifier)?;
-            let first = epoch.epoch_start_height
-                + epoch.lease_index(qc.context.height)? * epoch.leader_lease_blocks;
-            let mut last = qc.context.height;
-            let mut expected = qc.takeover_tc_id.clone();
-            for round in (0..qc.context.round).rev() {
-                let mut found = None;
-                for height in (first..=last).rev() {
-                    if let Some(tc) =
-                        store.get_verified(height, round, epoch, validators, verifier)?
-                    {
-                        if Some(tc.id()?) == expected {
-                            found = Some(tc);
-                            break;
-                        }
-                    }
-                }
-                let tc = found.ok_or_else(|| {
-                    PosyError::NotReady(
-                        "Sync witness lacks the referenced lease timeout closure".into(),
-                    )
-                })?;
-                last = tc.context.height;
-                expected = tc.previous_tc_id.clone();
+            for tc in Self::collect_verified_timeouts(qc, store, epoch, validators, verifier)? {
                 timeouts.insert((tc.context.height, tc.context.round), tc);
-            }
-            if expected.is_some() {
-                return Err(PosyError::invalid(
-                    "Sync timeout chain does not start at round zero",
-                ));
             }
         }
         Ok(Self {
             quorum_certificates,
             timeout_certificates: timeouts.into_values().collect(),
         })
+    }
+
+    /// Resolve one QC under its original authority; a three-QC witness that
+    /// spans epochs must not verify any QC or timeout under substituted keys.
+    pub fn collect_verified_timeouts(
+        qc: &SimplifiedQuorumCertificate,
+        store: &VerifiedTimeoutCertificateStore,
+        epoch: &SimplifiedEpochContext,
+        validators: &FrozenValidatorRegistry,
+        verifier: &impl ConsensusSignatureVerifier,
+    ) -> PosyResult<Vec<SimplifiedTimeoutCertificate>> {
+        qc.verify(epoch, validators, verifier)?;
+        let mut timeouts = Vec::new();
+        let first = epoch.epoch_start_height
+            + epoch.lease_index(qc.context.height)? * epoch.leader_lease_blocks;
+        let mut last = qc.context.height;
+        let mut expected = qc.takeover_tc_id.clone();
+        for round in (0..qc.context.round).rev() {
+            let mut found = None;
+            for height in (first..=last).rev() {
+                if let Some(tc) = store.get_verified(height, round, epoch, validators, verifier)? {
+                    if Some(tc.id()?) == expected {
+                        found = Some(tc);
+                        break;
+                    }
+                }
+            }
+            let tc = found.ok_or_else(|| {
+                PosyError::NotReady(
+                    "Sync witness lacks the referenced lease timeout closure".into(),
+                )
+            })?;
+            last = tc.context.height;
+            expected = tc.previous_tc_id.clone();
+            timeouts.push(tc);
+        }
+        if expected.is_some() {
+            return Err(PosyError::invalid(
+                "Sync timeout chain does not start at round zero",
+            ));
+        }
+        Ok(timeouts)
     }
 
     /// Require the complete and exact takeover closure rather than admitting

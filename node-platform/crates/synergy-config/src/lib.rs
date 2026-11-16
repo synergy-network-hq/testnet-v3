@@ -18,7 +18,7 @@ mod update;
 mod validation;
 mod vpn;
 
-pub use consensus::{ConsensusConfiguration, ConsensusMode};
+pub use consensus::{AutonomousEpochActivation, ConsensusConfiguration, ConsensusMode};
 pub use etdag::{EtdagConfiguration, GOVERNED_PROTECTED_LOOKAHEAD};
 pub use loader::{decode, load, ConfigLoadError, MAX_CONFIGURATION_BYTES};
 pub use network::NetworkConfiguration;

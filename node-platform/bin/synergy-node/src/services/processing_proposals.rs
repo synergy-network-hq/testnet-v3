@@ -603,7 +603,7 @@ impl ProcessingProposalStore {
             self.authority.as_ref(),
         )
         .map_err(|e| e.to_string())?;
-        candidate.validate()?;
+        self.authority.verify_processing_candidate(candidate)?;
         if candidate.height != qc.context.height
             || candidate.block_id != qc.block_id
             || candidate.parent_block_id != qc.parent_block_id
@@ -934,7 +934,7 @@ impl ProcessingProposalStore {
         ordered_group: Option<&ProcessingOrderGroup>,
         publications: &[ProcessingReadyRecord],
     ) -> Result<DurableProcessingCandidate, ProcessingProposalError> {
-        candidate.validate()?;
+        self.authority.verify_processing_candidate(&candidate)?;
         if !Arc::ptr_eq(candidate.state.budget(), &self.budget)
             || candidate.height != request.context.height
             || candidate.parent_block_id != request.parent.block_id()
@@ -1524,7 +1524,7 @@ pub(crate) fn verify_checkpoint_replay(
     ) = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
     qc.verify(&authority.epoch, &authority.registry, authority)
         .map_err(|e| e.to_string())?;
-    candidate.validate()?;
+    authority.verify_processing_candidate(candidate)?;
     inputs
         .context
         .validate_against(&authority.epoch)

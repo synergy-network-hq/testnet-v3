@@ -174,6 +174,17 @@ pub enum CandidateProtectedMaterial {
     Processing(ProcessingProposalMaterial),
 }
 impl CandidateProtectedMaterial {
+    /// Structural commitment for archives. This grants no authority to vote
+    /// for an epoch close; the owner must check its subject and active height.
+    pub fn archived_commitment_bytes(&self) -> Result<Vec<u8>, EtdagError> {
+        match self {
+            Self::Processing(material) if material.material_version == 2 => {
+                material.epoch_close_commitment_bytes()
+            }
+            _ => self.commitment_bytes(),
+        }
+    }
+
     pub fn height(&self) -> u64 {
         match self {
             Self::Legacy(material) => material.height,

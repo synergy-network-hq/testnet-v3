@@ -27,6 +27,7 @@ struct Frame {
 struct LiveItem {
     vertex_id: EtdagDigest,
     context_root: EtdagDigest,
+    target_height: u64,
     evidence: ProcessingProgressEvidence,
     votes: BTreeMap<String, AvailabilityVote>,
     // One current-session receipt per frozen member, prepaid by _permit.
@@ -207,8 +208,20 @@ fn finalized_processing_order(
     Ok(true)
 }
 impl LiveVerifier {
+    fn authority_for_target(&self, target: u64) -> Result<&VerifiedAuthority, String> {
+        self.authority
+            .autonomous_authority_at(target)
+            .ok_or_else(|| "processing target lacks its authenticated authority".into())
+    }
+
+    fn target_timestamp(&self, target: u64) -> Result<u64, String> {
+        self.authority_for_target(target)?
+            .consensus_timestamp_unix(target)
+    }
+
     fn context_for_anchor(&self, target: u64) -> Result<ProcessingContext, String> {
-        let source_height = self.authority.protected_source_height(target)?;
+        let authority = self.authority_for_target(target)?;
+        let source_height = authority.protected_source_height(target)?;
         let record = if source_height == 0 {
             None
         } else {
@@ -222,7 +235,7 @@ impl LiveVerifier {
         Ok(ProcessingContext {
             context_version: 1,
             profile_id: synergy_etdag::PROCESSING_PROFILE_ID.into(),
-            authority: self.authority.protected_target(record.as_ref(), target)?.0,
+            authority: authority.protected_target(record.as_ref(), target)?.0,
         })
     }
     fn source<'a>(
@@ -235,10 +248,11 @@ impl LiveVerifier {
         if *context != self.context_for_anchor(context.authority.target_height)? {
             return Err("unknown frozen processing source".into());
         }
+        let authority = self.authority_for_target(context.authority.target_height)?;
         let height = context.authority.source_finalized_height;
         if height == 0 {
             return NativeProcessingContext::verify_in(
-                &self.authority,
+                authority,
                 context,
                 ProcessingSource::Genesis(&self.genesis),
                 budget,
@@ -256,14 +270,14 @@ impl LiveVerifier {
         if candidate.block_id != record.block_id {
             return Err("processing source candidate differs from finalized record".into());
         }
+        let transition = self
+            .transition
+            .as_ref()
+            .filter(|t| t.verify_current(authority).is_ok());
         NativeProcessingContext::verify_owned_finalized_with_transition(
-            &self.authority,
-            context,
-            candidate,
-            &witness,
-            pool,
-            self.transition.as_ref(),
-        )
+            authority, context, candidate, &witness, pool, transition,
+        )?
+        .with_lineage(&self.authority)
     }
     fn parents<'a>(
         &'a self,
@@ -327,10 +341,7 @@ impl ProcessingAdmissionAuthenticator for LiveVerifier {
         // and checks its trusted hash before calling here.
         // New intake and open/recovery always use full native authentication.
         if *context != self.context_for_anchor(context.authority.target_height)?
-            || timestamp
-                != self
-                    .authority
-                    .consensus_timestamp_unix(context.authority.target_height)?
+            || timestamp != self.target_timestamp(context.authority.target_height)?
         {
             return Err("retained processing source differs from frozen native authority".into());
         }
@@ -351,8 +362,7 @@ impl ProcessingAdmissionAuthenticator for LiveVerifier {
         ProcessingAdmissionAuthenticator::verify_retained(
             self,
             context,
-            self.authority
-                .consensus_timestamp_unix(context.authority.target_height)?,
+            self.target_timestamp(context.authority.target_height)?,
             admission,
         )
     }
@@ -493,11 +503,12 @@ impl EtdagService {
         let authorization_root = verifier
             .source(&context, &verifier.scratch)?
             .authorization_root();
+        let owner_epoch = self.authority.autonomous_processing_origin().epoch.epoch;
         let pending = PendingProcessingStore::open(
-            &self.pipeline_root.join(if self.authority.epoch.epoch == 1 {
+            &self.pipeline_root.join(if owner_epoch == 1 {
                 "processing-v1".to_owned()
             } else {
-                format!("processing-v1-epoch-{:020}", self.authority.epoch.epoch)
+                format!("processing-v1-epoch-{owner_epoch:020}")
             }),
             processing_namespace(&self.authority, self.ingress.world_budget())?,
             ProcessingStoreLimits {
@@ -631,6 +642,7 @@ impl EtdagService {
                     LiveItem {
                         vertex_id,
                         context_root: admission.request.context_root.clone(),
+                        target_height: context.authority.target_height,
                         evidence: evidence.clone(),
                         votes: BTreeMap::new(),
                         vertex_holders: BTreeMap::new(),
@@ -718,8 +730,8 @@ impl EtdagService {
                 .context_for_anchor(v.admission.request.envelope.aad.authorization_height),
         )?;
         let timestamp = check(
-            self.authority
-                .consensus_timestamp_unix(context.authority.target_height),
+            work.verifier
+                .target_timestamp(context.authority.target_height),
         )?;
         let source = check(work.verifier.source(&context, &work.verifier.scratch))?;
         // Incoming transport storage already owns the decode. Reserve native
@@ -845,14 +857,6 @@ impl EtdagService {
             ),
         )
         .map_err(|e| format!("{e:?}"))?;
-        SignatureVerifier::verify(
-            self.authority.as_ref(),
-            &vote.validator_id,
-            &vote.key_id,
-            &bytes,
-            &vote.signature,
-        )
-        .map_err(|e| format!("{e:?}"))?;
         let Some(item) = work
             .items
             .values_mut()
@@ -863,6 +867,14 @@ impl EtdagService {
         if vote.context_root != item.context_root {
             return Err("availability vote has another processing source".into());
         }
+        SignatureVerifier::verify(
+            work.verifier.authority_for_target(item.target_height)?,
+            &vote.validator_id,
+            &vote.key_id,
+            &bytes,
+            &vote.signature,
+        )
+        .map_err(|e| format!("{e:?}"))?;
         if item.evidence.availability.is_some() {
             return Ok(());
         }
@@ -1196,9 +1208,16 @@ impl EtdagService {
                 continue;
             };
             if !item.frames.contains_key(&1) {
-                let vote = self
-                    .local_signer
-                    .sign_availability_vote(item.context_root.clone(), item.vertex_id.clone())?;
+                let source_epoch = work
+                    .verifier
+                    .authority_for_target(item.target_height)?
+                    .epoch
+                    .epoch;
+                let vote = self.local_signer.sign_availability_vote_for_epoch(
+                    item.context_root.clone(),
+                    item.vertex_id.clone(),
+                    source_epoch,
+                )?;
                 let frame = self.processing_frame(
                     EtdagNetworkMessage::ProcessingAvailabilityVoteV1(vote.clone()),
                     &item.workspace,
@@ -1731,7 +1750,7 @@ impl EtdagService {
                     let parent = check(NativeProcessingParent::verify(
                         &candidate,
                         evidence.reveal_validation.as_ref().expect("checked VC"),
-                        &self.authority,
+                        check(work.verifier.authority_for_target(candidate.height))?,
                     ))?;
                     let permission = check(parent.reveal_permission(&native))?;
                     let capsule = admission
@@ -1810,7 +1829,7 @@ impl EtdagService {
                                 &SigningContext {
                                     domain: "SYNERGY-ETDAG-SIGNATURE-V1".into(),
                                     chain_id: self.local_signer.chain_id,
-                                    epoch: Some(self.local_signer.epoch),
+                                    epoch: Some(context.authority.epoch),
                                     height: None,
                                 },
                                 &check(message.signing_bytes().map_err(|e| format!("{e:?}")))?,
@@ -1870,7 +1889,7 @@ impl EtdagService {
                 let parent = check(NativeProcessingParent::verify(
                     &candidate,
                     vc,
-                    &self.authority,
+                    check(work.verifier.authority_for_target(candidate.height))?,
                 ))?;
                 let completion = check(NativeProcessingCompletion::decrypt_in(
                     &parent,

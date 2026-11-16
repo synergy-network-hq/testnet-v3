@@ -47,6 +47,281 @@ struct VerifiedDerivedEpoch {
     policy: ProtectedEpochPolicy,
 }
 
+/// A one-time protocol activation on an already certified chain. Its exact
+/// bytes are pinned by the activated configuration; the legacy candidate is
+/// not rewritten to pretend it committed a POSY-00E subject.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AutonomousBootstrap {
+    version: u32,
+    genesis_hash: String,
+    previous_binding_sha256: String,
+    authorization: EpochTransitionAuthorization,
+    finalized: FinalizedBlockRecord,
+    witness: synergy_posy::FinalitySyncWitness,
+}
+
+fn native_autonomous_authority(
+    previous: Arc<VerifiedAuthority>,
+    verified: VerifiedDerivedEpoch,
+    closure: VerifiedAutonomousClosure,
+) -> Arc<VerifiedAuthority> {
+    let mut native = previous.as_ref().clone();
+    native.registry = verified.registry;
+    native.epoch = verified.context;
+    native.anchor_parent = verified.parent;
+    native.protected = Some(Arc::new(verified.policy));
+    native.timeout_predecessor = Some(previous);
+    native.autonomous_closure = Some(Arc::new(closure));
+    Arc::new(native)
+}
+
+pub(crate) fn load_autonomous(
+    configuration: &NodeConfiguration,
+    activation: &synergy_config::AutonomousEpochActivation,
+    origin: Arc<VerifiedAuthority>,
+) -> Result<Arc<VerifiedAuthority>, String> {
+    let bytes = apqe_transport::read(&activation.path, 4 * 1024 * 1024, false)?;
+    let mut authority = attach_public_proof(
+        verify_pinned_bootstrap_bytes(configuration, origin, &activation.sha256, &bytes)?,
+        AutonomousProofFile {
+            path: activation.path.clone(),
+            sha256: activation.sha256.clone(),
+            kind: "bootstrap-v1",
+        },
+    )?;
+
+    let layout = NodeStorageLayout::new(configuration.storage.data_directory.clone())
+        .map_err(|e| e.to_string())?;
+    let root = layout.consensus().join("autonomous-epochs");
+    loop {
+        let epoch = authority
+            .epoch
+            .epoch
+            .checked_add(1)
+            .ok_or("autonomous epoch overflow")?;
+        let path = root.join(format!("epoch-{epoch:020}.json"));
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(format!("read autonomous successor metadata: {error}")),
+            Ok(_) => {}
+        }
+        authority = load_next_autonomous(authority, path)?;
+    }
+    Ok(authority)
+}
+
+fn attach_public_proof(
+    mut authority: Arc<VerifiedAuthority>,
+    proof: AutonomousProofFile,
+) -> Result<Arc<VerifiedAuthority>, String> {
+    let closure = Arc::get_mut(&mut authority)
+        .and_then(|authority| authority.autonomous_closure.as_mut())
+        .and_then(Arc::get_mut)
+        .ok_or("new authority must privately own its verified proof before publication")?;
+    closure.public = Some(proof);
+    Ok(authority)
+}
+
+fn load_next_autonomous(
+    previous: Arc<VerifiedAuthority>,
+    path: std::path::PathBuf,
+) -> Result<Arc<VerifiedAuthority>, String> {
+    let bytes = apqe_transport::read(&path, 4 * 1024 * 1024, false)?;
+    let verified = verify_next_derived_bytes(previous, &bytes)?;
+    attach_public_proof(
+        verified,
+        AutonomousProofFile {
+            path,
+            sha256: apqe_transport::sha256(&bytes),
+            kind: "derived-v1",
+        },
+    )
+}
+
+pub(crate) fn load_next_runtime_autonomous(
+    configuration: &NodeConfiguration,
+    previous: Arc<VerifiedAuthority>,
+    epoch: u64,
+) -> Result<Arc<VerifiedAuthority>, String> {
+    if previous.autonomous_closure.is_none() || previous.epoch.epoch.checked_add(1) != Some(epoch) {
+        return Err("cannot rebind to a nonsequential autonomous successor".into());
+    }
+    let layout = NodeStorageLayout::new(configuration.storage.data_directory.clone())
+        .map_err(|e| e.to_string())?;
+    load_next_autonomous(
+        previous,
+        layout
+            .consensus()
+            .join("autonomous-epochs")
+            .join(format!("epoch-{epoch:020}.json")),
+    )
+}
+
+/// Authenticate exact public bootstrap bytes without publishing or activating them.
+pub(crate) fn verify_pinned_bootstrap_bytes(
+    configuration: &NodeConfiguration,
+    origin: Arc<VerifiedAuthority>,
+    expected_sha256: &str,
+    bytes: &[u8],
+) -> Result<Arc<VerifiedAuthority>, String> {
+    if bytes.is_empty()
+        || bytes.len() > 4 * 1024 * 1024
+        || apqe_transport::sha256(bytes) != expected_sha256
+    {
+        return Err("autonomous activation differs from its approved SHA-256 pin or size bound".into());
+    }
+    let activation = serde_json::from_slice(bytes)
+        .map_err(|e| format!("decode autonomous activation: {e}"))?;
+    verify_autonomous_bootstrap(configuration, origin, activation)
+}
+
+/// Verify one bounded public successor against its already authenticated predecessor.
+pub(crate) fn verify_next_derived_bytes(
+    previous: Arc<VerifiedAuthority>,
+    bytes: &[u8],
+) -> Result<Arc<VerifiedAuthority>, String> {
+    if previous.autonomous_closure.is_none() || bytes.is_empty() || bytes.len() > 4 * 1024 * 1024 {
+        return Err("derived proof lacks an autonomous predecessor or exceeds its size bound".into());
+    }
+    let proof = serde_json::from_slice(bytes).map_err(|e| format!("decode successor proof: {e}"))?;
+    verify_native_successor(previous, proof)
+}
+
+fn verify_autonomous_bootstrap(
+    configuration: &NodeConfiguration,
+    origin: Arc<VerifiedAuthority>,
+    activation: AutonomousBootstrap,
+) -> Result<Arc<VerifiedAuthority>, String> {
+    if activation.version != 1
+        || activation.genesis_hash != crate::commands::selected_network::verify(configuration)?
+        || activation.previous_binding_sha256 != apqe_transport::sha256(origin.binding_bytes())
+        || !origin.processing_profile_enabled()
+    {
+        return Err("autonomous activation differs from the authenticated chain or origin".into());
+    }
+    let policy = origin
+        .protected
+        .as_ref()
+        .ok_or("origin processing policy missing")?;
+    let (subject, policy) = unchanged_successor_subject(&origin.epoch, &origin.registry, policy)?;
+    if subject != activation.authorization {
+        return Err("activation is not the exact unchanged-governance successor".into());
+    }
+    let registry = FrozenValidatorRegistry::new(
+        subject.next_epoch,
+        origin.registry.active().cloned().collect(),
+    )
+    .map_err(|e| e.to_string())?;
+    let subject_root = subject.subject_root_v2().map_err(|e| e.to_string())?;
+    let (context, parent) = subject
+        .derive_from_finalized_subject(
+            &origin.epoch,
+            &origin.registry,
+            &registry,
+            &activation.finalized,
+            &activation.witness,
+            &subject_root,
+            origin.as_ref(),
+        )
+        .map_err(|e| format!("authenticate pinned activation against original quorum: {e}"))?;
+    Ok(native_autonomous_authority(
+        origin,
+        VerifiedDerivedEpoch {
+            context,
+            parent,
+            registry,
+            policy,
+        },
+        VerifiedAutonomousClosure {
+            authorization: subject,
+            finalized: activation.finalized,
+            witness: activation.witness,
+            subject_root,
+            public: None,
+        },
+    ))
+}
+
+fn verify_native_successor(
+    previous: Arc<VerifiedAuthority>,
+    proof: DerivedEpochProof,
+) -> Result<Arc<VerifiedAuthority>, String> {
+    let policy = previous
+        .protected
+        .as_ref()
+        .ok_or("predecessor processing policy missing")?;
+    let verified = verify_derived_epoch_in_scope(
+        &previous.epoch,
+        &previous.registry,
+        policy,
+        previous.as_ref(),
+        &proof,
+    )?;
+    let subject_root = proof
+        .authorization
+        .subject_root_v2()
+        .map_err(|e| e.to_string())?;
+    Ok(native_autonomous_authority(
+        previous,
+        verified,
+        VerifiedAutonomousClosure {
+            authorization: proof.authorization,
+            finalized: proof.finalized,
+            witness: proof.witness,
+            subject_root,
+            public: None,
+        },
+    ))
+}
+
+pub(crate) fn persist_native_successor(
+    root: &Path,
+    current: &Arc<VerifiedAuthority>,
+    finalized: FinalizedBlockRecord,
+    witness: synergy_posy::FinalitySyncWitness,
+    candidate: &synergy_execution::BudgetedExecutionCandidate,
+) -> Result<u64, String> {
+    current.verify_processing_candidate(candidate)?;
+    if candidate.height != finalized.height
+        || candidate.block_id != finalized.block_id
+        || candidate.protected_execution_root != finalized.protected_execution_root
+    {
+        return Err("durable epoch-close candidate differs from finality".into());
+    }
+    let policy = current
+        .protected
+        .as_ref()
+        .ok_or("active processing policy missing")?;
+    let (authorization, _) =
+        unchanged_successor_subject(&current.epoch, &current.registry, policy)?;
+    let epoch = authorization.next_epoch;
+    let proof = DerivedEpochProof {
+        authorization,
+        finalized,
+        witness,
+        closing_material: candidate.protected_material.clone(),
+        next_validators: current.registry.active().cloned().collect(),
+    };
+    let bytes = serde_json::to_vec(&proof).map_err(|e| e.to_string())?;
+    let expected = verify_native_successor(Arc::clone(current), proof)?;
+    let store = AtomicStore::new(root, 4 * 1024 * 1024).map_err(|e| e.to_string())?;
+    let name = format!("epoch-{epoch:020}.json");
+    if store.exists(&name).map_err(|e| e.to_string())? {
+        let stored = store.read_bounded(&name).map_err(|e| e.to_string())?;
+        let decoded = serde_json::from_slice(&stored).map_err(|e| e.to_string())?;
+        let existing = verify_native_successor(Arc::clone(current), decoded)?;
+        if existing.epoch != expected.epoch || existing.anchor_parent != expected.anchor_parent {
+            return Err("durable autonomous successor conflicts with the current closure".into());
+        }
+    } else {
+        store
+            .write_atomic(&name, &bytes)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(epoch)
+}
+
 /// Read-only proof cursor. It cannot return a live authority binding, peer
 /// registry or signing capability. Only a verified closure can advance it.
 struct DerivedEpochVerifier<'a> {
@@ -69,12 +344,13 @@ impl<'a> DerivedEpochVerifier<'a> {
         })
     }
 
-    fn advance(
-        &mut self,
-        proof: &DerivedEpochProof,
-    ) -> Result<SimplifiedFinalityParent, String> {
+    fn advance(&mut self, proof: &DerivedEpochProof) -> Result<SimplifiedFinalityParent, String> {
         let verified = verify_derived_epoch_in_scope(
-            &self.context, &self.registry, &self.policy, self, proof,
+            &self.context,
+            &self.registry,
+            &self.policy,
+            self,
+            proof,
         )?;
         self.context = verified.context;
         self.registry = verified.registry;
@@ -94,7 +370,13 @@ impl ConsensusSignatureVerifier for DerivedEpochVerifier<'_> {
         signature: &[u8],
     ) -> PosyResult<()> {
         self.origin.verify_consensus_signature_in_epoch(
-            domain, payload, validator, key_id, self.context.epoch, epoch, signature,
+            domain,
+            payload,
+            validator,
+            key_id,
+            self.context.epoch,
+            epoch,
+            signature,
         )
     }
 
@@ -106,7 +388,9 @@ impl ConsensusSignatureVerifier for DerivedEpochVerifier<'_> {
         // Closing proofs for derived 1,000-block epochs are confined to the
         // last lease. They cannot include a first-lease boundary parent.
         if self.context != self.origin.epoch || successor != &self.context {
-            return Err(PosyError::invalid("closing proof references another epoch's boundary"));
+            return Err(PosyError::invalid(
+                "closing proof references another epoch's boundary",
+            ));
         }
         self.origin.verify_timeout_boundary_parent(successor, proof)
     }
@@ -129,7 +413,11 @@ fn verify_derived_epoch_in_scope(
     verifier: &impl ConsensusSignatureVerifier,
     proof: &DerivedEpochProof,
 ) -> Result<VerifiedDerivedEpoch, String> {
-    if proof.next_validators.iter().any(|validator| !validator.may_sign_consensus()) {
+    if proof
+        .next_validators
+        .iter()
+        .any(|validator| !validator.may_sign_consensus())
+    {
         return Err("derived epoch proof includes a validator outside the active set".into());
     }
     let next_registry = FrozenValidatorRegistry::new(
@@ -140,8 +428,7 @@ fn verify_derived_epoch_in_scope(
     // Until this consumer can reconstruct an on-chain membership or policy
     // change, qualify only the unchanged governed set. A proof is not an
     // independent source of validator eligibility or consensus parameters.
-    let (expected, next_policy) =
-        unchanged_successor_subject(previous, previous_registry, policy)?;
+    let (expected, next_policy) = unchanged_successor_subject(previous, previous_registry, policy)?;
     if proof.authorization != expected {
         return Err("epoch subject differs from independently derived rollover policy".into());
     }
@@ -152,7 +439,9 @@ fn verify_derived_epoch_in_scope(
             &proof.finalized.protected_execution_root,
             synergy_block::hash_block_bytes,
         )
-        .map_err(|e| format!("epoch closure lacks its exact protected transition subject: {e:?}"))?;
+        .map_err(|e| {
+            format!("epoch closure lacks its exact protected transition subject: {e:?}")
+        })?;
     let (context, parent) = proof
         .authorization
         .derive_from_finalized_subject(
@@ -264,6 +553,38 @@ fn unchanged_successor_subject(
     Ok((subject, next_policy))
 }
 
+impl VerifiedAuthority {
+    pub(crate) fn epoch_close_subject_at(&self, height: u64) -> Result<Option<String>, String> {
+        if self.autonomous_closure.is_none()
+            || height.checked_add(2) != Some(self.epoch.epoch_end_height)
+        {
+            return Ok(None);
+        }
+        let policy = self
+            .protected
+            .as_ref()
+            .ok_or("active processing policy missing")?;
+        let (subject, _) = unchanged_successor_subject(&self.epoch, &self.registry, policy)?;
+        subject
+            .subject_root_v2()
+            .map(Some)
+            .map_err(|e| e.to_string())
+    }
+
+    pub(crate) fn verify_processing_candidate(
+        &self,
+        candidate: &synergy_execution::BudgetedExecutionCandidate,
+    ) -> Result<(), String> {
+        if !self.epoch.contains_height(candidate.height) {
+            return Err("candidate lies outside its authenticated epoch".into());
+        }
+        match self.epoch_close_subject_at(candidate.height)? {
+            None => candidate.validate(),
+            Some(root) => candidate.validate_epoch_close(candidate.height, &root),
+        }
+    }
+}
+
 fn successor_time_policy(
     policy: &ProtectedEpochPolicy,
     first: u64,
@@ -277,14 +598,22 @@ fn successor_time_policy(
     Ok(next)
 }
 
-fn canary_successor_range(chain: u64, epoch: u64, first: u64, last: u64) -> Option<(u64, u64, u64)> {
+fn canary_successor_range(
+    chain: u64,
+    epoch: u64,
+    first: u64,
+    last: u64,
+) -> Option<(u64, u64, u64)> {
     if chain != 99999 {
         return None;
     }
     let expected_first = if epoch == 2 {
         10_001
     } else {
-        epoch.checked_sub(3)?.checked_mul(CANARY_EPOCH_BLOCKS)?.checked_add(20_001)?
+        epoch
+            .checked_sub(3)?
+            .checked_mul(CANARY_EPOCH_BLOCKS)?
+            .checked_add(20_001)?
     };
     let expected_last = if epoch == 2 {
         20_000
@@ -294,7 +623,11 @@ fn canary_successor_range(chain: u64, epoch: u64, first: u64, last: u64) -> Opti
     if (first, last) != (expected_first, expected_last) {
         return None;
     }
-    Some((epoch.checked_add(1)?, last.checked_add(1)?, last.checked_add(CANARY_EPOCH_BLOCKS)?))
+    Some((
+        epoch.checked_add(1)?,
+        last.checked_add(1)?,
+        last.checked_add(CANARY_EPOCH_BLOCKS)?,
+    ))
 }
 
 fn successor_payload(
@@ -334,9 +667,18 @@ fn successor_payload(
 #[cfg(test)]
 #[test]
 fn canary_schedule_preserves_the_signed_bridge_and_continues_in_exact_windows() {
-    assert_eq!(canary_successor_range(99999, 2, 10001, 20000), Some((3, 20001, 21000)));
-    assert_eq!(canary_successor_range(99999, 3, 20001, 21000), Some((4, 21001, 22000)));
-    assert_eq!(canary_successor_range(99999, 4, 21001, 22000), Some((5, 22001, 23000)));
+    assert_eq!(
+        canary_successor_range(99999, 2, 10001, 20000),
+        Some((3, 20001, 21000))
+    );
+    assert_eq!(
+        canary_successor_range(99999, 3, 20001, 21000),
+        Some((4, 21001, 22000))
+    );
+    assert_eq!(
+        canary_successor_range(99999, 4, 21001, 22000),
+        Some((5, 22001, 23000))
+    );
     assert_eq!(canary_successor_range(99999, 3, 20002, 21001), None);
     assert_eq!(canary_successor_range(99999, 3, 20001, 22000), None);
     assert_eq!(canary_successor_range(1266, 3, 20001, 21000), None);
@@ -384,14 +726,27 @@ fn verify_processing_boundary(
         .ok_or("certified terminal execution candidate is unavailable")?;
     let transition =
         verify_stored_transition(config, next, &stored_transition(previous, next, witness)?)?;
+    verify_terminal_processing_parent(config, next, &transition, candidate, &budget)
+}
+
+fn verify_terminal_processing_parent(
+    config: &NodeConfiguration,
+    next: &VerifiedAuthority,
+    transition: &VerifiedTransitionContext,
+    candidate: synergy_execution::BudgetedExecutionCandidate,
+    budget: &Arc<synergy_state::world_resources::WorldResourceBudget>,
+) -> Result<(), String> {
+    let previous = transition.previous_authority();
+    let layout =
+        NodeStorageLayout::new(config.storage.data_directory.clone()).map_err(|e| e.to_string())?;
     let path = epoch_store_path(&layout.blocks(), previous.epoch.epoch);
     if !fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink()) {
         return Err("certified terminal proposal journal is unavailable".into());
     }
     let store = ProcessingProposalStore::open(
         &path,
-        processing_namespace(previous, &budget)?,
-        &budget,
+        processing_namespace(previous, budget)?,
+        budget,
         previous.clone(),
     )?;
     store.with_validation(&candidate.block_id, |certificate| {
@@ -400,7 +755,7 @@ fn verify_processing_boundary(
             certificate,
             previous,
             next,
-            &transition,
+            transition,
         )
         .map(|_| ())
     })
@@ -497,8 +852,8 @@ fn native_terminal_replay_checks_exact_successor_on_existing_canary_evidence() {
             config.storage.world_memory_budget_bytes,
         ),
     );
-    let (_, mut owner) = execution::registration(&config, previous.clone(), ingress.clone())
-        .unwrap();
+    let (_, mut owner) =
+        execution::registration(&config, previous.clone(), ingress.clone()).unwrap();
     ingress
         .submit_finality(
             expected.finalized.clone(),
@@ -514,8 +869,14 @@ fn native_terminal_replay_checks_exact_successor_on_existing_canary_evidence() {
         finality.get(expected.finalized.height).unwrap().as_ref(),
         Some(&expected.finalized)
     );
-    assert!(finality.get(expected.finalized.height + 1).unwrap().is_none());
-    assert!(finality.get(expected.finalized.height + 2).unwrap().is_none());
+    assert!(finality
+        .get(expected.finalized.height + 1)
+        .unwrap()
+        .is_none());
+    assert!(finality
+        .get(expected.finalized.height + 2)
+        .unwrap()
+        .is_none());
     assert!(!root.join("sign-once.json").exists());
 }
 
@@ -623,10 +984,230 @@ fn check_staged_network(
     )
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AutonomousBoundary {
+    finalized: FinalizedBlockRecord,
+    witness: synergy_posy::FinalitySyncWitness,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AutonomousBoundaryInput {
+    Complete(AutonomousBoundary),
+    CertificatesOnly(Witness),
+}
+
+impl AutonomousBoundaryInput {
+    fn into_boundary(self) -> AutonomousBoundary {
+        match self {
+            Self::Complete(boundary) => boundary,
+            Self::CertificatesOnly(boundary) => AutonomousBoundary {
+                finalized: boundary.finalized,
+                witness: synergy_posy::FinalitySyncWitness {
+                    quorum_certificates: boundary.certificates,
+                    timeout_certificates: Vec::new(),
+                },
+            },
+        }
+    }
+}
+
+fn autonomous_bootstrap_cli(
+    configuration: &NodeConfiguration,
+    config_path: &Path,
+    input: &Path,
+    output: Option<&Path>,
+    local: bool,
+) -> Result<(), String> {
+    if output.is_some()
+        && configuration
+            .consensus
+            .autonomous_epoch_activation
+            .is_some()
+    {
+        return Err(
+            "use the authenticated signed epoch-5 origin configuration, before activation".into(),
+        );
+    }
+    let binding_path = configuration
+        .consensus
+        .authority_binding
+        .as_deref()
+        .ok_or("missing signed origin binding path")?;
+    let stamps = [
+        Stamp::capture(config_path)?,
+        Stamp::capture(input)?,
+        Stamp::capture(binding_path)?,
+    ];
+    // The terminal proof authenticates E5 directly against the signed origin.
+    // Do not require or open an earlier local runtime transition journal here.
+    let origin = verify_binding_bytes(
+        configuration,
+        apqe_transport::read(binding_path, MAX_AUTHORITY_BYTES, false)?,
+    )?;
+    if (
+        origin.epoch.chain_id,
+        origin.epoch.epoch,
+        origin.epoch.epoch_start_height,
+        origin.epoch.epoch_end_height,
+    ) != (99999, 5, 22001, 23000)
+    {
+        return Err(
+            "autonomous Canary bootstrap requires signed chain 99999 epoch 5 (H22001–H23000)"
+                .into(),
+        );
+    }
+    // Load only exported public evidence, never open a writable consensus store.
+    let input_bytes = apqe_transport::read(input, 4 * 1024 * 1024, false)?;
+    if let Some(configured) = &configuration.consensus.autonomous_epoch_activation {
+        if sha256(&input_bytes) != configured.sha256 {
+            return Err("candidate activation differs from the committed configuration pin".into());
+        }
+    }
+    let bytes = if output.is_some() {
+        let boundary = serde_json::from_slice::<AutonomousBoundaryInput>(&input_bytes)
+            .map_err(|e| format!("decode exported autonomous boundary: {e}"))?
+            .into_boundary();
+        let policy = origin
+            .protected
+            .as_ref()
+            .ok_or("origin processing policy missing")?;
+        let (authorization, _) =
+            unchanged_successor_subject(&origin.epoch, &origin.registry, policy)?;
+        serde_json::to_vec(&AutonomousBootstrap {
+            version: 1,
+            genesis_hash: crate::commands::selected_network::verify(configuration)?,
+            previous_binding_sha256: sha256(origin.binding_bytes()),
+            authorization,
+            finalized: boundary.finalized,
+            witness: boundary.witness,
+        })
+        .map_err(|e| e.to_string())?
+    } else {
+        input_bytes
+    };
+    if bytes.len() > 4 * 1024 * 1024 {
+        return Err("autonomous bootstrap exceeds its runtime size limit".into());
+    }
+    let activation: AutonomousBootstrap =
+        serde_json::from_slice(&bytes).map_err(|e| format!("decode autonomous bootstrap: {e}"))?;
+    let finalized = activation.finalized.clone();
+    let genesis_hash = activation.genesis_hash.clone();
+    let previous_binding_sha256 = activation.previous_binding_sha256.clone();
+    let next = verify_autonomous_bootstrap(configuration, origin, activation)?;
+    if local {
+        let transition = load_transition_context(configuration, &next)?
+            .ok_or("autonomous boundary lacks its authenticated predecessor")?;
+        require_validator_boundary(
+            configuration,
+            &Witness {
+                finalized: finalized.clone(),
+                certificates: transition.certificates().clone(),
+            },
+        )?;
+        let layout = NodeStorageLayout::new(configuration.storage.data_directory.clone())
+            .map_err(|e| e.to_string())?;
+        let budget = synergy_state::world_resources::WorldResourceBudget::new(
+            configuration.storage.world_memory_budget_bytes,
+        );
+        let candidates = synergy_execution::BudgetedCandidateStore::new_budgeted(
+            layout.blocks().join("execution-candidates"),
+            budget.clone(),
+        )?;
+        let candidate = candidates
+            .get_budgeted(next.anchor_parent.height())
+            .map_err(|e| e.to_string())?
+            .ok_or("autonomous boundary lacks the exact certified tail in durable execution")?;
+        let previous = transition.previous_authority();
+        let qcs = VerifiedQuorumCertificateStore::new(&layout.consensus().join("posy"))
+            .map_err(|e| e.to_string())?;
+        for expected in transition.certificates() {
+            let height = expected.context.height;
+            let local = qcs
+                .get_verified(
+                    height,
+                    &previous.epoch,
+                    &previous.registry,
+                    previous.as_ref(),
+                )
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("autonomous boundary lacks durable QC H{height}"))?;
+            if local.reference().map_err(|e| e.to_string())?
+                != expected.reference().map_err(|e| e.to_string())?
+            {
+                return Err(format!(
+                    "durable QC H{height} differs from the autonomous boundary"
+                ));
+            }
+        }
+        let path = epoch_store_path(&layout.blocks(), previous.epoch.epoch);
+        if !fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink()) {
+            return Err("certified terminal proposal journal is unavailable".into());
+        }
+        let store = ProcessingProposalStore::open(
+            &path,
+            processing_namespace(previous, &budget)?,
+            &budget,
+            previous.clone(),
+        )?;
+        for qc in &transition.certificates()[1..] {
+            let inputs = store
+                .try_load_inputs(&qc.block_id)
+                .map_err(|e| format!("certified proposal inputs H{}: {e}", qc.context.height))?;
+            drop(inputs);
+            store.with_validation(&qc.block_id, |vc| {
+                if vc.context != qc.context
+                    || vc.candidate.block_id != qc.block_id
+                    || vc.candidate.parent_block_id != qc.parent_block_id
+                    || vc.candidate.protected_execution_root != qc.protected_execution_root
+                {
+                    return Err(format!(
+                        "durable proposal H{} differs from its boundary QC",
+                        qc.context.height
+                    ));
+                }
+                if qc.context.height == candidate.height {
+                    NativeProcessingParent::verify_transition(
+                        &candidate,
+                        vc,
+                        previous,
+                        &next,
+                        &transition,
+                    )?;
+                }
+                Ok(())
+            })?;
+        }
+    }
+    if !stamps.iter().all(Stamp::unchanged) {
+        return Err("autonomous bootstrap input changed during verification".into());
+    }
+    let result = serde_json::json!({
+        "status": if local { "autonomous-bootstrap-local-boundary-verified" } else if output.is_some() { "autonomous-bootstrap-prepared" } else { "autonomous-bootstrap-verified" },
+        "autonomous_bootstrap_sha256": sha256(&bytes),
+        "genesis_hash": genesis_hash,
+        "previous_authority_sha256": previous_binding_sha256,
+        "finalized": finalized,
+        "epoch": next.epoch.epoch,
+        "epoch_start_height": next.epoch.epoch_start_height,
+        "epoch_end_height": next.epoch.epoch_end_height,
+        "context_root": next.epoch.root().map_err(|e| e.to_string())?,
+        "certified_parent": next.anchor_parent,
+        "finalized_seed_qc_id": next.epoch.finalized_epoch_seed_root,
+        "activated": false,
+    });
+    if let Some(output) = output {
+        write_public(output, &bytes)?;
+    }
+    println!("{}", crate::output::json::render(&result)?);
+    Ok(())
+}
+
 pub(crate) fn cli(args: impl Iterator<Item = String>) -> Result<(), String> {
     let args: Vec<_> = args.take(10).collect();
     let [command, config, proposal_path, extra @ ..] = args.as_slice() else {
-        return Err("usage: authority-successor check|activate|activate-observer CONFIG PROPOSAL; check-derived|check-derived-chain CONFIG PROOF; export-boundary CONFIG WITNESS; prepare-payload CONFIG WITNESS OUTPUT; bundle CONFIG WITNESS SIGNED_AUTHORITY OUTPUT; check-local CONFIG PROPOSAL; registry CONFIG PROPOSAL CUSTODY OUTPUT; check-network CONFIG PROPOSAL REGISTRY WORKSPACE [ADMISSION]; issue-admission CONFIG PROPOSAL REGISTRY WORKSPACE ENROLLMENT CUSTODY UNLOCK OUTPUT".into());
+        return Err("usage: authority-successor check|activate|activate-observer CONFIG PROPOSAL; check-derived|check-derived-chain CONFIG PROOF; prepare-autonomous CONFIG WITNESS OUTPUT; check-autonomous|check-autonomous-local CONFIG ARTIFACT; export-boundary CONFIG WITNESS; prepare-payload CONFIG WITNESS OUTPUT; bundle CONFIG WITNESS SIGNED_AUTHORITY OUTPUT; check-local CONFIG PROPOSAL; registry CONFIG PROPOSAL CUSTODY OUTPUT; check-network CONFIG PROPOSAL REGISTRY WORKSPACE [ADMISSION]; issue-admission CONFIG PROPOSAL REGISTRY WORKSPACE ENROLLMENT CUSTODY UNLOCK OUTPUT".into());
     };
     let config = Path::new(config);
     if !config.is_absolute() {
@@ -634,13 +1215,49 @@ pub(crate) fn cli(args: impl Iterator<Item = String>) -> Result<(), String> {
     }
     let lock = matches!(
         command.as_str(),
-        "activate" | "activate-observer" | "export-boundary" | "check-local"
+        "activate"
+            | "activate-observer"
+            | "export-boundary"
+            | "check-local"
+            | "check-autonomous-local"
     )
     .then(|| crate::services::checkpoint::lock_configuration(config))
     .transpose()?;
     let configuration = synergy_config::load(config).map_err(|e| e.to_string())?;
+    if configuration
+        .consensus
+        .autonomous_epoch_activation
+        .is_some()
+        && matches!(command.as_str(), "activate" | "activate-observer")
+    {
+        return Err("signed successor cannot replace the configured autonomous origin".into());
+    }
     if lock.is_some() {
         crate::services::checkpoint::require_stopped(config, &configuration.admin_socket_path)?;
+    }
+    match (command.as_str(), extra) {
+        ("prepare-autonomous", [output]) => {
+            return autonomous_bootstrap_cli(
+                &configuration,
+                config,
+                Path::new(proposal_path),
+                Some(Path::new(output)),
+                false,
+            )
+        }
+        ("check-autonomous" | "check-autonomous-local", []) => {
+            return autonomous_bootstrap_cli(
+                &configuration,
+                config,
+                Path::new(proposal_path),
+                None,
+                command == "check-autonomous-local",
+            )
+        }
+        ("prepare-autonomous" | "check-autonomous", _) => {
+            return Err("invalid autonomous bootstrap arguments".into());
+        }
+        _ => {}
     }
     if command == "export-boundary" && extra.is_empty() {
         return export_boundary(&configuration, Path::new(proposal_path));
@@ -667,14 +1284,17 @@ pub(crate) fn cli(args: impl Iterator<Item = String>) -> Result<(), String> {
         for proof in &proofs {
             certified_parent = Some(cursor.advance(proof)?);
         }
-        println!("{}", serde_json::json!({
-            "status": "consensus-derived-context-verified",
-            "context_root": cursor.context.root().map_err(|e| e.to_string())?,
-            "context": cursor.context,
-            "certified_parent": certified_parent,
-            "verified_transitions": proofs.len(),
-            "activated": false,
-        }));
+        println!(
+            "{}",
+            serde_json::json!({
+                "status": "consensus-derived-context-verified",
+                "context_root": cursor.context.root().map_err(|e| e.to_string())?,
+                "context": cursor.context,
+                "certified_parent": certified_parent,
+                "verified_transitions": proofs.len(),
+                "activated": false,
+            })
+        );
         return Ok(());
     }
     if command == "prepare-payload" && extra.len() == 1 {
@@ -852,8 +1472,7 @@ fn signed_derived_test_proof(
             .map(|(index, key)| {
                 let record = &next_validators[index];
                 let mut vote = BlockVote {
-                    context: ConsensusObjectContext::for_height(previous, height, 0)
-                        .unwrap(),
+                    context: ConsensusObjectContext::for_height(previous, height, 0).unwrap(),
                     block_id: format!("{height:064x}"),
                     parent_block_id: parent.block_id().into(),
                     parent: parent.clone(),
@@ -914,19 +1533,31 @@ pub(super) fn qualify_offline_successor(
     // The old validator keys certify each closing subject; no successor
     // authority signature is used for this consecutive-epoch verification.
     let mut cursor = DerivedEpochVerifier::new(previous).unwrap();
-    let validators = signed_previous.payload.validators.iter()
+    let validators = signed_previous
+        .payload
+        .validators
+        .iter()
         .map(|validator| validator.record.clone())
         .collect::<Vec<_>>();
     let next_subject = |cursor: &DerivedEpochVerifier<'_>| {
         unchanged_successor_subject(&cursor.context, &cursor.registry, &cursor.policy)
-            .unwrap().0
+            .unwrap()
+            .0
     };
     let mut derived = signed_derived_test_proof(
-        &cursor.context, next_subject(&cursor), validators.clone(), keys, engine,
+        &cursor.context,
+        next_subject(&cursor),
+        validators.clone(),
+        keys,
+        engine,
     );
     cursor.advance(&derived).unwrap();
     let second = signed_derived_test_proof(
-        &cursor.context, next_subject(&cursor), validators, keys, engine,
+        &cursor.context,
+        next_subject(&cursor),
+        validators,
+        keys,
+        engine,
     );
     assert!(verify_derived_epoch(previous, &second).is_err());
     cursor.advance(&second).unwrap();
@@ -938,9 +1569,18 @@ pub(super) fn qualify_offline_successor(
     let certificates = derived.witness.quorum_certificates.clone();
     let finalized = derived.finalized.clone();
     let (next_context, parent) = verify_derived_epoch(previous, &derived).unwrap();
-    assert_ne!(next_context.consensus_parameter_root, previous.epoch.consensus_parameter_root);
-    assert_eq!(next_context.finalized_epoch_seed_root, certificates[0].id().unwrap());
-    assert_eq!(parent.quorum_certificate_reference().unwrap(), certificates[2].reference().unwrap());
+    assert_ne!(
+        next_context.consensus_parameter_root,
+        previous.epoch.consensus_parameter_root
+    );
+    assert_eq!(
+        next_context.finalized_epoch_seed_root,
+        certificates[0].id().unwrap()
+    );
+    assert_eq!(
+        parent.quorum_certificate_reference().unwrap(),
+        certificates[2].reference().unwrap()
+    );
 
     let closing_material = derived.closing_material.clone();
     let synergy_etdag::execution::CandidateProtectedMaterial::Processing(foreign_material) =
@@ -958,7 +1598,8 @@ pub(super) fn qualify_offline_successor(
     derived.next_validators[0].frozen_voting_weight -= 1;
 
     let saved_root = derived.authorization.next_consensus_parameter_root.clone();
-    derived.authorization.next_consensus_parameter_root = previous.epoch.consensus_parameter_root.clone();
+    derived.authorization.next_consensus_parameter_root =
+        previous.epoch.consensus_parameter_root.clone();
     assert!(verify_derived_epoch(previous, &derived)
         .unwrap_err()
         .contains("independently derived rollover policy"));
@@ -971,7 +1612,10 @@ pub(super) fn qualify_offline_successor(
     let mut candidate = signed_previous.clone();
     candidate.payload =
         successor_payload(signed_previous.payload.clone(), &certificates[2]).unwrap();
-    assert_eq!(candidate.payload.consensus_parameter_root, next_context.consensus_parameter_root);
+    assert_eq!(
+        candidate.payload.consensus_parameter_root,
+        next_context.consensus_parameter_root
+    );
     let sign = |payload: &AuthorityPayload| {
         signer
             .sign(

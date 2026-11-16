@@ -4,10 +4,12 @@
 use super::{
     apqe_rpc::{self, Admission, MAX_BODY},
     apqe_transport as transport,
+    authority::{self, recovery::successor, VerifiedAuthority},
 };
 use serde::Deserialize;
 use serde_json::{json, value::RawValue};
 use std::{
+    borrow::Cow,
     io::{Read, Write},
     net::{IpAddr, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
@@ -28,11 +30,13 @@ use synergy_address_engine::{
 };
 use synergy_config::NodeConfiguration;
 use synergy_protocol_types::NodeRole;
+use synergy_rpc::methods::{CHAIN_TELEMETRY, EPOCH_TRANSITION_PROOF_V1};
 
 const HEADER_MAX: usize = 8192;
 const TIMEOUT: Duration = Duration::from_secs(3);
 const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const WORKERS: usize = 4;
+const MAX_EPOCH_PROOFS_PER_REQUEST: usize = 4;
 const TELEMETRY: &[u8] =
     br#"{"jsonrpc":"2.0","method":"synergy_chainTelemetry","params":{},"id":1}"#;
 
@@ -61,6 +65,8 @@ enum Role {
         custody_path: PathBuf,
         custody_unlock_path: PathBuf,
         allowed_origins: Vec<String>,
+        #[serde(default)]
+        autonomous_bootstrap_sha256: Option<String>,
     },
 }
 
@@ -86,6 +92,7 @@ struct Validator {
     worker: TransportWorker,
     local: String,
     upstream: SocketAddr,
+    autonomous_bootstrap_sha256: Option<String>,
 }
 
 struct Gateway {
@@ -94,6 +101,55 @@ struct Gateway {
     validator: String,
     peer: SocketAddr,
     origins: Vec<String>,
+    epoch_trust: Option<GatewayEpochTrust>,
+}
+
+/// One independent native verifier per relay worker. Only the small verified
+/// high-water mark is shared; neither native verification nor I/O takes its lock.
+struct GatewayEpochTrust {
+    config: Arc<NodeConfiguration>,
+    pin: String,
+    current: Arc<VerifiedAuthority>,
+    high_water: Arc<Mutex<VerifiedEpoch>>,
+}
+
+#[derive(Clone)]
+struct VerifiedEpoch {
+    epoch: u64,
+    epoch_context_root: String,
+}
+
+impl VerifiedEpoch {
+    fn from_authority(authority: &VerifiedAuthority) -> Result<Self, String> {
+        Ok(Self {
+            epoch: authority.epoch.epoch,
+            epoch_context_root: authority.epoch.root().map_err(|e| e.to_string())?,
+        })
+    }
+
+    fn matches(&self, epoch: u64, root: &str) -> Result<(), String> {
+        if self.epoch != epoch || self.epoch_context_root != root {
+            return Err(
+                "gateway has not authenticated the advertised runtime epoch context".into(),
+            );
+        }
+        Ok(())
+    }
+
+    fn publish(&self, high_water: &Mutex<Self>) -> Result<(), String> {
+        let mut known = high_water
+            .lock()
+            .map_err(|_| "gateway epoch cache unavailable")?;
+        if self.epoch < known.epoch
+            || (self.epoch == known.epoch && self.epoch_context_root != known.epoch_context_root)
+        {
+            return Err("gateway refuses a stale or conflicting epoch context".into());
+        }
+        if self.epoch > known.epoch {
+            *known = self.clone();
+        }
+        Ok(())
+    }
 }
 
 enum Worker {
@@ -161,7 +217,8 @@ fn run(path: &Path, listen: bool) -> Result<(), String> {
     if options.schema_version != 1 || options.listen_address.port() == 0 {
         return Err("unsupported RPC relay configuration".into());
     }
-    let config = synergy_config::load(&options.node_config_path).map_err(|e| e.to_string())?;
+    let config =
+        Arc::new(synergy_config::load(&options.node_config_path).map_err(|e| e.to_string())?);
     let admission = Arc::new(Admission::load(&config, &options.admission_path)?);
     let mut workers = Vec::with_capacity(WORKERS);
     let allowed_source = match &options.role {
@@ -192,11 +249,28 @@ fn run(path: &Path, listen: bool) -> Result<(), String> {
                     "validator relay must bind its distinct admitted overlay endpoint".into(),
                 );
             }
+            let autonomous_bootstrap_sha256 = if let Some(activation) =
+                &config.consensus.autonomous_epoch_activation
+            {
+                // Independently verify the local pinned activation before trusting
+                // any successor epoch advertised by our loopback runtime.
+                let authority = super::authority::load(&config)?
+                    .ok_or("autonomous relay lacks verified authority")?;
+                if authority.epoch.epoch <= admission.payload.epoch {
+                    return Err(
+                        "autonomous relay activation did not advance the admitted origin".into(),
+                    );
+                }
+                Some(activation.sha256.clone())
+            } else {
+                None
+            };
             for _ in 0..WORKERS {
                 workers.push(Worker::Validator(Box::new(Validator {
                     worker: local_worker(&config, &admission, validator_address)?,
                     local: validator_address.clone(),
                     upstream,
+                    autonomous_bootstrap_sha256: autonomous_bootstrap_sha256.clone(),
                 })));
             }
             Some(*gateway_vpn_ip)
@@ -209,6 +283,7 @@ fn run(path: &Path, listen: bool) -> Result<(), String> {
             custody_path,
             custody_unlock_path,
             allowed_origins,
+            autonomous_bootstrap_sha256,
         } => {
             absolute(&[enrollment_path, custody_path, custody_unlock_path])?;
             if config.role != NodeRole::RpcGateway
@@ -249,7 +324,38 @@ fn run(path: &Path, listen: bool) -> Result<(), String> {
                 .aegis_provider
                 .as_ref()
                 .ok_or("missing pinned APQE provider")?;
+            let epoch_inputs = autonomous_bootstrap_sha256
+                .as_ref()
+                .map(|pin| -> Result<_, String> {
+                    if !canonical_digest(pin) {
+                        return Err(
+                            "gateway bootstrap pin must be a lowercase SHA-256 digest".into()
+                        );
+                    }
+                    let origin = authority::load_signed(&config)?
+                        .ok_or("gateway requires a verified signed authority origin")?;
+                    if origin.binding_bytes() != admission.authority_bytes
+                        || origin.epoch.epoch != admission.payload.epoch
+                        || !origin.processing_profile_enabled()
+                    {
+                        return Err("gateway proof origin differs from its signed admission".into());
+                    }
+                    let high_water = Arc::new(Mutex::new(VerifiedEpoch::from_authority(&origin)?));
+                    Ok((pin, origin, high_water))
+                })
+                .transpose()?;
             for _ in 0..WORKERS {
+                let epoch_trust = epoch_inputs
+                    .as_ref()
+                    .map(|(pin, origin, high_water)| -> Result<_, String> {
+                        Ok(GatewayEpochTrust {
+                            config: config.clone(),
+                            pin: (*pin).clone(),
+                            current: VerifiedAuthority::owner_context(origin)?,
+                            high_water: high_water.clone(),
+                        })
+                    })
+                    .transpose()?;
                 let worker = unsafe {
                     load_gateway_transport_worker(
                         &provider.report_path,
@@ -267,6 +373,7 @@ fn run(path: &Path, listen: bool) -> Result<(), String> {
                     validator: validator_address.clone(),
                     peer: SocketAddr::new(admitted.ip(), *validator_relay_port),
                     origins: allowed_origins.clone(),
+                    epoch_trust,
                 })));
             }
             None
@@ -279,7 +386,7 @@ fn run(path: &Path, listen: bool) -> Result<(), String> {
     let listener = TcpListener::bind(options.listen_address).map_err(|e| e.to_string())?;
     let (tx, rx) = mpsc::sync_channel::<(TcpStream, Instant)>(WORKERS);
     let rx = Arc::new(Mutex::new(rx));
-    for worker in workers {
+    for mut worker in workers {
         let (admission, rx) = (admission.clone(), rx.clone());
         std::thread::Builder::new()
             .name("canary-apqe-rpc".into())
@@ -288,7 +395,7 @@ fn run(path: &Path, listen: bool) -> Result<(), String> {
                 else {
                     break;
                 };
-                match &worker {
+                match &mut worker {
                     Worker::Validator(validator) => {
                         let _ = validator.run(&admission, &mut stream, accepted_at);
                     }
@@ -352,7 +459,11 @@ impl Validator {
         // Confirm the local process is observing the admitted chain/epoch. Never
         // stamp the pinned Canary context onto a different process's responses.
         let identity = call_loopback(self.upstream, TELEMETRY)?;
-        verify_runtime_identity(&identity, admission)?;
+        verify_runtime_identity(
+            &identity,
+            admission,
+            self.autonomous_bootstrap_sha256.as_deref(),
+        )?;
         let response = if request == TELEMETRY {
             identity
         } else {
@@ -368,15 +479,21 @@ impl Validator {
 }
 
 impl Gateway {
-    fn call(&self, admission: &Admission, body: &[u8]) -> Result<Vec<u8>, String> {
+    fn call_raw(
+        worker: &GatewayTransportWorker,
+        local: &str,
+        validator: &str,
+        endpoint: SocketAddr,
+        admission: &Admission,
+        body: &[u8],
+    ) -> Result<Vec<u8>, String> {
         validate_request(body)?;
         admission.check_current()?;
-        let (context, trust) = admission.material_context(&self.local, &self.validator)?;
-        let peer = peer(&admission.base.entry(&self.validator)?.transport_public_key)?;
+        let (context, trust) = admission.material_context(local, validator)?;
+        let peer = peer(&admission.base.entry(validator)?.transport_public_key)?;
         let mut stream =
-            TcpStream::connect_timeout(&self.peer, TIMEOUT).map_err(|e| e.to_string())?;
-        let mut session = self
-            .worker
+            TcpStream::connect_timeout(&endpoint, TIMEOUT).map_err(|e| e.to_string())?;
+        let mut session = worker
             .initiator(trust.as_ref(), &peer, context, Instant::now())
             .map_err(|e| e.to_string())?;
         session
@@ -400,16 +517,73 @@ impl Gateway {
             return Err("incorrect authenticated RPC correlation".into());
         }
         admission.check_current()?;
-        bind_response(
+        Ok(body.to_vec())
+    }
+
+    fn call(&mut self, admission: &Admission, body: &[u8]) -> Result<Vec<u8>, String> {
+        let reply = Self::call_raw(
+            &self.worker,
+            &self.local,
+            &self.validator,
+            self.peer,
+            admission,
             body,
+        )?;
+        let request = validate_request(body)?;
+        if request.method == CHAIN_TELEMETRY && self.epoch_trust.is_some() {
+            self.verify_telemetry(admission, &reply, request.id.get())?;
+        }
+        bind_response(
+            &reply,
             admission.payload.chain_id,
             &admission.payload.network_id,
             &admission.base.payload.genesis_hash,
         )
     }
 
+    fn observe_context(&mut self, admission: &Admission) -> Result<Option<VerifiedEpoch>, String> {
+        let reply = Self::call_raw(
+            &self.worker,
+            &self.local,
+            &self.validator,
+            self.peer,
+            admission,
+            TELEMETRY,
+        )?;
+        self.verify_telemetry(admission, &reply, "1")
+    }
+
+    fn verify_telemetry(
+        &mut self,
+        admission: &Admission,
+        bytes: &[u8],
+        id: &str,
+    ) -> Result<Option<VerifiedEpoch>, String> {
+        let runtime: RuntimeIdentity<'_> = serde_json::from_str(rpc_result(bytes, id)?.get())
+            .map_err(|_| "validator did not report a runtime identity")?;
+        validate_runtime_incarnation(
+            &runtime,
+            admission.payload.chain_id,
+            &admission.payload.network_id,
+            admission.payload.epoch,
+            &admission.base.payload.genesis_hash,
+            self.epoch_trust.as_ref().map(|trust| trust.pin.as_str()),
+        )?;
+        let Some(trust) = self.epoch_trust.as_mut() else {
+            return Ok(None);
+        };
+        let observed = trust.verify_runtime(admission.payload.epoch, &runtime, |epoch| {
+            let request = serde_json::to_vec(&json!({
+                "jsonrpc": "2.0", "method": EPOCH_TRANSITION_PROOF_V1, "params": {"epoch": epoch}, "id": 1,
+            })).map_err(|_| "cannot serialize epoch proof request")?;
+            Self::call_raw(&self.worker, &self.local, &self.validator, self.peer, admission, &request)
+        })?;
+        admission.check_current()?;
+        Ok(Some(observed))
+    }
+
     fn run(
-        &self,
+        &mut self,
         admission: &Admission,
         stream: &mut TcpStream,
         at: Instant,
@@ -434,13 +608,28 @@ impl Gateway {
                 return send_http(stream, 204, b"", origin)
             }
             "GET /network-profile HTTP/1.1" if request.body.is_empty() => {
-                network_profile(admission)
+                if let Some(pin) = self.epoch_trust.as_ref().map(|trust| trust.pin.clone()) {
+                    self.observe_context(admission).and_then(|observed| {
+                        network_profile(
+                            admission,
+                            observed.as_ref().map(|context| (context, pin.as_str())),
+                        )
+                    })
+                } else {
+                    network_profile(admission, None)
+                }
             }
             "GET /healthz HTTP/1.1" if request.body.is_empty() => {
                 // A successful TCP accept does not imply the authenticated hop is healthy.
-                self.call(admission, TELEMETRY)
-                    .and_then(|reply| verify_runtime_identity(&reply, admission))
-                    .map(|()| br#"{"status":"ready"}"#.to_vec())
+                self.observe_context(admission)
+                    .and_then(|observed| match observed {
+                        Some(context) => serde_json::to_vec(&json!({
+                            "status": "ready", "epoch": context.epoch,
+                            "epoch_context_root": context.epoch_context_root,
+                        }))
+                        .map_err(|_| "cannot serialize verified health context".into()),
+                        None => Ok(br#"{"status":"ready"}"#.to_vec()),
+                    })
             }
             "POST / HTTP/1.1" | "POST /rpc HTTP/1.1" => {
                 if validate_request(&request.body).is_err() {
@@ -472,13 +661,24 @@ fn valid_origin(origin: &str) -> bool {
     })
 }
 
-fn network_profile(admission: &Admission) -> Result<Vec<u8>, String> {
+fn network_profile(
+    admission: &Admission,
+    derived: Option<(&VerifiedEpoch, &str)>,
+) -> Result<Vec<u8>, String> {
     admission.check_current()?;
     let genesis =
         std::str::from_utf8(&admission.base.genesis_bytes).map_err(|_| "non-UTF-8 genesis")?;
     let authority =
         std::str::from_utf8(&admission.authority_bytes).map_err(|_| "non-UTF-8 authority")?;
-    serde_json::to_vec(&json!({ "genesis_raw": genesis, "authority_raw": authority }))
+    let mut profile = json!({ "genesis_raw": genesis, "authority_raw": authority });
+    if let Some((context, pin)) = derived {
+        profile["derived_context"] = json!({
+            "epoch": context.epoch, "epoch_context_root": context.epoch_context_root,
+            "origin_epoch": admission.payload.epoch,
+            "autonomous_bootstrap_sha256": pin, "proof_method": EPOCH_TRANSITION_PROOF_V1,
+        });
+    }
+    serde_json::to_vec(&profile)
         .map_err(|_| "cannot serialize pinned public network profile".into())
 }
 
@@ -492,21 +692,21 @@ struct Request<'a> {
     id: &'a RawValue,
 }
 
-fn validate_request(bytes: &[u8]) -> Result<(), String> {
+fn validate_request(bytes: &[u8]) -> Result<Request<'_>, String> {
     let v: Request<'_> =
         serde_json::from_slice(bytes).map_err(|_| "invalid JSON-RPC request envelope")?;
     if v.jsonrpc != "2.0" || v.method.is_empty() || v.method.len() > 128 || v.id.get() == "null" {
         return Err("RPC notifications or invalid methods are not supported".into());
     }
-    Ok(())
+    Ok(v)
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Reply<'a> {
     jsonrpc: &'a str,
-    #[serde(rename = "id", borrow)]
-    _id: &'a RawValue,
+    #[serde(borrow)]
+    id: &'a RawValue,
     #[serde(default, deserialize_with = "present", borrow)]
     result: Option<&'a RawValue>,
     #[serde(default, deserialize_with = "present", borrow)]
@@ -521,16 +721,26 @@ struct RuntimeIdentity<'a> {
     epoch: u64,
     #[serde(borrow)]
     genesis_hash: &'a str,
-    finalized_height: u64,
+    #[serde(rename = "finalized_height")]
+    _finalized_height: u64,
+    #[serde(default, borrow)]
+    epoch_context_root: Option<&'a str>,
+    #[serde(default, borrow)]
+    autonomous_bootstrap_sha256: Option<&'a str>,
 }
 
-fn verify_runtime_identity(bytes: &[u8], admission: &Admission) -> Result<(), String> {
+fn verify_runtime_identity(
+    bytes: &[u8],
+    admission: &Admission,
+    autonomous_bootstrap_sha256: Option<&str>,
+) -> Result<(), String> {
     verify_runtime_incarnation(
         bytes,
         admission.payload.chain_id,
         &admission.payload.network_id,
         admission.payload.epoch,
         &admission.base.payload.genesis_hash,
+        autonomous_bootstrap_sha256,
     )
 }
 
@@ -540,6 +750,7 @@ fn verify_runtime_incarnation(
     network_id: &str,
     epoch: u64,
     genesis_hash: &str,
+    autonomous_bootstrap_sha256: Option<&str>,
 ) -> Result<(), String> {
     #[derive(Deserialize)]
     struct RuntimeReply<'a> {
@@ -549,15 +760,176 @@ fn verify_runtime_incarnation(
     let identity = serde_json::from_slice::<RuntimeReply<'_>>(bytes)
         .map_err(|_| "local canonical RPC did not report authenticated chain identity")?
         .result;
+    validate_runtime_incarnation(
+        &identity,
+        chain_id,
+        network_id,
+        epoch,
+        genesis_hash,
+        autonomous_bootstrap_sha256,
+    )
+}
+
+fn validate_runtime_incarnation(
+    identity: &RuntimeIdentity<'_>,
+    chain_id: u64,
+    network_id: &str,
+    epoch: u64,
+    genesis_hash: &str,
+    autonomous_bootstrap_sha256: Option<&str>,
+) -> Result<(), String> {
     if identity.chain_id != chain_id
         || identity.network_identity != network_id
-        || identity.epoch != epoch
+        || match autonomous_bootstrap_sha256 {
+            Some(pin) => {
+                identity.epoch <= epoch || identity.autonomous_bootstrap_sha256 != Some(pin)
+            }
+            None => identity.epoch != epoch,
+        }
         || identity.genesis_hash != genesis_hash
     {
-        return Err("local canonical RPC differs from the admitted Canary incarnation or epoch".into());
+        return Err(
+            "local canonical RPC differs from the admitted Canary incarnation or epoch".into(),
+        );
     }
-    let _latest_finalized_height = identity.finalized_height;
     Ok(())
+}
+
+fn canonical_digest(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+}
+
+fn rpc_result<'a>(bytes: &'a [u8], id: &str) -> Result<&'a RawValue, String> {
+    if bytes.len() > MAX_BODY {
+        return Err("authenticated RPC result exceeds its byte bound".into());
+    }
+    let reply: Reply<'_> =
+        serde_json::from_slice(bytes).map_err(|_| "invalid authenticated JSON-RPC reply")?;
+    if reply.jsonrpc != "2.0" || reply.id.get() != id || reply.error.is_some() {
+        return Err("incorrect correlated authenticated JSON-RPC result".into());
+    }
+    reply
+        .result
+        .ok_or_else(|| "missing authenticated JSON-RPC result".into())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EpochProof<'a> {
+    chain_id: u64,
+    network_id: &'a str,
+    epoch: u64,
+    epoch_context_root: &'a str,
+    kind: &'a str,
+    sha256: &'a str,
+    #[serde(borrow)]
+    artifact_json: Cow<'a, str>,
+}
+
+impl<'a> EpochProof<'a> {
+    fn parse(
+        bytes: &'a [u8],
+        chain_id: u64,
+        network_id: &str,
+        epoch: u64,
+        bootstrap_pin: Option<&str>,
+    ) -> Result<Self, String> {
+        let proof: Self = serde_json::from_str(rpc_result(bytes, "1")?.get())
+            .map_err(|_| "missing or invalid epoch transition proof")?;
+        if proof.chain_id != chain_id
+            || proof.network_id != network_id
+            || proof.epoch != epoch
+            || proof.kind
+                != if bootstrap_pin.is_some() {
+                    "bootstrap-v1"
+                } else {
+                    "derived-v1"
+                }
+            || !canonical_digest(proof.epoch_context_root)
+            || proof.artifact_json.is_empty()
+            || proof.sha256 != transport::sha256(proof.artifact_json.as_bytes())
+            || bootstrap_pin.is_some_and(|pin| pin != proof.sha256)
+        {
+            return Err(
+                "epoch proof differs from its expected scope, kind, or artifact digest".into(),
+            );
+        }
+        Ok(proof)
+    }
+}
+
+impl GatewayEpochTrust {
+    fn verify_runtime(
+        &mut self,
+        origin_epoch: u64,
+        runtime: &RuntimeIdentity<'_>,
+        mut fetch: impl FnMut(u64) -> Result<Vec<u8>, String>,
+    ) -> Result<VerifiedEpoch, String> {
+        let advertised_root = runtime
+            .epoch_context_root
+            .filter(|root| canonical_digest(root))
+            .ok_or("gateway runtime did not report a canonical epoch context root")?;
+        if runtime.epoch < self.current.epoch.epoch
+            || runtime.epoch
+                < self
+                    .high_water
+                    .lock()
+                    .map_err(|_| "gateway epoch cache unavailable")?
+                    .epoch
+        {
+            return Err("gateway refuses a stale autonomous runtime".into());
+        }
+
+        for _ in 0..MAX_EPOCH_PROOFS_PER_REQUEST {
+            if self.current.epoch.epoch == runtime.epoch {
+                break;
+            }
+            let epoch = self
+                .current
+                .epoch
+                .epoch
+                .checked_add(1)
+                .ok_or("gateway epoch overflow")?;
+            let pin = (self.current.epoch.epoch == origin_epoch).then_some(self.pin.as_str());
+            let bytes = fetch(epoch)?;
+            let proof = EpochProof::parse(
+                &bytes,
+                runtime.chain_id,
+                runtime.network_identity,
+                epoch,
+                pin,
+            )?;
+            let next = match pin {
+                Some(pin) => successor::verify_pinned_bootstrap_bytes(
+                    &self.config,
+                    self.current.clone(),
+                    pin,
+                    proof.artifact_json.as_bytes(),
+                )?,
+                None => successor::verify_next_derived_bytes(
+                    self.current.clone(),
+                    proof.artifact_json.as_bytes(),
+                )?,
+            };
+            if next.epoch.epoch != epoch
+                || next.epoch.chain_id != runtime.chain_id
+                || next.epoch.network_id != runtime.network_identity
+                || next.epoch.root().map_err(|e| e.to_string())? != proof.epoch_context_root
+            {
+                return Err(
+                    "advertised transition scope does not match its verified native proof".into(),
+                );
+            }
+            self.current = next;
+        }
+        let verified = VerifiedEpoch::from_authority(&self.current)?;
+        verified.matches(runtime.epoch, advertised_root)?;
+        verified.publish(&self.high_water)?;
+        Ok(verified)
+    }
 }
 
 fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<&'de RawValue>, D::Error> {
@@ -751,14 +1123,184 @@ mod tests {
         }});
         let verify = |value: &serde_json::Value| {
             verify_runtime_incarnation(
-                &serde_json::to_vec(value).unwrap(), 99999, "fresh-canary", 1, &expected,
+                &serde_json::to_vec(value).unwrap(),
+                99999,
+                "fresh-canary",
+                1,
+                &expected,
+                None,
             )
         };
         assert!(verify(&reply).is_ok());
         reply["result"]["genesis_hash"] = json!("b".repeat(64));
         assert!(verify(&reply).is_err());
-        reply["result"].as_object_mut().unwrap().remove("genesis_hash");
+        reply["result"]
+            .as_object_mut()
+            .unwrap()
+            .remove("genesis_hash");
         assert!(verify(&reply).is_err());
+    }
+
+    #[test]
+    fn autonomous_runtime_requires_matching_pin_and_never_accepts_origin_or_rollback() {
+        let pin = "a".repeat(64);
+        let genesis = "b".repeat(64);
+        let test = |reported_epoch, reported_pin, expected_pin| {
+            let value = json!({"result": {
+                "chain_id": 99999, "network_identity": "canary", "epoch": reported_epoch,
+                "finalized_height": 22998, "genesis_hash": genesis, "autonomous_bootstrap_sha256": reported_pin,
+            }});
+            verify_runtime_incarnation(
+                &serde_json::to_vec(&value).unwrap(),
+                99999,
+                "canary",
+                5,
+                &genesis,
+                expected_pin,
+            )
+        };
+        assert!(test(6, Some(pin.as_str()), Some(pin.as_str())).is_ok());
+        assert!(test(8, Some(pin.as_str()), Some(pin.as_str())).is_ok());
+        assert!(test(5, Some(pin.as_str()), Some(pin.as_str())).is_err());
+        assert!(test(4, Some(pin.as_str()), Some(pin.as_str())).is_err());
+        assert!(test(6, None, Some(pin.as_str())).is_err());
+        assert!(test(6, Some(genesis.as_str()), Some(pin.as_str())).is_err());
+        assert!(test(6, Some(pin.as_str()), None).is_err());
+    }
+
+    #[test]
+    fn gateway_epoch_cache_rejects_rollback_conflict_and_unverified_telemetry() {
+        let context = |epoch, byte: &str| VerifiedEpoch {
+            epoch,
+            epoch_context_root: byte.repeat(64),
+        };
+        let cache = Mutex::new(context(5, "e"));
+        let first = context(6, "a");
+        assert!(first.matches(6, &"a".repeat(64)).is_ok());
+        assert!(first.matches(6, &"b".repeat(64)).is_err());
+        assert!(first.matches(7, &"a".repeat(64)).is_err());
+        assert!(first.publish(&cache).is_ok());
+        assert!(context(5, "e").publish(&cache).is_err());
+        assert!(context(6, "b").publish(&cache).is_err());
+        assert!(first.publish(&cache).is_ok());
+        assert!(context(7, "b").publish(&cache).is_ok());
+        assert!(first.publish(&cache).is_err());
+    }
+
+    #[test]
+    fn proof_envelope_requires_exact_bytes_pin_scope_and_correlated_request() {
+        let artifact = "{\"native\":[1,2]}\n";
+        let pin = transport::sha256(artifact.as_bytes());
+        let reply = json!({
+            "jsonrpc": "2.0", "id": 1, "result": {
+                "chain_id": 99999, "network_id": "canary", "epoch": 6,
+                "epoch_context_root": "a".repeat(64), "kind": "bootstrap-v1",
+                "sha256": pin, "artifact_json": artifact,
+            },
+        });
+        let bytes = serde_json::to_vec(&reply).unwrap();
+        let proof = EpochProof::parse(&bytes, 99999, "canary", 6, Some(&pin)).unwrap();
+        assert_eq!(proof.artifact_json, artifact);
+        assert!(EpochProof::parse(&bytes, 1266, "canary", 6, Some(&pin)).is_err());
+        assert!(EpochProof::parse(&bytes, 99999, "other", 6, Some(&pin)).is_err());
+        assert!(EpochProof::parse(&bytes, 99999, "canary", 7, Some(&pin)).is_err());
+        assert!(EpochProof::parse(&bytes, 99999, "canary", 6, Some(&"c".repeat(64))).is_err());
+        assert!(EpochProof::parse(&bytes, 99999, "canary", 6, None).is_err());
+
+        for (field, replacement) in [
+            ("artifact_json", json!("changed")),
+            ("epoch_context_root", json!("A".repeat(64))),
+            ("kind", json!("derived-v1")),
+            ("sha256", json!("a".repeat(64))),
+        ] {
+            let mut tampered = reply.clone();
+            tampered["result"][field] = replacement;
+            let bytes = serde_json::to_vec(&tampered).unwrap();
+            assert!(
+                EpochProof::parse(&bytes, 99999, "canary", 6, Some(&pin)).is_err(),
+                "{field}"
+            );
+        }
+        let mut wrong_id = reply.clone();
+        wrong_id["id"] = json!(2);
+        let bytes = serde_json::to_vec(&wrong_id).unwrap();
+        assert!(EpochProof::parse(&bytes, 99999, "canary", 6, Some(&pin)).is_err());
+        assert!(EpochProof::parse(&vec![0; MAX_BODY + 1], 99999, "canary", 6, Some(&pin)).is_err());
+        assert!(EpochProof::parse(
+            br#"{"jsonrpc":"2.0","id":1,"result":null}"#,
+            99999,
+            "canary",
+            6,
+            Some(&pin),
+        )
+        .is_err());
+    }
+
+    #[test]
+    #[ignore = "requires retained public signed origin, approved bootstrap, and native APQE"]
+    fn native_gateway_accepts_pinned_bootstrap_and_rejects_forged_runtime_root() {
+        let config_path = std::env::var("SYNERGY_GATEWAY_TEST_ORIGIN_CONFIG").unwrap();
+        let bootstrap_path = std::env::var("SYNERGY_GATEWAY_TEST_BOOTSTRAP").unwrap();
+        let pin = std::env::var("SYNERGY_GATEWAY_TEST_BOOTSTRAP_SHA256").unwrap();
+        let mut config = synergy_config::load(Path::new(&config_path)).unwrap();
+        config.role = NodeRole::RpcGateway;
+        assert!(config.consensus.autonomous_epoch_activation.is_none());
+        let config = Arc::new(config);
+        let origin = authority::load_signed(&config).unwrap().unwrap();
+        let bytes = transport::read(Path::new(&bootstrap_path), MAX_BODY as u64, false).unwrap();
+        let native =
+            successor::verify_pinned_bootstrap_bytes(&config, origin.clone(), &pin, &bytes)
+                .unwrap();
+        let expected = VerifiedEpoch::from_authority(&native).unwrap();
+        let root = expected.epoch_context_root.as_str();
+        let genesis = crate::commands::selected_network::verify(&config).unwrap();
+        let artifact = std::str::from_utf8(&bytes).unwrap();
+        let reply = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0", "id": 1, "result": {
+                "chain_id": config.chain_id, "network_id": config.network_id, "epoch": expected.epoch,
+                "epoch_context_root": root, "kind": "bootstrap-v1", "sha256": pin,
+                "artifact_json": artifact,
+            },
+        })).unwrap();
+        let origin_epoch = origin.epoch.epoch;
+        let high_water = Arc::new(Mutex::new(VerifiedEpoch::from_authority(&origin).unwrap()));
+        let mut trust = GatewayEpochTrust {
+            config: config.clone(),
+            pin: pin.clone(),
+            current: origin,
+            high_water: high_water.clone(),
+        };
+        let forged = "f".repeat(64);
+        let mut runtime = RuntimeIdentity {
+            chain_id: config.chain_id,
+            network_identity: &config.network_id,
+            epoch: expected.epoch,
+            genesis_hash: &genesis,
+            _finalized_height: 0,
+            epoch_context_root: Some(&forged),
+            autonomous_bootstrap_sha256: Some(&pin),
+        };
+        let mut tampered = serde_json::from_slice::<serde_json::Value>(&reply).unwrap();
+        tampered["result"]["epoch_context_root"] = json!(forged);
+        assert!(trust
+            .verify_runtime(origin_epoch, &runtime, |_| {
+                Ok(serde_json::to_vec(&tampered).unwrap())
+            })
+            .is_err());
+        assert_eq!(trust.current.epoch.epoch, origin_epoch);
+        assert!(trust
+            .verify_runtime(origin_epoch, &runtime, |_| Ok(reply.clone()))
+            .is_err());
+        assert_eq!(high_water.lock().unwrap().epoch, origin_epoch);
+        runtime.epoch_context_root = Some(root);
+        let verified = trust
+            .verify_runtime(origin_epoch, &runtime, |_| {
+                panic!("already authenticated proof should not be fetched again")
+            })
+            .unwrap();
+        assert_eq!(verified.epoch, expected.epoch);
+        assert_eq!(verified.epoch_context_root, root);
+        assert_eq!(high_water.lock().unwrap().epoch, expected.epoch);
     }
 
     #[test]

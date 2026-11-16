@@ -97,6 +97,36 @@ class ActivationTests(unittest.TestCase):
     def plan(self):
         result=recovery.prepare(self.root,self.stage);self.pin=result['plan_sha256'];return result
 
+    def test_autonomous_restart_gate_and_exact_resume(self):
+        stage=self.root.parent/'autonomous-stage'
+        artifact=b'authenticated native bootstrap fixture'
+        self.write(stage/'bootstrap.json',artifact)
+        digest=recovery.sha(artifact)
+        package=self.initial_receipt['package_sha256']
+        proof=recovery.encode(dict(status='autonomous-bootstrap-local-boundary-verified',
+            autonomous_bootstrap_sha256=digest,previous_authority_sha256=recovery.sha(self.old_authority),
+            epoch=6,finalized={'height':22998},context_root='b'*64,activated=False))
+        preflight=recovery.encode(dict(signed_genesis_verified=True,signed_authority_verified=True,
+            validator_membership_verified=True,authority_epoch=6,authority_context_root='b'*64))
+        run=lambda pin:recovery.apply_autonomous(self.root,stage,pin,package)
+        replace=life._replace_bytes
+        def interrupt(root,path,*args):
+            if path==root/recovery.START: raise OSError('interrupted autonomous activation')
+            return replace(root,path,*args)
+        with patch.object(recovery,'native',side_effect=lambda argv:proof if argv[1]=='authority-successor' else preflight):
+            with patch.object(life,'_replace_bytes',side_effect=interrupt):
+                with self.assertRaisesRegex(OSError,'interrupted autonomous'):
+                    run(digest)
+            with self.assertRaisesRegex(ValueError,'finish autonomous epoch activation'):
+                life._start_check_locked(self.root)
+            with self.assertRaisesRegex(ValueError,'differs from pin'):
+                run('a'*64)
+            self.assertTrue(run(digest)['native_preflight_passed'])
+            self.assertTrue(run(digest)['repeated'])
+        self.assertFalse((self.root/life.AUTONOMOUS_EPOCH_INTENT).exists())
+        self.assertEqual((self.root/recovery.AUTHORITY).read_bytes(),self.old_authority)
+        self.protected_unchanged()
+
     def protected_unchanged(self):
         for name,raw in self.protected.items():self.assertEqual((self.root/name).read_bytes(),raw)
 

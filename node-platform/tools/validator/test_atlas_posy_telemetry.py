@@ -14,6 +14,54 @@ probe = {}
 exec(collector.PROBE.split("configuration,_=")[0], probe)
 
 
+class RosterSelection(unittest.TestCase):
+    def setUp(self):
+        self.network = 'canary-network'
+        self.genesis = 'a' * 64
+        self.states = {n: self.running(n) for n in range(2, 7)}
+
+    def running(self, n):
+        return {
+            'network_id': self.network, 'genesis_hash': self.genesis,
+            'service': {'SubState': 'running', 'MainPID': str(n)},
+            'address': f'validator-{n}', 'height': 23093, 'block': {'block_hash': 'live'},
+            'observed_at': '2026-11-16T14:00:00+00:00',
+            'chain_telemetry': {'schema_version': 1, 'network_identity': self.network,
+                'genesis_hash': self.genesis, 'chain_id': 99999, 'process_id': n,
+                'observed_at_unix_ms': 1794837600000},
+        }
+
+    def test_four_verified_hosts_can_publish_without_stale_fifth(self):
+        self.states[5]['service'] = {'SubState': 'dead', 'MainPID': '0'}
+        self.states[5]['network_id'] = 'retired-network'
+        self.states[5]['height'] = 99999
+        network, genesis, verified = collector.active_network(self.states)
+        self.assertEqual((network, genesis, set(verified)), (self.network, self.genesis, {2, 3, 4, 6}))
+        roster = collector.roster_observations(self.states, verified, network, genesis)
+        self.assertEqual(collector.validator_status(roster[5], None)[0], 'offline')
+        self.assertIsNone(roster[5]['block'])
+        self.assertIsNone(roster[5]['address'])
+        self.states[5] = {}
+        network, genesis, verified = collector.active_network(self.states)
+        roster = collector.roster_observations(self.states, verified, network, genesis)
+        self.assertEqual(collector.validator_status(roster[5], None)[0], 'unreachable')
+
+    def test_foreign_running_config_and_insufficient_native_agreement_fail_closed(self):
+        self.states[5]['network_id'] = 'foreign'
+        with self.assertRaisesRegex(ValueError, 'one selected genesis and network'):
+            collector.active_network(self.states)
+        self.states[5] = {}
+        self.states[4]['chain_telemetry']['process_id'] = 999
+        with self.assertRaisesRegex(ValueError, 'four distinct running'):
+            collector.active_network(self.states)
+
+    def test_duplicate_identity_does_not_count_twice(self):
+        self.states[5] = {}
+        self.states[4]['address'] = self.states[3]['address']
+        with self.assertRaisesRegex(ValueError, 'four distinct running'):
+            collector.active_network(self.states)
+
+
 class NativeHistory(unittest.TestCase):
     def test_expiry_monitor_requires_all_five_pinned_registries(self):
         now = "2026-11-09T00:00:00+00:00"

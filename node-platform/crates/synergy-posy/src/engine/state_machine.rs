@@ -189,11 +189,13 @@ impl SimplifiedConsensusStateMachine {
         verifier: &impl ConsensusSignatureVerifier,
     ) -> PosyResult<Self> {
         if !self.epoch_complete {
-            return Err(PosyError::NotReady("epoch has not certified its boundary".into()));
+            return Err(PosyError::NotReady(
+                "epoch has not certified its boundary".into(),
+            ));
         }
-        let finalized = self.last_finalized().ok_or_else(|| {
-            PosyError::NotReady("completed epoch has no closing finality".into())
-        })?;
+        let finalized = self
+            .last_finalized()
+            .ok_or_else(|| PosyError::NotReady("completed epoch has no closing finality".into()))?;
         let accepted = self.finality_witness(finalized.height).ok_or_else(|| {
             PosyError::NotReady("completed epoch has no accepted closing QC tail".into())
         })?;
@@ -221,6 +223,36 @@ impl SimplifiedConsensusStateMachine {
         let mut successor = Self::new(next, next_registry, parent)?;
         successor.seed_epoch_transition_finality(finalized.clone(), witness.quorum_certificates)?;
         Ok(successor)
+    }
+
+    /// Restore a governed successor from its immutable predecessor evidence.
+    /// The runtime must first authenticate the authorized subject against the
+    /// approved bootstrap or the preceding finalized execution commitment.
+    pub fn restore_derived_epoch_transition(
+        &mut self,
+        authorization: &crate::EpochTransitionAuthorization,
+        previous: &SimplifiedEpochContext,
+        previous_registry: &FrozenValidatorRegistry,
+        finalized: crate::FinalizedBlockRecord,
+        witness: crate::FinalitySyncWitness,
+        authorized_subject_root: &str,
+        verifier: &impl ConsensusSignatureVerifier,
+    ) -> PosyResult<()> {
+        let (epoch, parent) = authorization.derive_from_finalized_subject(
+            previous,
+            previous_registry,
+            &self.validators,
+            &finalized,
+            &witness,
+            authorized_subject_root,
+            verifier,
+        )?;
+        if self.epoch != epoch || self.highest_parent != parent {
+            return Err(PosyError::Conflict(
+                "restored successor differs from the authenticated transition".into(),
+            ));
+        }
+        self.seed_epoch_transition_finality(finalized, witness.quorum_certificates)
     }
 
     /// Build a separate recovery projection from this machine's admitted
@@ -1294,15 +1326,23 @@ mod tests {
             forged.quorum_certificates[2].block_id = hash('f');
             assert!(matches!(
                 active.derive_successor_projection(
-                    &auth, next_registry.clone(), forged,
-                    &auth.subject_root_v2().unwrap(), &AcceptAllSignatures
+                    &auth,
+                    next_registry.clone(),
+                    forged,
+                    &auth.subject_root_v2().unwrap(),
+                    &AcceptAllSignatures
                 ),
                 Err(PosyError::Conflict(_))
             ));
-            let mut next = active.derive_successor_projection(
-                &auth, next_registry, witness,
-                &auth.subject_root_v2().unwrap(), &AcceptAllSignatures
-            ).unwrap();
+            let mut next = active
+                .derive_successor_projection(
+                    &auth,
+                    next_registry,
+                    witness,
+                    &auth.subject_root_v2().unwrap(),
+                    &AcceptAllSignatures,
+                )
+                .unwrap();
             let mut restarted = next.staged_epoch_transition_recovery().unwrap();
             assert_eq!(restarted.last_finalized(), Some(&finalized));
             for finalizing in [boundary - 1, boundary] {
@@ -1351,7 +1391,14 @@ mod tests {
             hash('b'),
         )
         .unwrap();
-        assert_eq!((auth.finalized_height, auth.next_epoch_start_height, auth.next_epoch_end_height), (18, 21, 1020));
+        assert_eq!(
+            (
+                auth.finalized_height,
+                auth.next_epoch_start_height,
+                auth.next_epoch_end_height
+            ),
+            (18, 21, 1020)
+        );
         let committed = auth.subject_root_v2().unwrap();
         let verify = |w: &crate::FinalitySyncWitness, r: &FrozenValidatorRegistry, root: &str| {
             auth.derive_from_finalized_subject(
@@ -1376,16 +1423,27 @@ mod tests {
             next.clone(),
             registry.clone(),
             foreign_parent
-        ).is_err());
-        assert!(serde_json::to_value(&next).unwrap().get("v3_transition_anchor").is_some());
-        assert!(serde_json::to_value(&old.epoch).unwrap().get("v3_transition_anchor").is_none());
+        )
+        .is_err());
+        assert!(serde_json::to_value(&next)
+            .unwrap()
+            .get("v3_transition_anchor")
+            .is_some());
+        assert!(serde_json::to_value(&old.epoch)
+            .unwrap()
+            .get("v3_transition_anchor")
+            .is_none());
         assert!(verify(&witness, &registry, &hash('c')).is_err());
 
-        let unchanged = FrozenValidatorRegistry::new(8, old.validators.active().cloned().collect()).unwrap();
+        let unchanged =
+            FrozenValidatorRegistry::new(8, old.validators.active().cloned().collect()).unwrap();
         assert!(verify(&witness, &unchanged, &committed).is_err());
         records.reverse();
         let reordered = FrozenValidatorRegistry::new(8, records).unwrap();
-        assert_eq!(verify(&witness, &reordered, &committed).unwrap(), (next, parent));
+        assert_eq!(
+            verify(&witness, &reordered, &committed).unwrap(),
+            (next, parent)
+        );
 
         // The same valid block votes cannot replace the inherited takeover proof.
         assert_eq!(witness.quorum_certificates[2].context.round, 1);

@@ -50,7 +50,14 @@ class BaselineReportTests(unittest.TestCase):
         states=copy.deepcopy(self.states);states[6]['baseline_anchor']['state_root']='c'*64
         self.assertEqual(publisher.baseline_status(self.report,states,self.network,self.now)['status'],'unverified')
     def test_network_and_stall(self):
-        self.assertEqual(publisher.active_network(self.states),self.network)
+        for n,state in self.states.items():
+            state['address']=f'validator-{n}'
+            state['service']['MainPID']=str(n)
+            state['observed_at']=self.now.isoformat()
+            state['chain_telemetry']={'schema_version':1,'network_identity':self.network,
+                                      'genesis_hash':'a'*64,'chain_id':99999,'process_id':n,
+                                      'observed_at_unix_ms':self.now.timestamp()*1000}
+        self.assertEqual(publisher.active_network(self.states)[:2],(self.network,'a'*64))
         bad=copy.deepcopy(self.states);bad[6]['network_id']='other'
         with self.assertRaises(ValueError):publisher.active_network(bad)
         bad=copy.deepcopy(self.states);bad[6]['genesis_hash']='b'*64

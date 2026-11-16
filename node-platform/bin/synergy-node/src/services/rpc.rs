@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -22,8 +22,8 @@ use synergy_rpc::{
     auth::PublicOnlyAuthenticator,
     methods::{
         AccountQuery, BlockQuery, TransactionQuery, ACCOUNT_GET, BLOCK_GET, CHAIN_STATUS,
-        CHAIN_TELEMETRY, ETDAG_STATUS, NODE_STATUS, POSY_STATUS, PROCESSING_CONTEXT_V1,
-        PROCESSING_TRANSACTION_SUBMIT_V1, PROTECTED_ADMISSION_CONTEXT,
+        CHAIN_TELEMETRY, EPOCH_TRANSITION_PROOF_V1, ETDAG_STATUS, NODE_STATUS, POSY_STATUS,
+        PROCESSING_CONTEXT_V1, PROCESSING_TRANSACTION_SUBMIT_V1, PROTECTED_ADMISSION_CONTEXT,
         PROTECTED_ADMISSION_CONTEXT_V2, PROTECTED_ADMISSION_RECEIPT, PROTECTED_ADMISSION_STATS,
         PROTECTED_TRANSACTION_SUBMIT, SYNC_STATUS, SYNID_RESOLVE, SYNID_REVERSE, SYSTEM_VERSION,
         TRANSACTION_GET,
@@ -609,6 +609,9 @@ const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 pub(crate) struct VerifiedRpcNetwork {
     pub network_id: String,
     pub epoch: u64,
+    pub live_epoch: Option<Arc<std::sync::atomic::AtomicU64>>,
+    pub live_authority: Option<Arc<RwLock<Option<Arc<super::authority::VerifiedAuthority>>>>>,
+    pub autonomous_bootstrap_sha256: Option<String>,
     pub genesis_hash: String,
 }
 
@@ -833,6 +836,20 @@ impl RuntimeDispatcher {
             .duration_since(UNIX_EPOCH)
             .map_err(|_| RpcError::unavailable("observation clock invalid"))?
             .as_millis();
+        // Epoch and context must come from one authenticated authority snapshot.
+        // Sampling the separate epoch atomic could straddle a runtime handoff.
+        let live_authority = self.network_identity.as_ref()
+            .and_then(|identity| identity.live_authority.as_ref())
+            .map(|authority| authority.read().map(|value| value.clone()))
+            .transpose()
+            .map_err(|_| RpcError::unavailable("authority observation lock poisoned"))?
+            .flatten();
+        let observed_epoch = live_authority.as_ref().map(|authority| authority.epoch.epoch)
+            .or_else(|| self.network_identity.as_ref().map(|identity| identity.epoch));
+        let epoch_context_root = live_authority.as_ref()
+            .map(|authority| authority.epoch.root())
+            .transpose()
+            .map_err(|error| RpcError::unavailable(format!("authority observation: {error}")))?;
         let common_commitment = block.as_ref().map(|block| {
             json!({"height":block.height,"block_id":block.block_id,
             "state_root":block.state_root,"finality_certificate_id":block.finality_certificate_id,
@@ -855,8 +872,9 @@ impl RuntimeDispatcher {
             "process_id":std::process::id(),"release":{"package_version":env!("CARGO_PKG_VERSION"),"artifact_digest":null,"source_revision":null},
             "transport":self.admission.as_ref().map(|handle|handle.transport_observations()).transpose().map_err(RpcError::unavailable)?,
             "network_identity":self.network_identity.as_ref().map(|identity|&identity.network_id),
-            "epoch":self.network_identity.as_ref().map(|identity|identity.epoch),
+            "epoch":observed_epoch,"epoch_context_root":epoch_context_root,
             "genesis_hash":self.network_identity.as_ref().map(|identity|&identity.genesis_hash),
+            "autonomous_bootstrap_sha256":self.network_identity.as_ref().and_then(|identity|identity.autonomous_bootstrap_sha256.as_ref()),
             "finalized_height":latest_height,"common_finalized_commitment":common_commitment,
             "commitment_comparison":"request identical at_height from each validator; never compare unmatched observation tips",
             "latest_sampled_block_transaction_count":block.as_ref().map(|block|block.transaction_count),
@@ -919,6 +937,32 @@ impl RpcDispatcher for RuntimeDispatcher {
                 .context_v2()
                 .map_err(RpcError::unavailable),
             CHAIN_TELEMETRY => self.chain_telemetry(params),
+            EPOCH_TRANSITION_PROOF_V1 => {
+                #[derive(serde::Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Query {
+                    epoch: u64,
+                }
+                let Query { epoch } = decode_params(params)?;
+                if epoch == 0 {
+                    return Err(RpcError::invalid_params("epoch must be positive"));
+                }
+                let authority = self
+                    .network_identity
+                    .as_ref()
+                    .and_then(|identity| identity.live_authority.as_ref())
+                    .ok_or_else(|| RpcError::unavailable("authenticated epoch proofs unavailable"))?
+                    .read()
+                    .map_err(|_| RpcError::unavailable("authority state unavailable"))?
+                    .clone()
+                    .ok_or_else(|| {
+                        RpcError::unavailable("authenticated epoch proofs unavailable")
+                    })?;
+                authority
+                    .public_autonomous_proof(epoch)
+                    .map(|v| v.unwrap_or(Value::Null))
+                    .map_err(RpcError::unavailable)
+            }
             PROTECTED_ADMISSION_STATS => self
                 .admission
                 .as_ref()
@@ -2028,6 +2072,9 @@ mod nonblocking_http_tests {
             network_identity: Some(VerifiedRpcNetwork {
                 network_id: "test".into(),
                 epoch: 1,
+                live_epoch: None,
+                live_authority: None,
+                autonomous_bootstrap_sha256: None,
                 genesis_hash: "a".repeat(64),
             }),
             telemetry_samples: Mutex::new(TelemetrySamples::default()),
@@ -2102,6 +2149,9 @@ mod nonblocking_http_tests {
             network_identity: Some(VerifiedRpcNetwork {
                 network_id: "verified-incarnation".into(),
                 epoch: 7,
+                live_epoch: None,
+                live_authority: None,
+                autonomous_bootstrap_sha256: None,
                 genesis_hash: "a".repeat(64),
             }),
             telemetry_samples: Mutex::new(TelemetrySamples::default()),

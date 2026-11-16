@@ -18,7 +18,7 @@ use synergy_storage::{
 };
 
 use crate::{
-    decode_budgeted_candidate, BudgetedExecutionCandidate, CandidateResourceError,
+    candidate::decode_archived_candidate, BudgetedExecutionCandidate, CandidateResourceError,
     ExecutionCandidate,
 };
 
@@ -237,7 +237,7 @@ impl CandidateWorldStorage for WorldState {
         let candidate: ExecutionCandidate<Self> = serde_json::from_slice(bytes)
             .map_err(|e| CandidateResourceError::Decode(e.to_string()))?;
         candidate
-            .validate()
+            .validate_archived()
             .map_err(CandidateResourceError::Invalid)?;
         Ok(candidate)
     }
@@ -286,7 +286,7 @@ impl CandidateWorldStorage for BudgetedWorld {
         bytes: &[u8],
         budget: Option<&Arc<WorldResourceBudget>>,
     ) -> Result<ExecutionCandidate<Self>, CandidateResourceError> {
-        decode_budgeted_candidate(
+        decode_archived_candidate(
             bytes,
             budget.expect("budgeted store always has explicit pool"),
         )
@@ -347,7 +347,7 @@ impl CandidateStore<BudgetedWorld> {
             .as_ref()
             .unwrap()
             .reserve(pin_charge(counter.0)?)?;
-        candidate.validate()?;
+        candidate.validate_archived()?;
         if let Some(original) = self.get_budgeted(candidate.height)? {
             if original != *candidate {
                 return Err("candidate pin conflicts with durable history".into());
@@ -567,14 +567,10 @@ impl<W: CandidateWorldStorage> CandidateStore<W> {
                         receipts: legacy.receipts,
                     }
                 };
-                metadata
-                    .protected_material
-                    .validate()
-                    .map_err(|e| format!("invalid protected material: {e:?}"))?;
                 let protected = synergy_block::hash_block_bytes(
                     &metadata
                         .protected_material
-                        .commitment_bytes()
+                        .archived_commitment_bytes()
                         .map_err(|e| format!("encode protected material: {e:?}"))?,
                 );
                 let canonical = serde_json::to_vec(&(

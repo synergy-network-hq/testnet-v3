@@ -10,8 +10,8 @@ mod dispatcher;
 mod executor;
 mod fees;
 mod processing_candidate;
-mod processing_groups;
 mod processing_epoch;
+mod processing_groups;
 mod processing_registry;
 mod receipts;
 mod rollback;
@@ -20,8 +20,8 @@ mod transition;
 mod validation;
 
 pub use candidate::{
-    decode_budgeted_candidate, reserve_execution_metadata, BudgetedExecutionCandidate,
-    CandidateResourceError, ExecutionCandidate,
+    decode_budgeted_candidate, decode_budgeted_epoch_close_candidate, reserve_execution_metadata,
+    BudgetedExecutionCandidate, CandidateResourceError, ExecutionCandidate,
 };
 pub use candidate_store::{
     BudgetedCandidateStore, CandidateCommitment, CandidateStore, CandidateWorldStorage,
@@ -42,12 +42,12 @@ pub use processing_candidate::{
     processing_payload_root, ProcessingCandidateContext, ProcessingCandidateError,
     ProcessingEpochClose, ProcessingPayloadError, ProcessingPayloadProvider,
 };
+pub use processing_epoch::{propose_empty_processing_epoch_transition, ProcessingEpochTransition};
 pub use processing_groups::{
     processing_group_state, processing_group_transition, processing_member_claim,
     processing_member_claim_optional, processing_order_tip, verify_processing_record_assignment,
     ProcessingGroupState, ProcessingGroupTransition, ProcessingMemberClaim,
 };
-pub use processing_epoch::{propose_empty_processing_epoch_transition, ProcessingEpochTransition};
 pub use processing_registry::{
     ParentProcessingRegistry, ParentProcessingSelection, ProcessingReadinessVerifier,
     ProcessingReadyRecord, ProcessingRegistryError, ProcessingRegistryTransition,
