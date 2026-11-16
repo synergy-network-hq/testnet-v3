@@ -169,10 +169,12 @@ pub(crate) fn verify_pinned_bootstrap_bytes(
         || bytes.len() > 4 * 1024 * 1024
         || apqe_transport::sha256(bytes) != expected_sha256
     {
-        return Err("autonomous activation differs from its approved SHA-256 pin or size bound".into());
+        return Err(
+            "autonomous activation differs from its approved SHA-256 pin or size bound".into(),
+        );
     }
-    let activation = serde_json::from_slice(bytes)
-        .map_err(|e| format!("decode autonomous activation: {e}"))?;
+    let activation =
+        serde_json::from_slice(bytes).map_err(|e| format!("decode autonomous activation: {e}"))?;
     verify_autonomous_bootstrap(configuration, origin, activation)
 }
 
@@ -182,9 +184,12 @@ pub(crate) fn verify_next_derived_bytes(
     bytes: &[u8],
 ) -> Result<Arc<VerifiedAuthority>, String> {
     if previous.autonomous_closure.is_none() || bytes.is_empty() || bytes.len() > 4 * 1024 * 1024 {
-        return Err("derived proof lacks an autonomous predecessor or exceeds its size bound".into());
+        return Err(
+            "derived proof lacks an autonomous predecessor or exceeds its size bound".into(),
+        );
     }
-    let proof = serde_json::from_slice(bytes).map_err(|e| format!("decode successor proof: {e}"))?;
+    let proof =
+        serde_json::from_slice(bytes).map_err(|e| format!("decode successor proof: {e}"))?;
     verify_native_successor(previous, proof)
 }
 
@@ -1435,7 +1440,11 @@ fn signed_derived_test_proof(
     next_validators: Vec<ValidatorRecord>,
     keys: &[synergy_address_engine::apqe::crypto_engine::EncodedKeyPair],
     engine: &Arc<Mutex<synergy_address_engine::apqe::crypto_engine::CryptoEngine>>,
-) -> DerivedEpochProof {
+    ingress: Option<&crate::services::ingress::AuthenticatedIngress>,
+) -> (
+    DerivedEpochProof,
+    Option<synergy_execution::BudgetedExecutionCandidate>,
+) {
     use synergy_address_engine::{apqe::provider::SignOptions, types::Algorithm};
     use synergy_posy::{block_vote_signing_bytes, BlockVote, ConsensusObjectContext};
     let root = synergy_etdag::EtdagDigest::from_domain_bytes("epoch-closure-test", b"namespace");
@@ -1462,6 +1471,29 @@ fn signed_derived_test_proof(
         block_id: "d".repeat(64),
         qc_id: "e".repeat(64),
     };
+    let closing_candidate = ingress.map(|ingress| {
+        let world = synergy_state::WorldState::default();
+        let mut candidate = synergy_execution::BudgetedExecutionCandidate {
+            height: authorization.finalized_height,
+            block_id: String::new(),
+            parent_block_id: parent.block_id().into(),
+            protected_execution_root: protected_root.clone(),
+            protected_material: closing_material.clone().into(),
+            state_root: synergy_state::state_root(&world).unwrap(),
+            transactions: Vec::new(),
+            receipts: Vec::new(),
+            state: Arc::new(
+                synergy_state::world_resources::BudgetedWorld::try_clone_world(
+                    &world,
+                    ingress.world_budget(),
+                )
+                .unwrap(),
+            ),
+            resource_permit: None,
+        };
+        candidate.block_id = candidate.commitment_id().unwrap();
+        candidate
+    });
     let mut finality = ThreeQcFinality::default();
     let mut certificates = Vec::new();
     for height in authorization.finalized_height..=previous.epoch_end_height {
@@ -1473,7 +1505,13 @@ fn signed_derived_test_proof(
                 let record = &next_validators[index];
                 let mut vote = BlockVote {
                     context: ConsensusObjectContext::for_height(previous, height, 0).unwrap(),
-                    block_id: format!("{height:064x}"),
+                    block_id: closing_candidate
+                        .as_ref()
+                        .filter(|candidate| candidate.height == height)
+                        .map_or_else(
+                            || format!("{height:064x}"),
+                            |candidate| candidate.block_id.clone(),
+                        ),
                     parent_block_id: parent.block_id().into(),
                     parent: parent.clone(),
                     takeover_tc_id: None,
@@ -1508,16 +1546,19 @@ fn signed_derived_test_proof(
         };
         certificates.push(qc);
     }
-    DerivedEpochProof {
-        authorization,
-        finalized: finality.last_finalized().unwrap().clone(),
-        witness: synergy_posy::FinalitySyncWitness {
-            quorum_certificates: certificates.try_into().unwrap(),
-            timeout_certificates: Vec::new(),
+    (
+        DerivedEpochProof {
+            authorization,
+            finalized: finality.last_finalized().unwrap().clone(),
+            witness: synergy_posy::FinalitySyncWitness {
+                quorum_certificates: certificates.try_into().unwrap(),
+                timeout_certificates: Vec::new(),
+            },
+            closing_material: closing_material.into(),
+            next_validators,
         },
-        closing_material: closing_material.into(),
-        next_validators,
-    }
+        closing_candidate,
+    )
 }
 
 #[cfg(test)]
@@ -1544,21 +1585,98 @@ pub(super) fn qualify_offline_successor(
             .unwrap()
             .0
     };
-    let mut derived = signed_derived_test_proof(
+    let (mut derived, _) = signed_derived_test_proof(
         &cursor.context,
         next_subject(&cursor),
         validators.clone(),
         keys,
         engine,
+        None,
     );
     cursor.advance(&derived).unwrap();
-    let second = signed_derived_test_proof(
+    let ingress = crate::services::ingress::AuthenticatedIngress::default();
+    let (second, closing_candidate) = signed_derived_test_proof(
         &cursor.context,
         next_subject(&cursor),
         validators,
         keys,
         engine,
+        Some(&ingress),
     );
+    let active = verify_native_successor(
+        Arc::new(previous.clone()),
+        serde_json::from_slice(&serde_json::to_vec(&derived).unwrap()).unwrap(),
+    )
+    .unwrap();
+    let closing_candidate = Arc::new(closing_candidate.unwrap());
+    let qc = &second.witness.quorum_certificates[0];
+    assert!(closing_candidate.validate().is_err());
+    assert!(ingress
+        .verify_sync_candidate_integrity(&closing_candidate)
+        .is_err());
+    ingress
+        .install_finality_history(config.storage.data_directory.clone(), Arc::clone(&active))
+        .unwrap();
+    let mut malformed = synergy_execution::BudgetedExecutionCandidate {
+        height: closing_candidate.height,
+        block_id: closing_candidate.block_id.clone(),
+        parent_block_id: closing_candidate.parent_block_id.clone(),
+        protected_execution_root: closing_candidate.protected_execution_root.clone(),
+        protected_material: closing_candidate.protected_material.clone(),
+        state_root: closing_candidate.state_root.clone(),
+        transactions: Vec::new(),
+        receipts: Vec::new(),
+        state: Arc::clone(&closing_candidate.state),
+        resource_permit: None,
+    };
+    let synergy_etdag::execution::CandidateProtectedMaterial::Processing(material) =
+        &mut malformed.protected_material
+    else {
+        panic!("closing candidate requires processing material");
+    };
+    material.epoch_transition_subject_root = Some("a".repeat(64));
+    assert!(ingress.verify_sync_candidate_integrity(&malformed).is_err());
+    assert!(active.verify_processing_candidate(&malformed).is_err());
+    let synergy_etdag::execution::CandidateProtectedMaterial::Processing(material) =
+        &mut malformed.protected_material
+    else {
+        unreachable!();
+    };
+    material.material_version = 1;
+    material.epoch_transition_subject_root = None;
+    malformed.protected_execution_root =
+        synergy_block::hash_block_bytes(&material.commitment_bytes().unwrap());
+    malformed.block_id = malformed.commitment_id().unwrap();
+    malformed.validate().unwrap();
+    assert!(ingress.verify_sync_candidate_integrity(&malformed).is_err());
+    assert!(active.verify_processing_candidate(&malformed).is_err());
+    ingress
+        .publish_processing_certified_parent(Arc::clone(&closing_candidate), qc, &active)
+        .unwrap();
+    assert_eq!(
+        ingress
+            .processing_certified_parent()
+            .unwrap()
+            .unwrap()
+            .block_id,
+        closing_candidate.block_id
+    );
+    assert!(ingress
+        .try_submit_verified_sync_candidate(
+            Arc::clone(&closing_candidate),
+            second.finalized.clone()
+        )
+        .unwrap());
+    assert_eq!(
+        ingress
+            .take_verified_sync_candidate()
+            .unwrap()
+            .unwrap()
+            .0
+            .block_id,
+        closing_candidate.block_id
+    );
+
     assert!(verify_derived_epoch(previous, &second).is_err());
     cursor.advance(&second).unwrap();
     assert_eq!(cursor.context.epoch_start_height, 21001);

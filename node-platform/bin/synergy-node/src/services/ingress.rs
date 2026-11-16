@@ -1092,7 +1092,7 @@ impl AuthenticatedIngress {
         peer: AuthenticatedPeer,
         response: FinalizedCandidateResponse,
     ) -> Result<CandidateResponseHandoff, String> {
-        response.candidate.validate()?;
+        self.verify_sync_candidate_integrity(&response.candidate)?;
         if !response.request.validate()
             || response.candidate.height != response.request.height
             || response.candidate.parent_block_id != response.request.expected_parent_id
@@ -1330,7 +1330,7 @@ impl AuthenticatedIngress {
         record: FinalizedBlockRecord,
         limit: usize,
     ) -> Result<bool, String> {
-        candidate.validate()?;
+        self.verify_sync_candidate_integrity(&candidate)?;
         if candidate.height != record.height
             || candidate.block_id != record.block_id
             || candidate.protected_execution_root != record.protected_execution_root
@@ -1736,7 +1736,9 @@ impl AuthenticatedIngress {
         }
         qc.verify(&authority.epoch, &authority.registry, authority)
             .map_err(|e| e.to_string())?;
-        candidate.validate()?;
+        // A processing epoch-close candidate is valid only under the same
+        // governed authority as its QC. Ordinary validation rejects version 2.
+        authority.verify_processing_candidate(&candidate)?;
         if candidate.height != qc.context.height
             || candidate.block_id != qc.block_id
             || candidate.parent_block_id != qc.parent_block_id
@@ -2240,6 +2242,16 @@ impl AuthenticatedIngress {
         match history.authority.autonomous_authority_at(height) {
             Some(authority) => authority.epoch_close_subject_at(height),
             None => Ok(None),
+        }
+    }
+
+    pub(super) fn verify_sync_candidate_integrity(
+        &self,
+        candidate: &synergy_execution::BudgetedExecutionCandidate,
+    ) -> Result<(), String> {
+        match self.sync_epoch_close_subject(candidate.height)? {
+            Some(subject) => candidate.validate_epoch_close(candidate.height, &subject),
+            None => candidate.validate(),
         }
     }
 

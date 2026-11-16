@@ -1375,7 +1375,9 @@ fn verify_committed_sync_replay(
     candidate: &ExecutionCandidate,
     committed: &synergy_state::FinalizedState,
 ) -> Result<(), String> {
-    candidate.validate()?;
+    // The Sync queue and consuming owner have already checked the governed
+    // subject. Here validate archival integrity against the exact durable ID.
+    candidate.validate_archived()?;
     if candidate.height != committed.finalized_height
         || candidate.block_id != committed.finalized_block_id
         || candidate.state_root != committed.state_root
@@ -2176,7 +2178,7 @@ impl ExecutionService {
             let Some((candidate, record)) = self.ingress.take_verified_sync_candidate()? else {
                 break;
             };
-            candidate.validate()?;
+            self.ingress.verify_sync_candidate_integrity(&candidate)?;
             if candidate.height != record.height
                 || candidate.block_id != record.block_id
                 || candidate.protected_execution_root != record.protected_execution_root
