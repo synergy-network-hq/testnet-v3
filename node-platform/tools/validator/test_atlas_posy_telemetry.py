@@ -40,7 +40,7 @@ class RosterSelection(unittest.TestCase):
             'observed_at': '2026-11-16T14:00:00+00:00',
             'chain_telemetry': {'schema_version': 1, 'network_identity': self.network,
                 'genesis_hash': self.genesis, 'chain_id': 99999, 'process_id': n,
-                'observed_at_unix_ms': 1794837600000},
+                'observed_at_unix_ms': 1794837600000, 'epoch': 7, 'epoch_context_root': 'b' * 64},
         }
 
     def test_four_verified_hosts_can_publish_without_stale_fifth(self):
@@ -57,6 +57,30 @@ class RosterSelection(unittest.TestCase):
         network, genesis, verified = collector.active_network(self.states)
         roster = collector.roster_observations(self.states, verified, network, genesis)
         self.assertEqual(collector.validator_status(roster[5], None)[0], 'unreachable')
+
+    def test_chain_and_epoch_are_observed_in_verified_running_samples_only(self):
+        self.states[5]['service'] = {'SubState': 'dead', 'MainPID': '0'}
+        self.states[5]['chain_telemetry']['epoch'] = 6
+        def observed():
+            _, _, verified = collector.active_network(self.states)
+            return collector.observed_chain_fields(self.states, verified)
+        self.assertEqual(observed(), {'chain_id': 99999, 'epoch': 7})
+        for field, conflicting in (
+            ('epoch', 6), ('epoch', None), ('epoch', True),
+            ('epoch_context_root', 'c' * 64), ('epoch_context_root', None),
+        ):
+            with self.subTest(field=field, conflicting=conflicting):
+                native = self.states[4]['chain_telemetry']
+                original = native[field]
+                native[field] = conflicting
+                self.assertEqual(observed(), {'chain_id': 99999})
+                native[field] = original
+        self.states[5]['service'] = {'SubState': 'running', 'MainPID': '100'}
+        self.assertEqual(observed(), {'chain_id': 99999})
+        self.states[5]['service'] = {'SubState': 'dead', 'MainPID': '0'}
+        for n in (2, 3, 4, 6):
+            self.states[n]['chain_telemetry']['chain_id'] = 2**53
+        self.assertEqual(observed(), {'epoch': 7})
 
     def test_foreign_running_config_and_insufficient_native_agreement_fail_closed(self):
         self.states[5]['network_id'] = 'foreign'

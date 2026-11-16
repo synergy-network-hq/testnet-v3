@@ -317,6 +317,31 @@ def active_network(states):
     return network,genesis,verified
 
 
+def observed_chain_fields(states, verified):
+    # Each verified observation already binds network, genesis, process and
+    # finalized commitment. Never infer an epoch from height or an idle host.
+    observations=[s['chain_telemetry'] for s in verified.values()]
+    fields={}
+    def agreement(key):
+        values=[observation.get(key) for observation in observations]
+        if values and all(type(value) is int and 0 < value <= 2**53-1 for value in values):
+            return values[0] if len(set(values))==1 else None
+        return None
+    chain_id=agreement('chain_id')
+    if chain_id is not None:
+        fields['chain_id']=chain_id
+    if any(s.get('service',{}).get('SubState')=='running' and n not in verified
+           for n,s in states.items()):
+        return fields
+    epoch=agreement('epoch')
+    roots=[observation.get('epoch_context_root') for observation in observations]
+    if epoch is not None and (all(root is None for root in roots)
+            or all(isinstance(root,str) and re.fullmatch(r'[0-9a-f]{64}',root)
+                   and root==roots[0] for root in roots)):
+        fields['epoch']=epoch
+    return fields
+
+
 def roster_observations(states, verified, network, genesis):
     # Never let retained or foreign inactive data influence live aggregation.
     result={}
@@ -470,6 +495,7 @@ def run(report=None, once=False, test_plan=None):
             if once:raise
             time.sleep(10)
             continue
+        chain_fields=observed_chain_fields(states,verified)
         states=roster_observations(states,verified,network_id,genesis_hash)
         for n, state in states.items():
             cursor = state.pop('_transaction_cursor', None)
@@ -532,7 +558,7 @@ def run(report=None, once=False, test_plan=None):
             accepted_rates=[state['_throughput'].get('accepted_tps') for state in states.values()]
             tip_state['_throughput']['accepted_tps']=sum(accepted_rates) if all(value is not None for value in accepted_rates) else None
         b=tip_state['block'] if tip_state else {}
-        payload={'observed_at':timestamp,'chain':{'network_id':network_id,'genesis_hash':genesis_hash,'proposer':current_proposer(states),'height':height,'finalized_height':height,'block_time_ms':speed,'transactions':tip_state['transactions'] if tip_state else None,'wallets':tip_state['wallets'] if tip_state else None,'finalized_block_id':b.get('block_hash'),'state_root':b.get('state_root'),'verified_quorum':None,'throughput':tip_state['_throughput'] if tip_state else None,'load_test':baseline_status(report,states,network_id,now)},'validators':nodes,'tests':tests}
+        payload={'observed_at':timestamp,'chain':{**chain_fields,'network_id':network_id,'genesis_hash':genesis_hash,'proposer':current_proposer(states),'height':height,'finalized_height':height,'block_time_ms':speed,'transactions':tip_state['transactions'] if tip_state else None,'wallets':tip_state['wallets'] if tip_state else None,'finalized_block_id':b.get('block_hash'),'state_root':b.get('state_root'),'verified_quorum':None,'throughput':tip_state['_throughput'] if tip_state else None,'load_test':baseline_status(report,states,network_id,now)},'validators':nodes,'tests':tests}
         data=json.dumps(payload).encode()
         try:
             owner.remote('synergy-index',MASTER_SOCKETS['synergy-index'],['python3','-c',PUBLISH],data)
