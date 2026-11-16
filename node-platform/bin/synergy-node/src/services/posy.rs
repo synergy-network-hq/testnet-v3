@@ -979,6 +979,20 @@ struct AutonomousBoundary {
     signal: authority::AuthorityTransitionSignal,
 }
 
+fn signal_persisted_autonomous_successor(
+    boundary: &mut Option<AutonomousBoundary>,
+    epoch: u64,
+) -> Result<(), String> {
+    if let Some(owner) = boundary {
+        owner.signal.stage(epoch)?;
+        // The old PoSy owner may poll again after the supervisor has taken
+        // this signal but before it stops the owner. Only the new owner may
+        // publish another transition after this one was durably staged.
+        *boundary = None;
+    }
+    Ok(())
+}
+
 /// Transport-only bounded scan of immutable originals. At most one historical
 /// lease and 4096 slot locators are retained. Larger legacy histories are paged
 /// through repeated incremental scans, never omitted or loaded as proof vectors.
@@ -1024,7 +1038,7 @@ enum RetryFrame {
 }
 
 impl PosyService {
-    fn publish_autonomous_successor(&self) -> Result<(), String> {
+    fn publish_autonomous_successor(&mut self) -> Result<(), String> {
         let Some(owner) = self.autonomous_boundary.as_ref() else {
             return Ok(());
         };
@@ -1093,7 +1107,7 @@ impl PosyService {
             witness,
             &candidate,
         )?;
-        owner.signal.stage(epoch)
+        signal_persisted_autonomous_successor(&mut self.autonomous_boundary, epoch)
     }
 
     fn retry_payload(&mut self, slot: (u64, u64, u8)) -> Result<Vec<u8>, String> {
@@ -4117,6 +4131,35 @@ fn peer_error_is_fatal(certified: bool, error: &PosyError) -> bool {
 #[cfg(test)]
 mod delivery_tests {
     use super::*;
+
+    #[test]
+    fn autonomous_boundary_signals_once_even_after_supervisor_takes_it() {
+        let signal = authority::AuthorityTransitionSignal::default();
+        let boundary = || {
+            Some(AutonomousBoundary {
+                proof_root: Default::default(),
+                candidate_root: Default::default(),
+                signal: signal.clone(),
+            })
+        };
+        let mut current = boundary();
+        // A conflicting pending signal must fail without consuming the owner.
+        signal.stage(8).unwrap();
+        assert!(signal_persisted_autonomous_successor(&mut current, 7).is_err());
+        assert!(current.is_some());
+        assert_eq!(signal.take().unwrap(), Some(8));
+
+        signal_persisted_autonomous_successor(&mut current, 7).unwrap();
+        assert!(current.is_none());
+        assert_eq!(signal.take().unwrap(), Some(7));
+        // Reproduce the old owner's next poll before the rebind can stop it.
+        signal_persisted_autonomous_successor(&mut current, 7).unwrap();
+        assert_eq!(signal.take().unwrap(), None);
+
+        let mut next = boundary();
+        signal_persisted_autonomous_successor(&mut next, 8).unwrap();
+        assert_eq!(signal.take().unwrap(), Some(8));
+    }
 
     #[test]
     fn stale_and_premature_peer_messages_are_nonfatal_but_certified_conflict_is_fatal() {
