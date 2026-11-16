@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 from urllib.parse import urlsplit
 
@@ -18,6 +19,11 @@ sys.dont_write_bytecode = True
 from synergy_linux import read, require, native
 
 CONFIG = 'config/canary-rpc-relay.json'
+BOOTSTRAP_PIN = 'autonomous_bootstrap_sha256'
+BOOTSTRAP_RECORD = 'evidence/gateway-bootstrap-pin.json'
+BOOTSTRAP_STAGED = 'config/.gateway-bootstrap-pin.pending.json'
+BOOTSTRAP_FORMAT = 'synergy-canary-gateway-bootstrap-pin-v1'
+SHA256 = re.compile(r'[0-9a-f]{64}')
 GATEWAY_INPUTS = frozenset((CONFIG, 'config/node.json',
     'network/genesis.json', 'network/authority.json', 'network/authority-root.pub',
     'network/network-manifest.json', 'network/transport-registry.json',
@@ -84,12 +90,8 @@ def validate_gateway_layout(root):
         path = root/name
         require(path.is_file() and not path.is_symlink() and path.stat().st_uid == os.geteuid()
                 and path.stat().st_mode & 0o777 == 0o600, 'unsafe gateway input: '+name)
-    actual = read(root/CONFIG)
-    role = dict(actual['role'])
-    for key in ('enrollment_path', 'custody_path', 'custody_unlock_path'):
-        role.pop(key, None)
-    require(actual == configuration(root, {'role': role, 'listen_address': actual['listen_address']})
-            and role['kind'] == 'gateway', 'noncanonical gateway relay configuration')
+    _canonical_gateway_configuration(root, read(root/CONFIG))
+    verify_bootstrap_pin_record(root)
     native([root/'bin/synergy-node', 'canary-rpc-relay', 'check', root/CONFIG])
     return {'native_admission_custody_verified': True, 'validator_keys_present': False,
             'production_qualified': False}
@@ -246,6 +248,9 @@ def configuration(root, value):
     common = {'kind', 'validator_address'}
     fields = common | ({'gateway_vpn_ip'} if kind == 'validator' else
         {'gateway_address', 'validator_relay_port', 'allowed_origins'} if kind == 'gateway' else set())
+    if kind == 'gateway' and BOOTSTRAP_PIN in role:
+        fields.add(BOOTSTRAP_PIN)
+        require(_is_digest(role[BOOTSTRAP_PIN]), 'exact lowercase gateway bootstrap SHA-256 required')
     require(kind in ('validator', 'gateway') and set(role) == fields, 'unsupported relay role fields')
     require(isinstance(role['validator_address'], str) and re.fullmatch(r'synv1[0-9a-z]+', role['validator_address']), 'validator address required')
     listen = value['listen_address']
@@ -280,6 +285,146 @@ def configuration(root, value):
             'listen_address': listen, 'role': role}
 
 
+def _is_digest(value):
+    return isinstance(value, str) and SHA256.fullmatch(value) is not None
+
+
+def _canonical_gateway_configuration(root, actual):
+    role = dict(actual['role'])
+    for key in ('enrollment_path', 'custody_path', 'custody_unlock_path'):
+        role.pop(key, None)
+    require(role.get('kind') == 'gateway'
+            and actual == configuration(root, {'role': role, 'listen_address': actual['listen_address']}),
+            'noncanonical gateway relay configuration')
+    return actual
+
+
+def _private_bytes(path, limit):
+    require(path.parent.resolve(strict=True) == path.parent, 'noncanonical gateway pin path')
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as stream:
+        meta = os.fstat(stream.fileno())
+        require(stat.S_ISREG(meta.st_mode) and meta.st_uid == os.geteuid()
+                and stat.S_IMODE(meta.st_mode) == 0o600 and meta.st_nlink == 1
+                and 0 < meta.st_size <= limit, 'unsafe private gateway pin input')
+        raw = stream.read(limit + 1)
+        require(len(raw) == meta.st_size, 'gateway pin input changed while reading')
+        return raw
+
+
+def _unique_fields(fields):
+    value = dict(fields)
+    require(len(value) == len(fields), 'duplicate gateway pin input field')
+    return value
+
+
+def _json_bytes(value):
+    return (json.dumps(value, sort_keys=True, allow_nan=False) + '\n').encode()
+
+
+def _sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _exists(path):
+    return path.exists() or path.is_symlink()
+
+
+def _bootstrap_record(root):
+    path = root/BOOTSTRAP_RECORD
+    if not _exists(path):
+        return None
+    value = json.loads(_private_bytes(path, 4096), object_pairs_hook=_unique_fields)
+    require(isinstance(value, dict) and set(value) == {
+                'format', 'phase', 'bootstrap_sha256', 'before_sha256', 'after_sha256'}
+            and value['format'] == BOOTSTRAP_FORMAT and value['phase'] in ('pending', 'complete')
+            and all(_is_digest(value[field]) for field in ('bootstrap_sha256', 'before_sha256', 'after_sha256'))
+            and value['before_sha256'] != value['after_sha256'], 'invalid gateway bootstrap pin record')
+    return value
+
+
+def verify_bootstrap_pin_record(root):
+    record = _bootstrap_record(root)
+    require(not _exists(root/BOOTSTRAP_STAGED) and (record is None or record['phase'] == 'complete'),
+            'finish recorded gateway bootstrap pin update before startup')
+    if record is not None:
+        installed = _private_bytes(root/CONFIG, 64*1024)
+        actual = json.loads(installed, object_pairs_hook=_unique_fields)
+        require(_sha(installed) == record['after_sha256']
+                and actual['role'].get(BOOTSTRAP_PIN) == record['bootstrap_sha256'],
+                'installed gateway configuration differs from completed bootstrap pin record')
+
+
+def apply_bootstrap_pin(root, expected_config_sha256, bootstrap_sha256):
+    """One-time, stopped gateway update. Resume only the exact pinned transaction."""
+    import lifecycle
+    lifecycle._require_operator()
+    require(_is_digest(expected_config_sha256) and _is_digest(bootstrap_sha256),
+            'independent prior configuration and bootstrap SHA-256 pins required')
+    token = _sha(f'{expected_config_sha256}:{bootstrap_sha256}'.encode('ascii'))
+    path, staged, record_path = (root/name for name in (CONFIG, BOOTSTRAP_STAGED, BOOTSTRAP_RECORD))
+    check = [root/'bin/synergy-node', 'canary-rpc-relay', 'check']
+    with lifecycle._lifecycle_lock(root):
+        receipt, _ = lifecycle._sealed_receipt(root)
+        require(receipt.get('role') == 'rpc_gateway' and receipt.get('chain_id') == 99999
+                and receipt.get('gateway_commissioned') is True, 'commissioned Canary gateway required')
+        for name in (lifecycle.UPGRADE_INTENT, lifecycle.REPLACEMENT_INTENT,
+                     lifecycle.AUTHORITY_RECOVERY_INTENT, lifecycle.AUTONOMOUS_EPOCH_INTENT):
+            require(not _exists(root/name), 'reconcile other lifecycle intent before gateway pin update')
+        lifecycle._reject_installation_mounts(root)
+        unit = lifecycle._attributed_units(root).get(lifecycle.RELAY_UNIT, {})
+        require(unit.get('MainPID') == '0' and unit.get('ActiveState') in ('inactive', 'failed'),
+                'stop the attributed gateway relay before bootstrap pin update')
+        installed = _private_bytes(path, 64*1024)
+        old_sha = _sha(installed)
+        config = _canonical_gateway_configuration(root, json.loads(installed, object_pairs_hook=_unique_fields))
+        record = _bootstrap_record(root)
+        if record is not None:
+            require(record['before_sha256'] == expected_config_sha256
+                    and record['bootstrap_sha256'] == bootstrap_sha256,
+                    'gateway bootstrap pin update already bound to another request')
+        if record is not None and old_sha == record['after_sha256']:
+            require(config['role'].get(BOOTSTRAP_PIN) == bootstrap_sha256 and not _exists(staged),
+                    'published gateway pin update differs from its recorded intent')
+            native([*check, path])
+            already_current = record['phase'] == 'complete'
+        else:
+            require(old_sha == expected_config_sha256 and BOOTSTRAP_PIN not in config['role']
+                    and (record is None or record['phase'] == 'pending'),
+                    'exact unpinned prior gateway configuration required')
+            config['role'][BOOTSTRAP_PIN] = bootstrap_sha256
+            candidate = _json_bytes(config)
+            if record is None:
+                record = {'format': BOOTSTRAP_FORMAT, 'phase': 'pending',
+                          'bootstrap_sha256': bootstrap_sha256, 'before_sha256': old_sha,
+                          'after_sha256': _sha(candidate)}
+            require(_sha(candidate) == record['after_sha256'], 'gateway pin candidate differs from recorded intent')
+            if _exists(staged):
+                require(_private_bytes(staged, 64*1024) == candidate, 'foreign gateway pin staging member')
+            else:
+                lifecycle._replace_bytes(root, staged, candidate, 0o600, token)
+            try:
+                native([*check, staged])
+                if not _exists(record_path):
+                    lifecycle._replace_bytes(root, record_path, _json_bytes(record), 0o600, token)
+                require(_sha(_private_bytes(path, 64*1024)) == old_sha
+                        and _private_bytes(staged, 64*1024) == candidate, 'gateway pin inputs changed before publication')
+                os.replace(staged, path)
+                lifecycle._sync_directory(path.parent)
+            finally:
+                if _exists(staged):
+                    staged.unlink()
+                    lifecycle._sync_directory(staged.parent)
+            already_current = False
+        require(_sha(_private_bytes(path, 64*1024)) == record['after_sha256'],
+                'published gateway configuration changed')
+        if not already_current:
+            lifecycle._replace_bytes(root, record_path, _json_bytes(dict(record, phase='complete')), 0o600, token)
+        verify_bootstrap_pin_record(root)
+    return {'bootstrap_sha256': bootstrap_sha256, 'configuration_sha256': record['after_sha256'],
+            'native_preflight_verified': True, 'already_current': already_current, 'services_started': False}
+
+
 def configure(root, spec):
     import lifecycle
     lifecycle._require_operator()
@@ -312,16 +457,20 @@ def configure(root, spec):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('render', 'configure', 'register', 'start', 'stop', 'commission-gateway'))
+    parser.add_argument('command', choices=('render', 'configure', 'register', 'start', 'stop', 'commission-gateway', 'apply-bootstrap-pin'))
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--spec', type=Path)
     parser.add_argument('--staged', type=Path)
     parser.add_argument('--manifest-sha256')
+    parser.add_argument('--expected-config-sha256')
+    parser.add_argument('--bootstrap-sha256')
     args = parser.parse_args()
     import lifecycle
     from synergy_linux import safe_root
     root = safe_root(str(args.root))
-    if args.command == 'commission-gateway':
+    if args.command == 'apply-bootstrap-pin':
+        result = apply_bootstrap_pin(root, args.expected_config_sha256, args.bootstrap_sha256)
+    elif args.command == 'commission-gateway':
         require(args.staged is not None, 'staged inputs required')
         result = commission_gateway(root, args.staged, args.manifest_sha256)
     elif args.command in ('render', 'configure'):

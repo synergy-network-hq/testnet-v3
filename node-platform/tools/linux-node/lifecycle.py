@@ -444,6 +444,9 @@ def relay_start_check(root):
         config=read(root/'config/node.json')
         policy=read(root/'config/start-authorized.json') if receipt.get('role')=='validator' else None
         verify_authority_recovery_pin(root,config,receipt,policy)
+        if receipt.get('role') == 'rpc_gateway':
+            from canary_rpc_relay import verify_bootstrap_pin_record
+            verify_bootstrap_pin_record(root)
         native([root/'bin/synergy-node','canary-rpc-relay','check',root/'config/canary-rpc-relay.json'])
     return {'relay_startup_check_passed':True}
 

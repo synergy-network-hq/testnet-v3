@@ -41,6 +41,7 @@ RUNTIME_FILES = (
  r'evidence/(upgrade-intent|upgrade-completed|vpn-retirement|application-replacement-intent)\.json',
  r'evidence/authority-recovery-(intent|completed)\.json',
  r'evidence/autonomous-epoch-intent\.json',
+ r'evidence/gateway-bootstrap-pin\.json',
  r'data/consensus/autonomous-epochs/epoch-[0-9]{20}\.json',
  r'evidence/(initial-transfer|reverse-transfer)/(submission-intent|submission-response)\.json',
  r'data/(?:[a-z0-9_-]+/){0,5}\.synergy-writer\.lock',

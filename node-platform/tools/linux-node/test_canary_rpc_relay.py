@@ -1,4 +1,5 @@
 """No service/network/provider mutations: canonical relay setup boundary tests."""
+from contextlib import ExitStack
 import json
 from pathlib import Path
 import tempfile
@@ -29,6 +30,17 @@ class ConfigurationTests(unittest.TestCase):
             with self.assertRaises(ValueError):relay.configuration(self.root,dict(self.gateway,role=dict(self.gateway['role'],allowed_origins=[origin])))
         with self.assertRaises(ValueError):relay.configuration(self.root,dict(self.gateway,role=dict(self.gateway['role'],custody_path='/tmp/key')))
         with self.assertRaises(ValueError):relay.unit_text(Path('/opt/evil\nExecStart=bad/Synergy'))
+    def test_explicit_bootstrap_pin_is_gateway_only(self):
+        pin = 'a'*64
+        def spec(base, value):
+            return dict(base, role=dict(base['role'], **{relay.BOOTSTRAP_PIN: value}))
+        self.assertEqual(relay.configuration(self.root, spec(self.gateway, pin))['role'][relay.BOOTSTRAP_PIN], pin)
+        for invalid in ('A'*64, 'a'*63, None):
+            with self.assertRaises(ValueError):
+                relay.configuration(self.root, spec(self.gateway, invalid))
+        with self.assertRaisesRegex(ValueError, 'unsupported relay role'):
+            relay.configuration(self.root, spec(self.validator, pin))
+
     def test_native_check_failure_removes_only_created_candidate(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp)/'synergy';(root/'config').mkdir(parents=True)
@@ -49,6 +61,111 @@ class ConfigurationTests(unittest.TestCase):
                 self.assertFalse(result['services_started'])
                 with self.assertRaisesRegex(ValueError,'already exists'):relay.configure(root,self.gateway)
             self.assertEqual((root/relay.CONFIG).stat().st_mode & 0o777,0o600)
+
+
+class GatewayBootstrapPinTests(unittest.TestCase):
+    def setUp(self):
+        temp = ExitStack()
+        self.addCleanup(temp.close)
+        self.root = Path(temp.enter_context(tempfile.TemporaryDirectory())).resolve()/'synergy'
+        for name in ('config', 'evidence'):
+            (self.root/name).mkdir(parents=True, mode=0o700, exist_ok=True)
+        self.path = self.root/relay.CONFIG
+        self.record = self.root/relay.BOOTSTRAP_RECORD
+        self.stage = self.root/relay.BOOTSTRAP_STAGED
+        self.pin = 'd'*64
+        self.config = relay.configuration(self.root, {
+            'listen_address': '127.0.0.1:8552', 'role': {'kind': 'gateway',
+            'gateway_address': 'synv5abc', 'validator_address': 'synv1abc',
+            'validator_relay_port': 8551, 'allowed_origins': ['https://example.com']}})
+        save(self.path, self.config)
+        self.path.chmod(0o600)
+        self.old_raw = self.path.read_bytes()
+        self.old_pin = relay._sha(self.old_raw)
+        self.state = {'MainPID': '0', 'ActiveState': 'inactive'}
+        self.receipt = {'role': 'rpc_gateway', 'chain_id': 99999, 'gateway_commissioned': True}
+        self.calls = []
+        for name, kwargs in [
+            ('_require_operator', {}), ('_reject_installation_mounts', {}),
+            ('_sealed_receipt', {'return_value': (self.receipt, {})}),
+            ('_attributed_units', {'return_value': {life.RELAY_UNIT: self.state}}),
+        ]:
+            temp.enter_context(patch.object(life, name, **kwargs))
+        temp.enter_context(patch.object(relay, 'native', side_effect=self.checked))
+
+    def checked(self, argv):
+        self.assertEqual(argv[:-1], [self.root/'bin/synergy-node', 'canary-rpc-relay', 'check'])
+        self.calls.append(argv[-1])
+        expected = dict(self.config, role=dict(self.config['role'], **{relay.BOOTSTRAP_PIN: self.pin}))
+        self.assertEqual(json.loads(argv[-1].read_bytes()), expected)
+
+    def apply(self):
+        return relay.apply_bootstrap_pin(self.root, self.old_pin, self.pin)
+
+    def test_apply_once_and_retry_only_exact_transaction(self):
+        result = self.apply()
+        self.assertEqual(self.calls, [self.stage])
+        self.assertFalse(result['services_started'])
+        self.assertFalse(result['already_current'])
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(self.record.read_bytes())['phase'], 'complete')
+        self.assertTrue(self.apply()['already_current'])
+        self.assertEqual(self.calls, [self.stage, self.path])
+        with self.assertRaisesRegex(ValueError, 'another request'):
+            relay.apply_bootstrap_pin(self.root, self.old_pin, 'b'*64)
+        save(self.path, self.config)
+        with self.assertRaisesRegex(ValueError, 'differs from completed'):
+            relay.verify_bootstrap_pin_record(self.root)
+
+    def test_rejects_running_wrong_prior_and_failed_native_check_without_changes(self):
+        self.state.update(MainPID='42', ActiveState='active')
+        with self.assertRaisesRegex(ValueError, 'stop the attributed'):
+            self.apply()
+        self.state.update(MainPID='0', ActiveState='inactive')
+        with self.assertRaisesRegex(ValueError, 'exact unpinned prior'):
+            relay.apply_bootstrap_pin(self.root, 'b'*64, self.pin)
+        self.assertEqual(self.calls, [])
+        with patch.object(relay, 'native', side_effect=ValueError('native rejection')):
+            with self.assertRaisesRegex(ValueError, 'native rejection'):
+                self.apply()
+        self.assertEqual(self.path.read_bytes(), self.old_raw)
+        self.assertFalse(self.record.exists())
+        self.assertFalse(self.stage.exists())
+
+    def test_incomplete_record_blocks_actual_relay_preflight_and_resumes(self):
+        original = life._replace_bytes
+        def fail_before_completion(root, path, raw, mode, token):
+            if path == self.record and json.loads(raw)['phase'] == 'complete':
+                raise OSError('interrupted before receipt')
+            return original(root, path, raw, mode, token)
+        with patch.object(life, '_replace_bytes', side_effect=fail_before_completion):
+            with self.assertRaisesRegex(OSError, 'interrupted'):
+                self.apply()
+        self.assertEqual(json.loads(self.record.read_bytes())['phase'], 'pending')
+        save(self.root/'config/node.json', {})
+        with patch.object(life, 'verify_authority_recovery_pin'), patch.object(life, 'native') as check:
+            with self.assertRaisesRegex(ValueError, 'finish recorded gateway'):
+                life.relay_start_check(self.root)
+            check.assert_not_called()
+        self.assertFalse(self.apply()['already_current'])
+        self.assertEqual(self.calls, [self.stage, self.path])
+        relay.verify_bootstrap_pin_record(self.root)
+        self.assertTrue(self.apply()['already_current'])
+
+    def test_interrupted_after_pending_record_but_before_config_rename_resumes(self):
+        original = relay.os.replace
+        def fail_before_config_publish(source, target):
+            if target == self.path:
+                raise OSError('interrupted before publication')
+            return original(source, target)
+        with patch.object(relay.os, 'replace', side_effect=fail_before_config_publish):
+            with self.assertRaisesRegex(OSError, 'interrupted before publication'):
+                self.apply()
+        self.assertEqual(self.path.read_bytes(), self.old_raw)
+        self.assertEqual(json.loads(self.record.read_bytes())['phase'], 'pending')
+        self.assertFalse(self.apply()['already_current'])
+        self.assertEqual(self.calls, [self.stage, self.stage])
+        relay.verify_bootstrap_pin_record(self.root)
 
 
 class RelayLifecycleTests(LifecycleTests):

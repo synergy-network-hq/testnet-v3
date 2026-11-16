@@ -14,6 +14,18 @@ probe = {}
 exec(collector.PROBE.split("configuration,_=")[0], probe)
 
 
+class StaffFeedContract(unittest.TestCase):
+    def test_every_shipped_objective_has_the_required_staff_timestamp_fields(self):
+        plan = json.loads(Path(__file__).with_name('canary-99999-atlas-objectives.json').read_bytes())
+        for item in plan['tests']:
+            with self.subTest(name=item.get('name')):
+                self.assertEqual(set(item), {'name', 'status', 'started_at', 'updated_at', 'detail'})
+                for key in ('started_at', 'updated_at'):
+                    value = item[key]
+                    if value is not None:
+                        self.assertIsNotNone(collector.datetime.datetime.fromisoformat(value).tzinfo)
+
+
 class RosterSelection(unittest.TestCase):
     def setUp(self):
         self.network = 'canary-network'

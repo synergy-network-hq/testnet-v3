@@ -216,18 +216,21 @@
       "name": "Certified processing execution recovery",
       "status": "passed",
       "detail": "Validators no longer exit on the processing pin owner error. The original funding and desktop Wallet sends then finalized without resubmission. Source correction 4337861.",
+      "started_at": null,
       "updated_at": "2026-11-13T22:21:07.407767+00:00"
     },
     {
       "name": "Epoch-2 terminal finality and Val5 replay",
       "status": "in_progress",
       "detail": "Val2/3/4/6 matched three-QC finality at H19998, the signed epoch-2 terminal boundary. Val5 archive reached H17708 with four authenticated peers. Epoch 3 and sustained five-host finality remain open.",
+      "started_at": null,
       "updated_at": "2026-11-13T22:21:07.407767+00:00"
     },
     {
       "name": "Production ordinary Wallet and signed mobile delivery",
       "status": "in_progress",
       "detail": "Ordinary desktop pilot proved funding, send, and history across restart. Normal production workflows, mobile native authorization, and signed Android/iOS artifacts are not yet qualified.",
+      "started_at": null,
       "updated_at": "2026-11-13T22:21:07.407767+00:00"
     }
   ]
