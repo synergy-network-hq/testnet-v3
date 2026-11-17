@@ -56,16 +56,26 @@ def require_clean_service_namespace():
     # before writing any bootstrap files. Independently owned OS/Chain1266
     # services are outside these patterns.
     for operation in ('list-unit-files','list-units'):
-        # Some systemd versions return 1 for a filtered list with no matches.
-        # List first so a command failure cannot be mistaken for a clean host.
+        # Bound systemd's filesystem walk to our owned namespace. Some versions
+        # return 1 for list-unit-files with no matches; only its exactly empty,
+        # diagnostic-free response has that meaning. The subsequent list-units
+        # must still succeed, so an unavailable manager never proves cleanliness.
         result=subprocess.run(['/usr/bin/systemctl',operation,'--all','--no-legend',
-                               '--no-pager','--plain'],
-                              capture_output=True,text=True,check=True,timeout=8)
-        require(len(result.stdout)<=2_000_000,'Service inventory exceeds bound')
+                               '--no-pager','--plain',*VALIDATOR_UNIT_PATTERNS],
+                              capture_output=True,text=True,check=False,timeout=8)
+        stderr=result.stderr or ''
+        require(isinstance(result.stdout,str) and isinstance(stderr,str)
+                and len(result.stdout)<=2_000_000 and len(stderr)<=65536,'Service inventory exceeds bound')
+        no_matches=(operation=='list-unit-files' and result.returncode==1
+                    and result.stdout=='' and stderr=='')
+        require((result.returncode==0 or no_matches) and stderr=='',
+                'Service inventory failed; cannot establish a clean namespace')
         for line in result.stdout.splitlines():
             fields=line.split()
-            if not fields or not any(fnmatchcase(fields[0],pattern) for pattern in VALIDATOR_UNIT_PATTERNS):continue
-            if operation=='list-units' and fields[1:3]==['not-found','inactive']:continue
+            if not fields:continue
+            require(any(fnmatchcase(fields[0],pattern) for pattern in VALIDATOR_UNIT_PATTERNS),
+                    'Service inventory returned an unrelated or malformed row')
+            if operation=='list-units' and len(fields)>=4 and fields[1:4]==['not-found','inactive','dead']:continue
             require(False,'Legacy validator service registration requires review')
 
 

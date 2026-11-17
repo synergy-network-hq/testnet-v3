@@ -61,6 +61,8 @@ class BootstrapTests(unittest.TestCase):
         scenarios = [
             ('synergy-node.service disabled disabled\n', None),
             ('synergy-vpn.service masked enabled\n', None),
+            ('synergy-canary-old.service bad disabled\n', None),
+            ('synergy-posy-old.service linked disabled\n', None),
             ('', 'synergy-posy-old.service loaded failed failed Old validator\n'),
         ]
         for installed, loaded in scenarios:
@@ -72,10 +74,47 @@ class BootstrapTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, 'Legacy validator service'):
                         b.require_clean_service_namespace()
 
-    def test_missing_validator_and_unrelated_services_do_not_block_clean_bootstrap(self):
+    def test_targeted_no_match_semantics_require_successful_manager_inventory(self):
+        with patch.object(b.subprocess,'run',side_effect=[
+                subprocess.CompletedProcess([],1,stdout='',stderr=''),
+                subprocess.CompletedProcess([],0,stdout='',stderr='')]) as run:
+            b.require_clean_service_namespace()
+        self.assertEqual(run.call_count,2)
+        for operation,call in zip(('list-unit-files','list-units'),run.call_args_list):
+            self.assertEqual(call.args[0],['/usr/bin/systemctl',operation,'--all','--no-legend','--no-pager','--plain',*b.VALIDATOR_UNIT_PATTERNS])
+            self.assertFalse(call.kwargs['check']);self.assertEqual(call.kwargs['timeout'],8)
+        # Code 1 is not a generic success fallback. Any diagnostic, nonempty
+        # output, different failure, or failed manager query must fail closed.
+        cases=[(1,'','I/O error'),(1,'unexpected output',''),(2,'',''),
+               (0,'','Failed to connect to bus'),(1,'\n','')]
+        for status,stdout,stderr in cases:
+            with self.subTest(status=status,stdout=stdout,stderr=stderr),patch.object(b.subprocess,'run',return_value=
+                    subprocess.CompletedProcess([],status,stdout=stdout,stderr=stderr)):
+                with self.assertRaisesRegex(ValueError,'Service inventory failed'):b.require_clean_service_namespace()
+        with patch.object(b.subprocess,'run',side_effect=[
+                subprocess.CompletedProcess([],1,stdout='',stderr=''),
+                subprocess.CompletedProcess([],1,stdout='',stderr='')]):
+            with self.assertRaisesRegex(ValueError,'Service inventory failed'):b.require_clean_service_namespace()
+        with patch.object(b.subprocess,'run',side_effect=subprocess.TimeoutExpired('systemctl',8)):
+            with self.assertRaises(subprocess.TimeoutExpired):b.require_clean_service_namespace()
+
+    def test_mismatched_and_partial_filtered_inventory_never_proves_clean(self):
+        for operation,output in [('list-unit-files','ssh.service enabled enabled\n'),
+                ('list-unit-files','Failed to read inventory\n'),
+                ('list-units','synergy-node.service not-found inactive\n')]:
+            responses=[]
+            if operation=='list-units':responses.append(subprocess.CompletedProcess([],0,stdout='',stderr=''))
+            responses.append(subprocess.CompletedProcess([],0,stdout=output,stderr=''))
+            with self.subTest(operation=operation,output=output),patch.object(b.subprocess,'run',side_effect=responses):
+                with self.assertRaises(ValueError):b.require_clean_service_namespace()
+        for stdout,stderr in [('x'*2_000_001,''),('','x'*65537)]:
+            with patch.object(b.subprocess,'run',return_value=subprocess.CompletedProcess([],0,stdout=stdout,stderr=stderr)):
+                with self.assertRaisesRegex(ValueError,'exceeds bound'):b.require_clean_service_namespace()
+
+    def test_filtered_missing_validator_does_not_block_clean_bootstrap(self):
         with patch.object(b.subprocess, 'run', side_effect=[
-            subprocess.CompletedProcess([], 0, stdout='synergy-chain1266-role@.service enabled enabled\nssh.service enabled enabled\n'),
-            subprocess.CompletedProcess([], 0, stdout='synergy-node.service not-found inactive dead\nssh.service loaded active running\n'),
+            subprocess.CompletedProcess([], 0, stdout=''),
+            subprocess.CompletedProcess([], 0, stdout='synergy-node.service not-found inactive dead\n'),
         ]):
             b.require_clean_service_namespace()
 
