@@ -13,7 +13,9 @@ qualification-timing = []
 [dependencies]
 synergy-address-engine = { version = "=2.0.0", path = "../../../../21-Aegis-Engine/synergy-address-engine" }
 base64.workspace = true
-ctrlc = "3"
+# systemd stops send SIGTERM. Finish owner shutdown and atomic storage writes
+# through the same path as Ctrl-C instead of terminating mid-transaction.
+ctrlc = { version = "3", features = ["termination"] }
 libc.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 sha1.workspace = true

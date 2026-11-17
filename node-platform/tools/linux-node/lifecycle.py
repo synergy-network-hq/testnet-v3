@@ -512,8 +512,8 @@ def _assert_no_application_processes(root, vpn_pid=None, proc=Path('/proc'), inv
             'application process remains; mutation refused')
 
 
-def retire_delivery_stage(root, package, package_sha256, stage_name, committed_sha256, stage_sha256, signer_sha256, witness):
-    """Retire one cryptographically superseded, never-committed delivery write."""
+def retire_delivery_stage(root, package, package_sha256, stage_name, committed_sha256, stage_sha256, signer_sha256, witness, recovery_mode="finalized"):
+    """Retire one authenticated, never-committed peer delivery supplement."""
     import fcntl
     _require_operator()
     from apqe_layout import require_frozen_tree
@@ -530,7 +530,10 @@ def retire_delivery_stage(root, package, package_sha256, stage_name, committed_s
             'invoke the exact sealed recovery lifecycle')
     match = re.fullmatch(r'delivery\.tmp-([1-9][0-9]{0,9})-(0|[1-9][0-9]{0,19})', stage_name or '')
     require(match is not None and int(match[1]) > 1, 'exact delivery staging basename required')
-    require(0 < len(witness) <= 4*1024*1024, 'bounded delivery-stage finality witness required')
+    require(recovery_mode in ('finalized','peer-supplement'), 'unsupported delivery recovery mode')
+    require((recovery_mode == 'finalized' and 0 < len(witness) <= 4*1024*1024)
+            or (recovery_mode == 'peer-supplement' and len(witness) == 0),
+            'bounded finality witness or empty peer-supplement input required')
     with _lifecycle_lock(root):
         receipt, _ = _sealed_receipt(root)
         require(receipt.get('role') == 'validator', 'registered validator required')
@@ -572,14 +575,22 @@ def retire_delivery_stage(root, package, package_sha256, stage_name, committed_s
                 return [private_file(name,pin) for name,pin in (
                     ('delivery.json',committed_sha256), (stage_name,stage_sha256), ('sign-once.json',signer_sha256))]
             before = pinned()
-            verified = json.loads(native([package/'bin/synergy-node','verify-delivery-stage',
-                root/'config/node.json',stage_name,committed_sha256,stage_sha256,signer_sha256],data=witness))
+            arguments=[package/'bin/synergy-node','verify-delivery-stage',
+                root/'config/node.json',stage_name,committed_sha256,stage_sha256,signer_sha256]
+            if recovery_mode == 'peer-supplement': arguments.append(recovery_mode)
+            verified = json.loads(native(arguments,data=witness))
             require(verified.get('verified') is True and verified.get('stage') == stage_name
                     and verified.get('committed_sha256') == committed_sha256
                     and verified.get('stage_sha256') == stage_sha256
                     and verified.get('signer_sha256') == signer_sha256
                     and verified.get('witness_sha256') == _hash_bytes(witness),
                     'native proof is not bound to the exact stage, journals and finality witness')
+            if recovery_mode == 'peer-supplement':
+                require(verified.get('recovery_mode') == recovery_mode
+                        and verified.get('finalized') is None
+                        and isinstance(verified.get('candidate'),dict)
+                        and type(verified.get('epoch')) is int and verified['epoch'] > 0,
+                        'native peer supplement proof lacks its exact authenticated mode/context')
             require(all((a.st_dev,a.st_ino,a.st_ctime_ns)==(b.st_dev,b.st_ino,b.st_ctime_ns)
                         for a,b in zip(before,pinned())), 'PoSy recovery members changed during verification')
             (directory/stage_name).unlink()
@@ -1194,6 +1205,7 @@ def main():
     parser.add_argument('--root',required=True);parser.add_argument('--destroy-root');parser.add_argument('--package');parser.add_argument('--staged');parser.add_argument('--replace-root')
     for option in ('package-sha256','stage-name','committed-sha256','stage-sha256','signer-sha256'):
         parser.add_argument('--'+option)
+    parser.add_argument('--recovery-mode',choices=['finalized','peer-supplement'],default='finalized')
     args=parser.parse_args();root=safe_root(args.root)
     if args.command == 'render-units': result={'units':rendered_units(root),'wrapper':wrapper_text(root)}
     elif args.command == 'register': result=register(root)
@@ -1217,7 +1229,7 @@ def main():
     elif args.command == 'retire-delivery-stage':
         require(args.package,'sealed recovery --package required')
         result=retire_delivery_stage(root,args.package,args.package_sha256,args.stage_name,
-            args.committed_sha256,args.stage_sha256,args.signer_sha256,sys.stdin.buffer.read(4*1024*1024+1))
+            args.committed_sha256,args.stage_sha256,args.signer_sha256,sys.stdin.buffer.read(4*1024*1024+1),args.recovery_mode)
     elif args.command == 'health': result=json.loads(native([root/'bin/synergy-node','health','--admin-socket',root/'run/admin.sock']))
     else:
         if args.command in ('start','restart'): start_check(root)

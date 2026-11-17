@@ -338,6 +338,12 @@ life.upgrade(root,candidate)
         self.assertEqual((self.root/'data/metadata/schema-version').read_bytes(),b'synergy-node-storage:1')
 
     def test_delivery_stage_retirement_preserves_committed_delivery_and_signing(self):
+        self.delivery_stage_retirement()
+
+    def test_unfinalized_peer_stage_retirement_preserves_committed_and_signed_evidence(self):
+        self.delivery_stage_retirement(peer_supplement=True)
+
+    def delivery_stage_retirement(self, peer_supplement=False):
         self.register_fixture()
         self.receipt['role']='validator'
         save(self.root/'installation.json',self.receipt)
@@ -351,26 +357,43 @@ life.upgrade(root,candidate)
         before=[(p.stat().st_ino,p.read_bytes()) for p in (committed,signer)]
         pins=[node.digest(p) for p in (committed,stage,signer)]
         package_pin=node.digest(self.candidate/'package.json')
-        witness=b'linked public witness'
+        witness=b'' if peer_supplement else b'linked public witness'
+        options={'recovery_mode':'peer-supplement'} if peer_supplement else {}
         proof={'verified':True,'stage':stage.name,'committed_sha256':pins[0],
                'stage_sha256':pins[1],'signer_sha256':pins[2],
                'witness_sha256':hashlib.sha256(witness).hexdigest(),'finalized':{'height':100}}
+        if peer_supplement:
+            proof.update(recovery_mode='peer-supplement',finalized=None,epoch=7,candidate={'context':{'height':24198}})
         with self.upgrade_context(), patch.object(life,'__file__',self.candidate/'tools/lifecycle.py'), \
              patch.object(life,'_unit_state',side_effect=self.state), patch.object(life,'native') as verifier:
             verifier.return_value=b'{"verified":false}'
             with self.assertRaisesRegex(ValueError,'native proof'):
-                life.retire_delivery_stage(self.root,self.candidate,package_pin,stage.name,*pins,witness)
+                life.retire_delivery_stage(self.root,self.candidate,package_pin,stage.name,*pins,witness,**options)
             self.assertTrue(stage.is_file())
             verifier.return_value=json.dumps(proof).encode()
             other=directory/'delivery.tmp-4294967294-124'
             save(other,b'unreviewed')
             with self.assertRaisesRegex(ValueError,'exactly one'):
-                life.retire_delivery_stage(self.root,self.candidate,package_pin,stage.name,*pins,witness)
+                life.retire_delivery_stage(self.root,self.candidate,package_pin,stage.name,*pins,witness,**options)
             other.unlink()
             with self.assertRaisesRegex(ValueError,'member digest mismatch'):
-                life.retire_delivery_stage(self.root,self.candidate,package_pin,stage.name,*pins[:2],'0'*64,witness)
-            result=life.retire_delivery_stage(self.root,self.candidate,package_pin,stage.name,*pins,witness)
-        self.assertEqual(result['finalized']['height'],100)
+                life.retire_delivery_stage(self.root,self.candidate,package_pin,stage.name,*pins[:2],'0'*64,witness,**options)
+            if peer_supplement:
+                invalid=dict(proof)
+                invalid.pop('recovery_mode')
+                verifier.return_value=json.dumps(invalid).encode()
+                with self.assertRaisesRegex(ValueError,'mode/context'):
+                    life.retire_delivery_stage(self.root,self.candidate,package_pin,stage.name,*pins,witness,**options)
+                self.assertTrue(stage.is_file())
+                with self.assertRaisesRegex(ValueError,'empty peer-supplement'):
+                    life.retire_delivery_stage(self.root,self.candidate,package_pin,stage.name,*pins,b'not-empty',**options)
+                verifier.return_value=json.dumps(proof).encode()
+            result=life.retire_delivery_stage(self.root,self.candidate,package_pin,stage.name,*pins,witness,**options)
+        if peer_supplement:
+            self.assertIsNone(result['finalized'])
+            self.assertEqual(verifier.call_args.args[0][-1],'peer-supplement')
+        else:
+            self.assertEqual(result['finalized']['height'],100)
         self.assertEqual(verifier.call_args.kwargs['data'],witness)
         self.assertFalse(result['consensus_started'])
         self.assertFalse(stage.exists())
