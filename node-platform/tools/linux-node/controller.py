@@ -1079,7 +1079,9 @@ class Controller:
             provider_pin=hashlib.sha256(provider_raw).hexdigest()
             require(policy.get('authorization_files',{}).get('vpn-provider.json')==provider_pin,'Independent VPN provider approval required')
             provider=json.loads(provider_raw)
-            require(provider.get('version')==1 and provider.get('profile')=='nodenetwork-debug-vpn-provider-v1','Explicit approved engineering VPN profile required')
+            from vpn_authorization import network_scope
+            network_scope(provider,{'network_id':receipt['network_id'],'chain_id':receipt['chain_id'],
+                                    'formation_sha256':policy.get('validator_formation_sha256')})
             details=live['peers']['details'];require(isinstance(details,list) and len(details)<=1024,'Bounded native VPN peer inventory required')
             peers={}
             for other in roster:

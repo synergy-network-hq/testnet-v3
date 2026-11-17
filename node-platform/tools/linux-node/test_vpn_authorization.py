@@ -35,6 +35,49 @@ class AuthorizationTests(unittest.TestCase):
         for path in self.root.iterdir():
             self.assertNotIn(secret,path.read_text());self.assertEqual(path.stat().st_mode&0o777,0o600)
         return flow
+    def controlled(self):
+        self.p={**self.p,'profile':v.CONTROLLED_PROFILE,
+                'network_binding':{k:self.b[k] for k in ('network_id','chain_id','formation_sha256')}}
+    def test_controlled_policy_exact_profile_scope_and_pin(self):
+        self.controlled()
+        raw=v.encode(self.p);sha=hashlib.sha256(raw).hexdigest()
+        self.assertEqual(v.provider_policy(raw,sha,self.ca,1000),self.p)
+        for changed in ({**self.p,'profile':v.PROFILE},{**self.p,'profile':'unknown'},
+                        {k:x for k,x in self.p.items() if k!='network_binding'},
+                        {**self.p,'network_binding':{**self.p['network_binding'],'chain_id':True}}):
+            data=v.encode(changed)
+            with self.assertRaises(ValueError):v.provider_policy(data,hashlib.sha256(data).hexdigest(),self.ca,1000)
+        with self.assertRaises(ValueError):v.provider_policy(raw+' '.encode(),sha,self.ca,1000)
+        with self.assertRaises(ValueError):v.provider_policy(raw,sha,self.ca,3000)
+    def test_controlled_prepare_cross_network_refuses_before_request(self):
+        self.controlled();flow=self.flow([])
+        for field,value in [('network_id','different'),('chain_id',99),('formation_sha256','f'*64)]:
+            with self.assertRaises(ValueError):flow.prepare({**self.b,field:value})
+        self.request.assert_not_called();self.assertFalse((self.root/'intent.json').exists())
+    def test_controlled_issue_reconcile_and_retained_scope(self):
+        self.controlled();self.issue();self.key['used_times']=1
+        flow=self.flow([self.account,(200,[self.key]),(200,[self.peer])])
+        self.assertTrue(flow.reconcile(self.local)['new_peer_verified'])
+        request=Mock()
+        for field,value in [('network_id','different'),('chain_id',99),('formation_sha256','f'*64)]:
+            changed={**self.p,'network_binding':{**self.p['network_binding'],field:value}}
+            for action in (None,'revoke','retire'):
+                with self.assertRaises(ValueError):v.Authorization(self.root,changed,request,now=lambda:3000,cleanup_action=action)
+        request.assert_not_called()
+    def test_controlled_expired_cleanup_and_action_fences(self):
+        self.controlled();self.issue()
+        raw=v.encode(self.p);sha=hashlib.sha256(raw).hexdigest()
+        for action in ('revoke','retire'):
+            self.assertEqual(v.provider_policy(raw,sha,self.ca,3000,cleanup_action=action),self.p)
+        flow,request=self.cleanup('revoke',[self.account,(200,[self.key]),(204,None),(404,None),(200,[])])
+        self.assertTrue(flow.revoke_setup_key()['setup_key_absent'])
+        with self.assertRaises(ValueError):flow.prepare(self.b)
+        with self.assertRaises(ValueError):flow.reconcile(self.local)
+        with self.assertRaises(ValueError):flow.retire_bound_peer({})
+    def test_controlled_expired_retire_exact_existing_bound_scope(self):
+        self.controlled()
+        self.test_expired_exact_bound_peer_cleanup_rejects_foreign_and_reconciles()
+
     def test_exact_policy_pin_ca_two_origins_expiry(self):
         raw=v.encode(self.p)
         self.assertEqual(v.provider_policy(raw,hashlib.sha256(raw).hexdigest(),self.ca,1000),self.p)

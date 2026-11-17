@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 
 LIMIT = 2 * 1024 * 1024
 PROFILE = 'nodenetwork-debug-vpn-provider-v1'
+CONTROLLED_PROFILE = 'nodenetwork-controlled-canary-v1'
 
 
 def require(condition, message):
@@ -50,15 +51,34 @@ def identifier(value):
     return isinstance(value, str) and re.fullmatch('[A-Za-z0-9_-]{1,100}', value) is not None
 
 
+def network_scope(policy, binding=None):
+    require(type(policy.get('version')) is int and policy.get('version') == 1 and policy.get('profile') in (PROFILE, CONTROLLED_PROFILE),
+            'Unknown engineering provider profile')
+    if policy['profile'] == PROFILE:
+        require('network_binding' not in policy, 'Isolated profile cannot adopt controlled network scope')
+        return
+    scope = policy.get('network_binding')
+    require(isinstance(scope, dict) and set(scope) == {'network_id', 'chain_id', 'formation_sha256'}
+            and isinstance(scope['network_id'], str)
+            and re.fullmatch('[a-z0-9][a-z0-9_-]{1,127}', scope['network_id'])
+            and type(scope['chain_id']) is int and 0 < scope['chain_id'] < 2**64
+            and pin(scope['formation_sha256']), 'Exact controlled Canary network scope required')
+    if binding is not None:
+        require(isinstance(binding, dict) and all(type(binding.get(k)) is type(value) and binding.get(k) == value for k, value in scope.items()),
+                'Controlled Canary network differs from approved scope')
+
+
 def provider_policy(raw, expected_sha256, ca, now, *, cleanup_action=None):
     require(cleanup_action in (None, 'revoke', 'retire'), 'Unknown cleanup action')
     require(pin(expected_sha256) and hashlib.sha256(raw).hexdigest() == expected_sha256,
             'Provider policy differs from independent native pin')
     policy = decode(raw)
-    require(isinstance(policy, dict) and set(policy) == {'version', 'profile', 'management_origin',
+    require(isinstance(policy, dict), 'Exact provider policy required')
+    network_scope(policy)
+    extra = {'network_binding'} if policy['profile'] == CONTROLLED_PROFILE else set()
+    require(set(policy) == extra | {'version', 'profile', 'management_origin',
             'api_origin', 'account_id', 'ca_sha256', 'auto_groups', 'required_peer_ips', 'expires_at'}, 'Exact provider policy required')
-    require(type(policy['version']) is int and policy['version'] == 1 and policy['profile'] == PROFILE,
-            'Only isolated engineering provider policy is supported')
+    require(type(policy['version']) is int, 'Exact engineering provider version required')
     for field in ('api_origin', 'management_origin'):
         origin = policy[field]
         require(isinstance(origin, str) and len(origin) <= 512, 'Bounded provider origin required')
@@ -140,6 +160,7 @@ class Authorization:
     """
     def __init__(self, directory, policy, request, now=None, *, cleanup_action=None):
         require(cleanup_action in (None, 'revoke', 'retire'), 'Unknown cleanup action')
+        network_scope(policy)
         self.cleanup_action = cleanup_action
         self.directory, self.policy, self.request = Path(directory), policy, request
         self.now = time.time if now is None else now
@@ -151,8 +172,12 @@ class Authorization:
         meta = self.directory.lstat()
         require(stat.S_ISDIR(meta.st_mode) and meta.st_uid == os.geteuid()
                 and not meta.st_mode & 0o077, 'Private native-owned VPN state required')
+        if policy['profile'] == CONTROLLED_PROFILE and (self.directory / 'intent.json').exists():
+            intent = self._read('intent.json')
+            network_scope(policy, intent.get('binding'))
+            require(intent.get('provider_sha256') == hashlib.sha256(encode(policy)).hexdigest()
+                    and intent.get('account_id') == policy['account_id'], 'Controlled provider differs from original intent')
         if cleanup_action is not None:
-            require(policy.get('version') == 1 and policy.get('profile') == PROFILE, 'Only isolated engineering cleanup is supported')
             intent = self._read('intent.json')
             require(intent.get('provider_sha256') == hashlib.sha256(encode(policy)).hexdigest()
                     and intent.get('account_id') == policy['account_id'], 'Cleanup provider differs from original intent')
@@ -185,6 +210,8 @@ class Authorization:
             os.close(fd)
 
     def _account(self, action=None):
+        if self.policy['profile'] == CONTROLLED_PROFILE and (self.directory / 'intent.json').exists():
+            network_scope(self.policy, self._read('intent.json').get('binding'))
         require(self.cleanup_action is None or action == self.cleanup_action, 'Cleanup capability cannot issue, bind or change action')
         require(self.now() < self.policy['expires_at'] or self.cleanup_action == action and action in ('revoke','retire'), 'Provider approval expired')
         code, accounts = self.request('GET', '/api/accounts')
@@ -207,6 +234,7 @@ class Authorization:
                 and key.get('revoked') is False, 'One-use provider key policy differs')
 
     def prepare(self, binding):
+        network_scope(self.policy, binding)
         fields = {'target_sha256', 'manifest_sha256', 'formation_sha256', 'network_id', 'chain_id'}
         require(isinstance(binding, dict) and set(binding) == fields
                 and all(pin(binding[f]) for f in fields if f.endswith('sha256'))

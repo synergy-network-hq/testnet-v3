@@ -43,6 +43,18 @@ class CaTests(unittest.TestCase):
   source.write_text(old+'# altered source')
   with self.assertRaisesRegex(ValueError,'not authenticated'):conformance.verify_vpn_wrapper(self.root,manifest,allow_legacy=True)
 
+ def test_controlled_ca_requires_exact_host_network_formation(self):
+  self.provider.update(profile='nodenetwork-controlled-canary-v1',network_binding={'network_id':'canary-testing','chain_id':99999,'formation_sha256':'c'*64})
+  self.policy.update(engineering_selection={'network_id':'canary-testing','chain_id':99999},validator_formation_sha256='c'*64)
+  self.approve()
+  with self.context():self.assertIn('SSL_CERT_FILE',vpn.client_environment(self.root))
+  for key,value in [('network_id','wrong-network'),('chain_id',1)]:
+   self.policy['engineering_selection'][key]=value;self.save(self.root/'tmp/controller/policy.json',self.policy)
+   with self.context(),self.assertRaises(ValueError):vpn.client_environment(self.root)
+   self.policy['engineering_selection'][key]=self.provider['network_binding'][key]
+  self.policy['validator_formation_sha256']='d'*64;self.save(self.root/'tmp/controller/policy.json',self.policy)
+  with self.context(),self.assertRaises(ValueError):vpn.client_environment(self.root)
+
  def test_ordinary_profile_keeps_system_trust_and_creates_no_ca(self):
   with patch.dict(os.environ,{'EXISTING_ENV':'kept'},clear=True):
    env=vpn.client_environment(self.root)

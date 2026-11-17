@@ -50,8 +50,12 @@ def client_environment(root):
         require(hashlib.sha256(raw[name]).hexdigest()==pins[name],'Approved VPN trust artifact changed')
     provider=json.loads(raw['vpn-provider.json'])
     require(isinstance(provider,dict) and type(provider.get('version')) is int and provider['version']==1
-            and provider.get('profile')=='nodenetwork-debug-vpn-provider-v1'
+            and provider.get('profile') in ('nodenetwork-debug-vpn-provider-v1','nodenetwork-controlled-canary-v1')
             and provider.get('ca_sha256')==pins['vpn-ca.pem'],'Only exact isolated engineering CA scope is supported')
+    from vpn_authorization import network_scope
+    selection=policy.get('engineering_selection',{})
+    network_scope(provider,{'network_id':selection.get('network_id'),'chain_id':selection.get('chain_id'),
+                            'formation_sha256':policy.get('validator_formation_sha256')})
     ca=raw['vpn-ca.pem']
     require(b'PRIVATE KEY' not in ca and ca.count(b'-----BEGIN CERTIFICATE-----')>=1,'Public CA certificate required')
     context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)

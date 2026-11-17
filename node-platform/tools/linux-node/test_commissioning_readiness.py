@@ -123,6 +123,19 @@ class ObservationTests(unittest.TestCase):
             if commissioned:binding.assert_not_called()
             else:binding.assert_called_once_with(locked=True)
             return value
+    def test_controlled_observation_binds_exact_installed_network_and_formation(self):
+        self.policy['validator_formation_sha256']=pin('formation')
+        self.provider.update(profile='nodenetwork-controlled-canary-v1',network_binding={
+            'network_id':'fresh','chain_id':99999,'formation_sha256':pin('formation')})
+        path=self.root/'tmp/controller/authorization/inputs/vpn-provider.json'
+        save(path,self.provider);self.policy['authorization_files']['vpn-provider.json']=layout.digest(path)
+        self.assertEqual(self.run_observation()['network_id'],'fresh')
+        for field,value in [('network_id','wrong'),('chain_id',99998),('formation_sha256',pin('other'))]:
+            original=self.provider['network_binding'][field];self.provider['network_binding'][field]=value
+            save(path,self.provider);self.policy['authorization_files']['vpn-provider.json']=layout.digest(path)
+            with self.assertRaisesRegex(ValueError,'Controlled Canary network'):self.run_observation()
+            self.provider['network_binding'][field]=original
+
     def test_actual_native_staging_bytes_and_twenty_edge_contribution(self):
         value=self.run_observation();self.assertEqual(value['peers'],self.value['peers']);self.assertEqual(value['chain_id'],'99999')
         self.assertFalse(list((self.root/'tmp').glob('commission-observe-*')))
