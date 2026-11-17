@@ -39,6 +39,68 @@ class ConformanceTests(unittest.TestCase):
             self.assertFalse(any(re.fullmatch(rule,path) for rule in c.RUNTIME_DIRECTORIES))
             self.assertFalse(any(rule.fullmatch(path+'/pending-v1.json') for rule in c.RULES))
 
+    def network_formation_fixture(self, root, signed=False):
+        from controller import request_digest
+        selection={'formation_sha256':'a'*64,'network_id':'fixture','chain_id':'9001'}
+        prepare={'version':1,'operation':'network_formation_prepare','parameters':{
+            'formation_sha256':'a'*64,'recipe_json':'{}','registrations_json':['{}']*5}}
+        signing={'version':1,'operation':'network_formation_sign','parameters':{'review_sha256':'b'*64}}
+        directory=root/'tmp/network-formation';directory.mkdir(mode=0o700)
+        names={'request.json','recipe.json','unsigned-genesis.json','unsigned-authority.json',
+               'authority-root.pub','authority.enc.json','review.json','unlock'}
+        names |= {f'registration-{i}.json' for i in range(5)}
+        for name in names:(directory/name).write_text('{}');(directory/name).chmod(0o600)
+        raw=json.dumps(prepare,sort_keys=True,separators=(',',':'),ensure_ascii=False)
+        (directory/'request.json').write_text(raw)
+        prepared=root/'tmp/network-formation-prepare-request.json';prepared.write_text(raw);prepared.chmod(0o600)
+        result={'schema':'nodenetwork-network-formation-v1','pending':True,'signed':signed,
+                **selection,'request_sha256':request_digest(prepare),'review_sha256':'b'*64}
+        if signed:
+            (directory/'signed').mkdir(mode=0o700)
+            raw=json.dumps(signing,sort_keys=True,separators=(',',':'))
+            for name in ('genesis.json','authority.json','sign-request.json'):
+                path=directory/'signed'/name;path.write_text(raw if name=='sign-request.json' else '{}');path.chmod(0o600)
+            path=root/'tmp/network-formation-sign-request.json';path.write_text(raw);path.chmod(0o600)
+            result['sign_request_sha256']=request_digest(signing)
+        return selection,result
+
+    def test_native_verified_network_formation_normal_conformance_not_only_upgrade(self):
+        for signed in (False,True):
+            with self.subTest(signed=signed),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp).resolve()/'synergy';root.mkdir();manifest,_=self.fixture(root)
+                selection,result=self.network_formation_fixture(root,signed)
+                with patch('controller.Controller.formation_context_path',return_value=root/'tmp/formation-context.json'), patch('controller.Controller.formation_context',return_value=(selection,[])), patch('synergy_linux.native',return_value=json.dumps(result)) as native:
+                    self.assertTrue(c.installed(root,manifest)['conformant'])
+                    self.assertEqual(native.call_args.args[0][1],'review-network-formation')
+
+    def test_network_formation_exact_inventory_and_private_type_required(self):
+        for defect in ('extra','missing','empty-directory','symlink','hardlink','mode','interrupted','request'):
+            with self.subTest(defect=defect),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp).resolve()/'synergy';root.mkdir();self.fixture(root)
+                selection,result=self.network_formation_fixture(root)
+                directory=root/'tmp/network-formation'
+                if defect=='extra':(directory/'old-key.json').write_text('{}')
+                if defect=='missing':(directory/'review.json').unlink()
+                if defect=='empty-directory':(directory/'extra').mkdir()
+                if defect=='symlink':
+                    (directory/'unlock').unlink();(directory/'unlock').symlink_to(root/'package.json')
+                if defect=='hardlink':
+                    (directory/'unlock').unlink();os.link(directory/'authority.enc.json',directory/'unlock')
+                if defect=='mode':(directory/'unlock').chmod(0o644)
+                if defect=='interrupted':(directory/'signed-pending').mkdir()
+                if defect=='request':(directory/'request.json').write_text('{}')
+                with patch('controller.Controller.formation_context_path',return_value=root/'tmp/formation-context.json'), patch('controller.Controller.formation_context',return_value=(selection,[])), patch('synergy_linux.native',return_value=json.dumps(result)):
+                    with self.assertRaises(ValueError):c.approved_network_formation_members(root)
+
+    def test_network_formation_native_failure_scope_and_sign_receipt_refused(self):
+        for defect in ('provider','network_id','chain_id','formation_sha256','request_sha256','signed','sign_request_sha256','review_sha256'):
+            with self.subTest(defect=defect),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp).resolve()/'synergy';root.mkdir();self.fixture(root)
+                selection,result=self.network_formation_fixture(root,True)
+                if defect!='provider':result[defect]=False if defect=='signed' else 'wrong'
+                with patch('controller.Controller.formation_context_path',return_value=root/'tmp/formation-context.json'), patch('controller.Controller.formation_context',return_value=(selection,[])), patch('synergy_linux.native',side_effect=ValueError('provider refused') if defect=='provider' else None,return_value=json.dumps(result)):
+                    with self.assertRaises(ValueError):c.approved_network_formation_members(root)
+
     def fixture(self, root):
         root.chmod(0o700)
         for relative in c.DIRECTORIES:(root/relative).mkdir(parents=True)

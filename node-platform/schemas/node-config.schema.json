@@ -90,6 +90,21 @@
             "null"
           ]
         },
+        "autonomous_epoch_activation": {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "sha256": {
+              "type": "string"
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "max_rounds_behind": {
           "type": "integer"
         },

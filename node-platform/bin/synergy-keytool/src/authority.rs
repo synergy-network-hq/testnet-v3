@@ -36,7 +36,7 @@ fn check(
     check_with_provider(binding, key_id, trust, Some(engine.clone()))
 }
 
-fn check_with_provider(
+pub(crate) fn check_with_provider(
     binding: &SignedAuthorityBinding,
     key_id: &KeyId,
     trust: &[u8],

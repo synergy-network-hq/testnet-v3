@@ -19,14 +19,14 @@ use synergy_genesis::{authority::SignedAuthorityBinding, signing::SignedGenesis}
 
 const PUBLIC_LIMIT: u64 = 128 * 1024;
 
-fn digest(bytes: &[u8]) -> String {
+pub(super) fn digest(bytes: &[u8]) -> String {
     fixed_digest(&Primitives, FixedDigest::Sha256, bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
 }
 
-fn private_dir(path: &Path) -> Result<(), String> {
+pub(super) fn private_dir(path: &Path) -> Result<(), String> {
     let m = fs::symlink_metadata(path).map_err(|_| "Private custody directory absent")?;
     if !path.is_absolute()
         || path.canonicalize().ok().as_deref() != Some(path)
@@ -39,7 +39,7 @@ fn private_dir(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn read(path: &Path, max: u64, private: bool) -> Result<SecretBytes, String> {
+pub(super) fn read(path: &Path, max: u64, private: bool) -> Result<SecretBytes, String> {
     let parent = path.parent().ok_or("Formation input parent absent")?;
     if !path.is_absolute() || parent.canonicalize().ok().as_deref() != Some(parent) {
         return Err("Formation input path is not direct".into());
@@ -76,7 +76,7 @@ fn read(path: &Path, max: u64, private: bool) -> Result<SecretBytes, String> {
     Ok(raw)
 }
 
-fn decode<T: serde::de::DeserializeOwned>(raw: &SecretBytes) -> Result<T, String> {
+pub(super) fn decode<T: serde::de::DeserializeOwned>(raw: &SecretBytes) -> Result<T, String> {
     serde_json::from_slice(raw.as_bytes()).map_err(|_| "Invalid formation or authority JSON".into())
 }
 fn pinned(path: &Path, max: u64, private: bool, expected: &str) -> Result<SecretBytes, String> {
@@ -97,7 +97,7 @@ pub(crate) fn public_registration(path: &Path) -> Result<FormationRegistration, 
     decode(&read(path, PUBLIC_LIMIT, false)?)
 }
 
-fn write(path: &Path, raw: &[u8]) -> Result<(), String> {
+pub(super) fn write(path: &Path, raw: &[u8]) -> Result<(), String> {
     let mut file = OpenOptions::new()
         .mode(0o600)
         .create_new(true)
@@ -109,13 +109,13 @@ fn write(path: &Path, raw: &[u8]) -> Result<(), String> {
         .map_err(|_| "Cannot persist formation file".into())
 }
 
-fn sync(path: &Path) -> Result<(), String> {
+pub(super) fn sync(path: &Path) -> Result<(), String> {
     File::open(path)
         .and_then(|d| d.sync_all())
         .map_err(|_| "Cannot make formation state durable".into())
 }
 
-fn begin(path: &Path) -> Result<(), String> {
+pub(super) fn begin(path: &Path) -> Result<(), String> {
     let parent = path.parent().ok_or("Private formation parent required")?;
     private_dir(parent)?;
     DirBuilder::new()
@@ -125,7 +125,7 @@ fn begin(path: &Path) -> Result<(), String> {
     sync(parent)
 }
 
-fn passphrase(raw: &SecretBytes) -> Result<&str, String> {
+pub(super) fn passphrase(raw: &SecretBytes) -> Result<&str, String> {
     let bytes = raw.as_bytes();
     if bytes.len() != 64
         || !bytes
@@ -539,6 +539,9 @@ mod tests {
                 continue;
             }
             composed.unwrap();
+            crate::network_formation::exercise_native_fixture(
+                &context_path, &context_pin, &recipe_path, &artifact_dir, engine.clone(),
+            );
             let unsigned: UnsignedGenesis =
                 serde_json::from_slice(&fs::read(unsigned_path).unwrap()).unwrap();
             let signed =

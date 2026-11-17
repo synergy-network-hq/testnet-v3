@@ -2253,6 +2253,7 @@ name = "synergy-keytool"
 version = "0.1.0"
 dependencies = [
  "aegis-pqvm",
+ "base64 0.22.1",
  "chrono",
  "libc",
  "pqrust-traits",

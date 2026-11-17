@@ -331,6 +331,74 @@ def approved_upgrade_members(root, candidate_pin, stage):
     return paths
 
 
+def approved_network_formation_members(root):
+    """Admit only complete formation owned and reverified by the native keytool.
+
+    This read does not call the controller's locking operation: lifecycle callers
+    already hold the installation lock. Interrupted preparation/signing remains
+    a reconciliation error, never an inventory wildcard.
+    """
+    from controller import Controller, parse_request, request_digest
+    from apqe_layout import require_frozen_tree
+    from synergy_linux import native
+    root = Path(root)
+    directory = root/'tmp/network-formation'
+    prepare = root/'tmp/network-formation-prepare-request.json'
+    signing = root/'tmp/network-formation-sign-request.json'
+    if not any(p.exists() or p.is_symlink() for p in (directory, prepare, signing)):
+        return set()
+    c = Controller(root)
+    selection, flags = c.formation_context()
+    require_frozen_tree(directory)
+    files = {'request.json', 'recipe.json', 'unsigned-genesis.json',
+             'unsigned-authority.json', 'authority-root.pub', 'authority.enc.json',
+             'review.json', 'unlock'} | {f'registration-{i}.json' for i in range(5)}
+    signed = directory/'signed'
+    has_signed = signed.exists() or signed.is_symlink()
+    if has_signed:
+        files |= {'signed/sign-request.json', 'signed/genesis.json', 'signed/authority.json'}
+    children = list(directory.rglob('*'))
+    require({p.relative_to(directory).as_posix() for p in children if p.is_file()} == files
+            and {p.relative_to(directory).as_posix() for p in children if p.is_dir()}
+                == ({'signed'} if has_signed else set()),
+            'network formation inventory is incomplete or unexpected')
+    for path in [directory, *children]:
+        st = path.lstat()
+        require(st.st_uid == os.geteuid()
+                and stat.S_IMODE(st.st_mode) == (0o700 if path.is_dir() else 0o600)
+                and (path.is_dir() or st.st_nlink == 1),
+                'network formation ownership, links or private permissions differ')
+    prepared = parse_request(c.direct(prepare, True, 2*1024*1024).read_bytes())
+    require(prepared['operation'] == 'network_formation_prepare'
+            and prepared['parameters']['formation_sha256'] == selection['formation_sha256'],
+            'network formation prepare request scope differs')
+    require(digest(directory/'request.json') == digest(prepare),
+            'network formation stored request differs')
+    require(has_signed == (signing.exists() or signing.is_symlink()),
+            'network formation signing is incomplete')
+    result = json.loads(native([root/'bin/synergy-keytool', 'review-network-formation',
+                               c.formation_context_path(), selection['formation_sha256'],
+                               directory, *flags]))
+    require(result.get('schema') == 'nodenetwork-network-formation-v1'
+            and result.get('pending') is True and type(result.get('signed')) is bool
+            and result['signed'] == has_signed
+            and result.get('network_id') == selection['network_id']
+            and result.get('chain_id') == selection['chain_id']
+            and result.get('formation_sha256') == selection['formation_sha256']
+            and result.get('request_sha256') == request_digest(prepared),
+            'native network formation scope or request differs')
+    paths = {p.relative_to(root).as_posix() for p in [directory, *children, prepare]}
+    if has_signed:
+        request = parse_request(c.direct(signing, True).read_bytes())
+        require(request['operation'] == 'network_formation_sign'
+                and request['parameters']['review_sha256'] == result.get('review_sha256')
+                and result.get('sign_request_sha256') == request_digest(request)
+                and digest(directory/'signed/sign-request.json') == digest(signing),
+                'network formation signed request differs')
+        paths.add(signing.relative_to(root).as_posix())
+    return paths
+
+
 def installed(root, expected_manifest=None, host=False, initialized=True, schema=None, stage=None, allow_legacy_integrations=False, pending_upgrade_sha256=None):
     stage=stage or ('commissioned' if initialized else 'fresh')
     require(stage in ('fresh','uncommissioned','commissioned'),'unknown installation stage')
@@ -379,6 +447,7 @@ def installed(root, expected_manifest=None, host=False, initialized=True, schema
         from controller import control_inventory
         control_files,control_dirs=control_inventory(root)
     pending_upgrade=approved_upgrade_members(root,pending_upgrade_sha256,stage) if pending_upgrade_sha256 is not None else set()
+    pending_upgrade |= approved_network_formation_members(root)
     unknown=[]; runtime=0; directories=0; runtime_names=[]
     for current,dirs,files in os.walk(root,followlinks=False):
         for name in dirs+files:

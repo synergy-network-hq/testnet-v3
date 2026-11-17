@@ -6,6 +6,8 @@ mod consensus_keys;
 mod etdag_keys;
 mod import_consensus;
 mod inspect;
+#[cfg(unix)]
+mod network_formation;
 mod node_identity;
 mod prepare_authority;
 mod provider;
@@ -31,6 +33,53 @@ fn run() -> Result<(), String> {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     let (arguments, engine) = selected_arguments(&arguments)?;
     match arguments {
+        #[cfg(unix)]
+        [command, context, pin, request, request_pin, directory]
+            if command == "prepare-network-formation" =>
+        {
+            println!(
+                "{}",
+                network_formation::prepare(
+                    Path::new(context),
+                    pin,
+                    Path::new(request),
+                    request_pin,
+                    Path::new(directory),
+                    engine.ok_or("authenticated APQE provider required")?
+                )?
+            );
+        }
+        #[cfg(unix)]
+        [command, context, pin, directory, request, request_pin]
+            if command == "sign-network-formation" =>
+        {
+            println!(
+                "{}",
+                network_formation::sign(
+                    Path::new(context),
+                    pin,
+                    Path::new(directory),
+                    Path::new(request),
+                    request_pin,
+                    engine.ok_or("authenticated APQE provider required")?
+                )?
+            );
+        }
+        #[cfg(unix)]
+        [command, context, pin, directory]
+            if command == "review-network-formation" || command == "export-network-formation" =>
+        {
+            println!(
+                "{}",
+                network_formation::status(
+                    Path::new(context),
+                    pin,
+                    Path::new(directory),
+                    engine.ok_or("authenticated APQE provider required")?,
+                    command == "export-network-formation"
+                )?
+            );
+        }
         #[cfg(unix)]
         [command, context, pin, directory]
             if command == "prepare-validator-formation"
@@ -431,6 +480,10 @@ fn selected_arguments(
     if !matches!(
         command,
         "generate-authority-custody"
+            | "prepare-network-formation"
+            | "review-network-formation"
+            | "sign-network-formation"
+            | "export-network-formation"
             | "provision-validator-custody"
             | "verify-validator-custody"
             | "prepare-validator-formation"
