@@ -905,7 +905,7 @@ def remove(root, confirmation):
     return {'removed_root':str(root),'logical_removal_verified':True,'forensic_erasure_proven':False,'backup_created':False,'remaining_host_managed_records':host_records}
 
 
-def _validate_commissioning_native(root, staged, package):
+def _validate_commissioning_native(root, staged, package, *, require_readiness=True):
     """Authenticate staged PUBLIC artifacts before replacing any application bytes."""
     import tempfile
     from apqe_layout import validate_stage
@@ -932,7 +932,8 @@ def _validate_commissioning_native(root, staged, package):
     authority=read(staged/'network/authority.json')['payload']
     policy=read(staged/'config/start-authorized.json')
     require(policy.get('network_id')==manifest['network_id'] and policy.get('chain_id')==manifest['chain_id']
-            and policy.get('all_validators_ready') is True and policy.get('all_pairs_vpn_verified') is True,
+            and policy.get('all_validators_ready') is require_readiness
+            and policy.get('all_pairs_vpn_verified') is require_readiness,
             'explicit provisioning/VPN readiness policy required')
     from apqe_layout import PUBLIC
     require(policy.get('public_file_sha256')=={name:digest(staged/'network'/name) for name in PUBLIC},
@@ -973,14 +974,14 @@ def commission_check(root, package, staged):
             'production_approved':False}
 
 
-def commission(root, staged, *, formation_public_pins=None):
+def commission(root, staged, *, formation_public_pins=None, formation_public_source=None, readiness_sha256=None, authorize=None):
     _require_operator()
     root=Path(root); staged=Path(staged)
     with _lifecycle_lock(root):
-        return _commission_locked(root,staged,formation_public_pins)
+        return _commission_locked(root,staged,formation_public_pins,formation_public_source,readiness_sha256,authorize)
 
 
-def _commission_locked(root, staged, formation_public_pins):
+def _commission_locked(root, staged, formation_public_pins, formation_public_source=None, readiness_sha256=None, authorize=None):
     require(staged==root/'tmp/commissioning','commissioning must be staged inside the installation root')
     receipt,manifest=_sealed_receipt(root)
     require(not (root/'data').exists() and not list((root/'keys').iterdir())
@@ -992,7 +993,10 @@ def _commission_locked(root, staged, formation_public_pins):
             'Formation commissioning requires exact public approval and original host-local custody')
     if formed:
         from apqe_layout import assemble_formation_stage
-        assemble_formation_stage(root,staged,formation_public_pins)
+        from controller import Controller
+        require(readiness_sha256 is not None and Controller(root).commissioning_readiness(locked=True)==readiness_sha256,
+                'Exact current native-approved fleet readiness required under lifecycle lock')
+        assemble_formation_stage(root,staged,formation_public_pins,public=formation_public_source,readiness_sha256=readiness_sha256)
     inputs=_validate_commissioning_native(root,staged,root)
     require(all(receipt.get(k)==inputs.get(k) for k in ('network_id','chain_id','node_name')),
             'fresh installation selection differs from commissioned inputs')
@@ -1031,6 +1035,7 @@ def _commission_locked(root, staged, formation_public_pins):
         require(actual_names in approved_names
                 and all(digest(identity_network/name)==digest(staged/'network'/name) for name in network_names),
                 'Commissioning network differs from prepared APQE identity')
+    if authorize is not None:authorize()
     _apply_commissioning(root,staged,inputs)
     # The authenticated, exclusively copied inputs are now at their canonical
     # paths; temporary duplicate custody is no longer needed.
@@ -1042,9 +1047,11 @@ def _commission_locked(root, staged, formation_public_pins):
         existing_intent.unlink()
     if formed:
         shutil.rmtree(formation)
-        shutil.rmtree(root/'tmp/commissioning-public')
+        public=root/'tmp/commissioning-public'
+        if public.exists():shutil.rmtree(public)
         for name in ('formation-context.json','formation-prepare-request.json','genesis-bind-request.json'):
-            (root/'tmp'/name).unlink()
+            path=root/'tmp'/name
+            if path.exists():path.unlink()
     _fresh_conformance(root,manifest,_integration_plan(root) is not None,'commissioned')
     return {'commissioned':True,'consensus_started':False,'production_approved':False}
 

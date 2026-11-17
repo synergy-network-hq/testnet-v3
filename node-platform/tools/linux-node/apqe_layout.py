@@ -139,12 +139,14 @@ def validate_stage(stage, root, package):
     return manifest
 
 
-def assemble_formation_stage(root, stage, pins):
+def formation_stage_contents(root, pins, *, public=None):
     """Materialize approved public inputs and exclusively local bound custody."""
-    root=Path(root);stage=Path(stage)
-    public=root/'tmp/commissioning-public'
+    root=Path(root)
+    public=Path(public) if public is not None else root/'tmp/commissioning-public'
+    require(public in (root/'tmp/commissioning-public',root/'tmp/controller/authorization/inputs/commissioning'),
+            'Only canonical approved public commissioning inputs may be used')
     pending=root/'tmp/pending-validator-custody'
-    require(stage==root/'tmp/commissioning' and isinstance(pins,dict)
+    require(isinstance(pins,dict)
             and set(pins)==FORMATION_PUBLIC_INPUTS
             and all(isinstance(pin,str) and re.fullmatch('[a-f0-9]{64}',pin) for pin in pins.values()),
             'Exact host-approved public commissioning inventory required')
@@ -168,6 +170,21 @@ def assemble_formation_stage(root, stage, pins):
         require(len(data)==st.st_size and (expected is None or actual==expected),
                 'Formation commissioning input differs from exact approved bytes')
         contents[name]=(data,actual)
+    return contents
+
+
+def assemble_formation_stage(root, stage, pins, *, public=None, readiness_sha256=None):
+    root=Path(root);stage=Path(stage)
+    require(stage==root/'tmp/commissioning','Canonical commissioning stage required')
+    contents=formation_stage_contents(root,pins,public=public)
+    if readiness_sha256 is not None:
+        require(isinstance(readiness_sha256,str) and re.fullmatch('[a-f0-9]{64}',readiness_sha256),'Verified readiness digest required')
+        policy=json.loads(contents['config/start-authorized.json'][0])
+        require(policy.get('all_validators_ready') is False and policy.get('all_pairs_vpn_verified') is False,
+                'Readiness must be derived from the immutable unapproved draft')
+        policy.update(all_validators_ready=True,all_pairs_vpn_verified=True,commissioning_readiness_sha256=readiness_sha256)
+        data=json.dumps(policy,sort_keys=True,separators=(',',':')).encode()
+        contents['config/start-authorized.json']=(data,hashlib.sha256(data).hexdigest())
     config=json.loads(contents['config/node.json'][0])
     manifest={'format':'synergy-apqe-commissioning-v1','root':str(root),
               'network_id':config['network_id'],'chain_id':config['chain_id'],'node_name':config['node_name'],
@@ -178,11 +195,100 @@ def assemble_formation_stage(root, stage, pins):
         return
     # Exclusive directory, then durable files. A partial stage is deliberately
     # kept if interrupted; it cannot be silently reused with different inputs.
-    stage.mkdir(mode=0o700)
-    for name,(data,_) in contents.items():
-        target=stage/name
-        target.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
-        with target.open('xb') as stream:
-            os.fchmod(stream.fileno(),0o600)
-            stream.write(data);stream.flush();os.fsync(stream.fileno())
-    write_new(stage/'commissioning.json',manifest)
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix='commission-prepare-',dir=stage.parent) as directory:
+        prepared=Path(directory)/'stage';prepared.mkdir(mode=0o700)
+        for name,(data,_) in contents.items():
+            target=prepared/name
+            target.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+            with target.open('xb') as stream:
+                os.fchmod(stream.fileno(),0o600)
+                stream.write(data);stream.flush();os.fsync(stream.fileno())
+        write_new(prepared/'commissioning.json',manifest)
+        os.rename(prepared,stage)
+        fd=os.open(stage.parent,os.O_RDONLY)
+        try:os.fsync(fd)
+        finally:os.close(fd)
+
+
+READINESS_FILE='commissioning-readiness.json'
+OBSERVATION_FIELDS={'schema','observed_at_unix','target','manifest_sha256','provider_report_sha256',
+    'vpn_provider_sha256','network_id','chain_id','formation_sha256','address','enrollment_sha256',
+    'public_file_sha256','commissioning_file_sha256','validator_addresses','registry_peer_ips','vpn_binding','peers'}
+
+
+def validate_commissioning_readiness(value,local,now):
+    """Native-approved observations are operational evidence, never chain authority.
+
+    The controller authenticates the fixed artifact against its host policy first.
+    This validation additionally requires exact current local facts, five unique
+    target/custody/VPN identities and every directed carrier key/IP/probe binding.
+    """
+    import base64
+    import ipaddress
+    def pin(v):return isinstance(v,str) and re.fullmatch('[a-f0-9]{64}',v)
+    def key(v):
+        try:return isinstance(v,str) and len(base64.b64decode(v,validate=True))==32 and base64.b64encode(base64.b64decode(v)).decode()==v
+        except (ValueError,TypeError):return False
+    require(isinstance(value,dict) and set(value)=={'schema','observations'}
+            and value['schema']=='nodenetwork-commissioning-readiness-v1'
+            and isinstance(value['observations'],list) and len(value['observations'])==5,'Exact five-controller readiness required')
+    observations=value['observations'];roster=local['validator_addresses']
+    require(isinstance(roster,list) and len(roster)==5 and roster==sorted(set(roster)), 'Exact five-member signed roster required')
+    require([o.get('address') for o in observations if isinstance(o,dict)]==roster,'Readiness roster/order differs')
+    target_ids=set();vpn_ids=set();vpn_keys=set();vpn_ips=set();enrollments=set()
+    shared=('manifest_sha256','provider_report_sha256','vpn_provider_sha256','network_id','chain_id',
+            'formation_sha256','public_file_sha256','validator_addresses','registry_peer_ips')
+    for observation in observations:
+        require(set(observation)==OBSERVATION_FIELDS and observation['schema']=='nodenetwork-commissioning-observation-v1', 'Unexpected observation fields')
+        require(type(observation['observed_at_unix']) is int and -30<=now-observation['observed_at_unix']<=300,
+                'Commissioning observations expired or clock differs')
+        require(all(observation[k]==local[k] for k in shared),'Commissioning network, roster, provider or master differs')
+        require(all(pin(observation[k]) for k in ('manifest_sha256','provider_report_sha256','vpn_provider_sha256','formation_sha256','enrollment_sha256'))
+                and isinstance(observation['public_file_sha256'],dict) and set(observation['public_file_sha256'])==set(PUBLIC)
+                and all(pin(v) for v in observation['public_file_sha256'].values())
+                and isinstance(observation['commissioning_file_sha256'],dict) and set(observation['commissioning_file_sha256'])==FORMATION_PUBLIC_INPUTS
+                and all(pin(v) for v in observation['commissioning_file_sha256'].values()),'Bounded exact commissioning pins required')
+        require(all(observation['commissioning_file_sha256']['network/'+name]==observation['public_file_sha256'][name] for name in PUBLIC),
+                'Public roots differ from exact commissioning inputs')
+        require(observation['enrollment_sha256'] not in enrollments,'Duplicate enrolled custody')
+        enrollments.add(observation['enrollment_sha256'])
+        target=observation['target'];base={'kind','host','port','root','host_key','machine_id_sha256'}
+        require(isinstance(target,dict) and set(target) in (base,base|{'guest'}) and target['root']==local['target']['root']
+                and target['kind'] in ('local','remote'),'Exact independently authenticated target required')
+        if target['kind']=='remote':
+            require(isinstance(target['host'],str) and re.fullmatch('[a-zA-Z0-9.:\\[\\]-]{1,253}',target['host'])
+                    and type(target['port']) is int and 0<target['port']<65536 and target['machine_id_sha256'] is None
+                    and isinstance(target['host_key'],str) and 0<len(target['host_key'])<=2048,'Invalid physical host binding')
+        else:
+            require(target['host'] is None and target['port'] is None and target['host_key'] is None
+                    and pin(target['machine_id_sha256']) and 'guest' not in target,'Invalid local target binding')
+        if 'guest' in target:
+            from guest_lifecycle import public_ssh,valid_id
+            guest=target['guest']
+            require(isinstance(guest,dict) and set(guest)=={'guest_id','create_request_sha256','ssh_host_public_key','ssh_host_fingerprint'}
+                    and valid_id(guest['guest_id']) and pin(guest['create_request_sha256'])
+                    and isinstance(guest['ssh_host_public_key'],str)
+                    and public_ssh(guest['ssh_host_public_key'].encode())[1]==guest['ssh_host_fingerprint'],'Guest receipt identity differs')
+        target_id=json.dumps(target,sort_keys=True,separators=(',',':'))
+        require(target_id not in target_ids,'Duplicate controller target');target_ids.add(target_id)
+        own=observation['vpn_binding']
+        require(isinstance(own,dict) and set(own)=={'account_id','peer_id','ip','wireguard_public_key','enrollment_sha256','server_binding_sha256'}
+                and isinstance(own['account_id'],str) and re.fullmatch('[A-Za-z0-9_-]{1,100}',own['account_id'])
+                and own['account_id']==local['vpn_binding']['account_id']
+                and isinstance(own['peer_id'],str) and re.fullmatch('[A-Za-z0-9_-]{1,100}',own['peer_id'])
+                and key(own['wireguard_public_key']) and pin(own['enrollment_sha256']) and pin(own['server_binding_sha256'])
+                and str(ipaddress.ip_address(own['ip']))==own['ip']
+                and own['ip']==observation['registry_peer_ips'][observation['address']], 'VPN identity/provider differs from signed endpoint')
+        require(own['peer_id'] not in vpn_ids and own['wireguard_public_key'] not in vpn_keys and own['ip'] not in vpn_ips,'Duplicate VPN identity')
+        vpn_ids.add(own['peer_id']);vpn_keys.add(own['wireguard_public_key']);vpn_ips.add(own['ip'])
+        require(isinstance(observation['peers'],dict) and set(observation['peers'])==set(roster)-{observation['address']},'All directed peer observations required')
+        if observation['address']==local['address']:
+            require(all(observation[k]==local[k] for k in OBSERVATION_FIELDS-{'observed_at_unix'}),'Local readiness facts changed after native review')
+    for observation in observations:
+        for other in observations:
+            if other['address']==observation['address']:continue
+            peer=observation['peers'][other['address']]
+            require(isinstance(peer,dict) and peer.get('reachable') is True and peer=={'ip':other['vpn_binding']['ip'],'wireguard_public_key':other['vpn_binding']['wireguard_public_key'],
+                           'interface':'wt0','reachable':True},'Directed VPN peer key/IP/probe differs')
+    return True

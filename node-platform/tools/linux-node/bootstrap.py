@@ -760,7 +760,7 @@ def stage_engineering_update(stream, release_id, pin):
 # The document is not a public policy issuer, membership proof or credential API.
 AUTHORIZATION_PROFILE='nodenetwork-isolated-formation-authorization-v1'
 AUTHORIZATION_LIMIT=12*1024*1024
-AUTHORIZATION_FILES={'managed-guest.json':16384,'formation-context.json':4096,'vpn-ca.pem':128*1024,'vpn-provider.json':16384,'vpn-enrollment.json':16384,'vpn-server-binding.json':16384,'vpn-retirement.json':16384,
+AUTHORIZATION_FILES={'commissioning-readiness.json':128*1024,'managed-guest.json':16384,'formation-context.json':4096,'vpn-ca.pem':128*1024,'vpn-provider.json':16384,'vpn-enrollment.json':16384,'vpn-server-binding.json':16384,'vpn-retirement.json':16384,
     'commissioning/config/node.json':1024*1024,'commissioning/config/start-authorized.json':65536,
     **{'commissioning/network/'+name:limit for name,limit in {
         'genesis.json':4*1024*1024,'authority.json':1024*1024,'authority-root.pub':8192,
@@ -865,8 +865,53 @@ def authorization_inputs(doc,encoded):
         require(0<len(data)<=limit and base64.b64encode(data).decode()==text
                 and hashlib.sha256(data).hexdigest()==pin,'Authorization artifact digest or encoding differs')
         result[name]=data
+    if 'commissioning-readiness.json' in result:
+        # This public evidence cannot carry configuration or any other grant.
+        expected=hashlib.sha256(json.dumps({'version':1,'operation':'commission','parameters':{}},
+            sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        require(set(result)=={'commissioning-readiness.json'} and doc['requests']==[
+            {'operation':'commission','request_sha256':expected}],
+            'Readiness requires its one exact commissioning grant only')
     return result
 
+
+
+def readiness_refresh_allowed(root,policy,doc,inputs,continuation,consumed):
+    """Only an unused prestart readiness review can be superseded atomically.
+
+    Called under the existing controller exchange lock after native-pin,
+    target/selection/sequence and stopped-process verification. Other public
+    inputs, custody and carrier credentials remain immutable.
+    """
+    name='commissioning-readiness.json';root=Path(root)
+    source=root/'tmp/controller/authorization/inputs'/name
+    if name not in inputs or not source.exists():return False
+    from controller import Controller,request_digest
+    c=Controller(root);raw=c.direct(source,True,128*1024).read_bytes()
+    require(hashlib.sha256(raw).hexdigest()==policy.get('authorization_files',{}).get(name),
+            'Prior readiness artifact differs from approved policy')
+    if raw==inputs[name]:return False
+    require(continuation and set(inputs)=={name}
+            and doc['target']==policy['engineering_target']
+            and all(doc[k]==effective_engineering_selection(root,policy)[k] for k in ('release_id','manifest_sha256','network_id','chain_id','node_name'))
+            and doc['genesis_pins']==policy.get('validator_identity_network'),
+            'Readiness refresh changes its approved target or network')
+    key=request_digest({'version':1,'operation':'commission','parameters':{}})
+    require(doc['requests']==[{'operation':'commission','request_sha256':key}] and key not in consumed,
+            'Consumed or foreign commissioning review cannot be refreshed')
+    previous=policy['engineering_authorization']
+    grant=c.public_json(c.control/'grants'/(key+'.json'),True)
+    require(grant=={'root':str(root),'operation':'commission','request_sha256':key,
+        'expires_at':previous['expires_at'],'authorization_sha256':previous['sha256'],
+        'authorization_sequence':previous['sequence']},'Original commissioning grant is absent, consumed or changed')
+    require(not any((root/path).exists() or (root/path).is_symlink() for path in (
+        'data','tmp/commissioning','tmp/existing-network-identity-request.json',
+        'evidence/upgrade-intent.json','evidence/application-replacement-intent.json',
+        'evidence/authority-recovery-intent.json','evidence/autonomous-epoch-intent.json'))
+        and not any((root/'tmp').glob('commission-prepare-*')) and not any((root/'tmp').glob('commission-observe-*'))
+        and all((root/name).is_dir() and not any((root/name).iterdir()) for name in ('config','network','keys')),
+        'Readiness refresh refuses published or uncertain application state')
+    return True
 
 
 def authorization_reconciliation(policy,pin,raw):
@@ -1064,6 +1109,7 @@ def stage_engineering_authorization(stream):
             require(set(commissioning)==FORMATION_PUBLIC_INPUTS,'Complete public commissioning inventory required')
             require(doc['genesis_pins'] is not None and all(commissioning['network/'+name]==pin for name,pin in doc['genesis_pins'].items()),'Commissioning Genesis differs from independent pins')
             policy['validator_commissioning_files']=commissioning
+        refresh_readiness=readiness_refresh_allowed(ROOT,policy,doc,inputs,continuation,consumed)
         predecessor=authorization_tree_digest(old)
         exchanged=False
         try:
@@ -1073,7 +1119,10 @@ def stage_engineering_authorization(stream):
             # Retain previous authenticated inputs needed by already prepared custody.
             for name,data in inputs.items():
                 path=replacement/(VPN_ENROLLMENT if name=='vpn-enrollment.json' else 'authorization/inputs/'+name)
-                if path.exists():require(path.read_bytes()==data,'Existing authorization input differs')
+                if path.exists():
+                    if name=='commissioning-readiness.json' and refresh_readiness:
+                        path.unlink();save(path,data)
+                    else:require(path.read_bytes()==data,'Existing authorization input differs')
                 else:save(path,data)
             policy['qualified_operations']=sorted({request['operation'] for request,_ in requests})
             if not continuation:policy['engineering_selection']={key:doc[key] for key in ('release_id','manifest_sha256','network_id','chain_id','node_name')}

@@ -141,6 +141,61 @@ class AuthorizationTests(unittest.TestCase):
         flow=self.flow([self.account,(200,self.peer)])
         with self.assertRaisesRegex(ValueError,'never repeat DELETE'):flow.retire_bound_peer(evidence)
 
+    def cleanup(self,action,responses):
+        request=Mock(side_effect=responses)
+        return v.Authorization(self.root,self.p,request,now=lambda:3000,cleanup_action=action),request
+
+    def test_expired_cleanup_does_not_issue_bind_or_change_action(self):
+        self.issue();raw=v.encode(self.p);sha=hashlib.sha256(raw).hexdigest()
+        with self.assertRaisesRegex(ValueError,'expired'):v.provider_policy(raw,sha,self.ca,3000)
+        for action in ('revoke','retire'):
+            self.assertEqual(v.provider_policy(raw,sha,self.ca,3000,cleanup_action=action),self.p)
+        for ca,sha0 in [(b'wrong CA',sha),(self.ca,'0'*64)]:
+            with self.assertRaises(ValueError):v.provider_policy(raw,sha0,ca,3000,cleanup_action='revoke')
+        flow,request=self.cleanup('revoke',[])
+        with self.assertRaises(ValueError):flow.prepare(self.b)
+        with self.assertRaisesRegex(ValueError,'cannot issue'):flow.reconcile(self.local)
+        with self.assertRaisesRegex(ValueError,'change action'):flow.retire_bound_peer({})
+        request.assert_not_called()
+        normal=v.Authorization(self.root,self.p,request,now=lambda:3000)
+        with self.assertRaisesRegex(ValueError,'expired'):normal.reconcile(self.local)
+        request.assert_not_called()
+        with self.assertRaises(ValueError):v.Authorization(self.root.parent/'missing',self.p,request,cleanup_action='revoke')
+        self.assertFalse((self.root.parent/'missing').exists())
+
+    def test_expired_exact_key_cleanup_and_no_duplicate_uncertain_delete(self):
+        self.issue()
+        flow,request=self.cleanup('revoke',[self.account,(200,[self.key]),OSError('lost delete')])
+        with self.assertRaises(OSError):flow.revoke_setup_key()
+        self.assertEqual([c.args[0] for c in request.call_args_list].count('DELETE'),1)
+        flow,request=self.cleanup('revoke',[self.account,(200,[self.key])])
+        with self.assertRaisesRegex(ValueError,'never repeat'):flow.revoke_setup_key()
+        self.assertFalse(any(c.args[0]=='DELETE' for c in request.call_args_list))
+        flow,request=self.cleanup('revoke',[self.account,(200,[]),(404,None),(200,[])])
+        self.assertTrue(flow.revoke_setup_key()['setup_key_absent'])
+        self.assertFalse(any(c.args[0]=='DELETE' for c in request.call_args_list))
+        changed={**self.p,'account_id':'foreign'}
+        with self.assertRaisesRegex(ValueError,'original intent'):v.Authorization(self.root,changed,request,cleanup_action='revoke')
+        changed={**self.p,'api_origin':'https://foreign.example'}
+        with self.assertRaises(ValueError):v.Authorization(self.root,changed,request,cleanup_action='revoke')
+
+    def test_expired_exact_bound_peer_cleanup_rejects_foreign_and_reconciles(self):
+        self.issue();flow=self.flow([self.account,(200,[{**self.key,'used_times':1}]),(200,[self.peer])]);flow.reconcile(self.local)
+        server={'server_binding_verified':True,'peer_id':self.peer['id'],'peer_name':self.name,
+            'hostname':self.peer['hostname'],'ip':self.peer['ip'],'wireguard_public_key':self.local['wireguard_public_key']}
+        evidence={'enrollment':self.local,'server_binding':server,'enrollment_sha256':'d'*64,'server_binding_sha256':'e'*64}
+        flow,request=self.cleanup('retire',[self.account])
+        with self.assertRaisesRegex(ValueError,'exact native'):flow.retire_bound_peer({**evidence,'server_binding':{**server,'peer_id':'foreign'}})
+        self.assertEqual(request.call_count,1)
+        flow,request=self.cleanup('retire',[self.account,(200,self.peer),OSError('lost delete')])
+        with self.assertRaises(OSError):flow.retire_bound_peer(evidence)
+        flow,request=self.cleanup('retire',[self.account,(200,self.peer)])
+        with self.assertRaisesRegex(ValueError,'never repeat'):flow.retire_bound_peer(evidence)
+        self.assertFalse(any(c.args[0]=='DELETE' for c in request.call_args_list))
+        flow,request=self.cleanup('retire',[self.account,(404,None),(200,[])])
+        self.assertTrue(flow.retire_bound_peer(evidence)['absence_verified'])
+        self.assertFalse(any(c.args[0]=='DELETE' for c in request.call_args_list))
+
     def test_reconcile_rejects_new_provider_policy_after_issue(self):
         self.issue();self.p={**self.p,'api_origin':'https://different.example'}
         flow=self.flow([self.account])

@@ -130,5 +130,62 @@ class ApqeLayoutTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'Existing commissioning stage differs'):
             layout.assemble_formation_stage(self.root,target,pins)
 
+    def test_app_authorized_path_derived_policy_is_atomic_and_draft_stays_false(self):
+        public=self.root/'tmp/controller/authorization/inputs/commissioning'
+        pending=self.root/'tmp/pending-validator-custody';target=self.root/'tmp/commissioning'
+        save(self.root/'lib/apqe/build-report.json',b'{}')
+        for name in layout.FORMATION_PUBLIC_INPUTS:save(public/name,(self.stage/name).read_bytes())
+        draft=layout.read(public/'config/start-authorized.json')
+        draft.update(all_validators_ready=False,all_pairs_vpn_verified=False)
+        save(public/'config/start-authorized.json',draft)
+        for source,destination in layout.BOUND_CUSTODY.items():save(pending/source,(self.stage/'keys/apqe'/destination).read_bytes())
+        save(pending/'bundle/validator.pub.json',b'{}')
+        pins={name:layout.digest(public/name) for name in layout.FORMATION_PUBLIC_INPUTS}
+        with patch.object(layout.os,'rename',side_effect=OSError('interrupted publication')):
+            with self.assertRaises(OSError):layout.assemble_formation_stage(self.root,target,pins,public=public,readiness_sha256='a'*64)
+        self.assertFalse(target.exists());self.assertFalse(list((self.root/'tmp').glob('commission-prepare-*')))
+        layout.assemble_formation_stage(self.root,target,pins,public=public,readiness_sha256='a'*64)
+        actual=layout.read(target/'config/start-authorized.json')
+        self.assertTrue(actual['all_validators_ready']);self.assertTrue(actual['all_pairs_vpn_verified'])
+        self.assertEqual(actual['commissioning_readiness_sha256'],'a'*64)
+        self.assertFalse(layout.read(public/'config/start-authorized.json')['all_validators_ready'])
+        layout.assemble_formation_stage(self.root,target,pins,public=public,readiness_sha256='a'*64)
+        with self.assertRaisesRegex(ValueError,'Existing commissioning stage differs'):
+            layout.assemble_formation_stage(self.root,target,pins,public=public,readiness_sha256='b'*64)
+        with self.assertRaisesRegex(ValueError,'Only canonical'):
+            layout.formation_stage_contents(self.root,pins,public=self.stage)
+
+    def test_app_formation_cleanup_retains_immutable_authorization_context(self):
+        from controller import Controller
+        public=self.root/'tmp/controller/authorization/inputs/commissioning';pending=self.root/'tmp/pending-validator-custody'
+        save(self.root/'lib/apqe/build-report.json',b'{}')
+        for name in layout.FORMATION_PUBLIC_INPUTS:save(public/name,(self.stage/name).read_bytes())
+        draft=layout.read(public/'config/start-authorized.json');draft.update(all_validators_ready=False,all_pairs_vpn_verified=False)
+        save(public/'config/start-authorized.json',draft)
+        for source,destination in layout.BOUND_CUSTODY.items():save(pending/source,(self.stage/'keys/apqe'/destination).read_bytes())
+        save(pending/'bundle/validator.pub.json',b'{}')
+        for name in ('genesis.json','authority.json','authority-root.pub'):
+            save(self.root/'tmp/identity-network'/name,(public/'network'/name).read_bytes())
+        (self.root/'tmp/pre-genesis-validator').mkdir(mode=0o700)
+        save(self.root/'tmp/formation-prepare-request.json',b'{}');save(self.root/'tmp/genesis-bind-request.json',b'{}')
+        save(self.root/'tmp/controller/authorization/inputs/formation-context.json',b'{}')
+        pins={name:layout.digest(public/name) for name in layout.FORMATION_PUBLIC_INPUTS}
+        for name in ('config','network','keys'):(self.root/name).mkdir(mode=0o700)
+        result={**{k:self.config[k] for k in ('network_id','chain_id','node_name')}}
+        events=[]
+        def apply(root,stage,inputs):
+            self.assertEqual(events,['grant']);self.assertTrue(layout.read(stage/'config/start-authorized.json')['all_validators_ready'])
+            events.append('apply')
+        with patch.object(lifecycle,'_sealed_receipt',return_value=(result,{})), \
+             patch.object(Controller,'commissioning_readiness',return_value='a'*64), \
+             patch.object(lifecycle,'_validate_commissioning_native',return_value=result), \
+             patch.object(lifecycle,'_apply_commissioning',side_effect=apply), \
+             patch.object(lifecycle,'_fresh_conformance'):
+            self.assertTrue(lifecycle._commission_locked(self.root,self.root/'tmp/commissioning',pins,public,'a'*64,lambda:events.append('grant'))['commissioned'])
+        self.assertEqual(events,['grant','apply'])
+        self.assertTrue((public/'config/node.json').is_file())
+        self.assertTrue((self.root/'tmp/controller/authorization/inputs/formation-context.json').is_file())
+        self.assertFalse(pending.exists());self.assertFalse((self.root/'tmp/pre-genesis-validator').exists())
+
 
 if __name__=='__main__':unittest.main()

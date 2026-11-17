@@ -50,7 +50,8 @@ def identifier(value):
     return isinstance(value, str) and re.fullmatch('[A-Za-z0-9_-]{1,100}', value) is not None
 
 
-def provider_policy(raw, expected_sha256, ca, now):
+def provider_policy(raw, expected_sha256, ca, now, *, cleanup_action=None):
+    require(cleanup_action in (None, 'revoke', 'retire'), 'Unknown cleanup action')
     require(pin(expected_sha256) and hashlib.sha256(raw).hexdigest() == expected_sha256,
             'Provider policy differs from independent native pin')
     policy = decode(raw)
@@ -78,7 +79,7 @@ def provider_policy(raw, expected_sha256, ca, now):
                 'Literal independent overlay peer required')
     require(pin(policy['ca_sha256']) and isinstance(ca, bytes) and 0 < len(ca) <= 128 * 1024
             and hashlib.sha256(ca).hexdigest() == policy['ca_sha256'], 'Independent CA bytes differ')
-    require(type(policy['expires_at']) is int and now < policy['expires_at'], 'Provider approval expired')
+    require(type(policy['expires_at']) is int and (now < policy['expires_at'] or cleanup_action is not None), 'Provider approval expired')
     return policy
 
 
@@ -137,16 +138,26 @@ class Authorization:
     It must never enter an IPC response, log or this class's durable public state.
     A lost POST response is discovered/revoked by exact name; it is not regenerated.
     """
-    def __init__(self, directory, policy, request, now=None):
+    def __init__(self, directory, policy, request, now=None, *, cleanup_action=None):
+        require(cleanup_action in (None, 'revoke', 'retire'), 'Unknown cleanup action')
+        self.cleanup_action = cleanup_action
         self.directory, self.policy, self.request = Path(directory), policy, request
         self.now = time.time if now is None else now
         for ancestor in self.directory.parents:
             require(not ancestor.is_symlink(), 'VPN state ancestry contains a link')
         if not self.directory.exists():
+            require(cleanup_action is None, 'Cleanup requires an existing attributed intent')
             self.directory.mkdir(mode=0o700)
         meta = self.directory.lstat()
         require(stat.S_ISDIR(meta.st_mode) and meta.st_uid == os.geteuid()
                 and not meta.st_mode & 0o077, 'Private native-owned VPN state required')
+        if cleanup_action is not None:
+            require(policy.get('version') == 1 and policy.get('profile') == PROFILE, 'Only isolated engineering cleanup is supported')
+            intent = self._read('intent.json')
+            require(intent.get('provider_sha256') == hashlib.sha256(encode(policy)).hexdigest()
+                    and intent.get('account_id') == policy['account_id'], 'Cleanup provider differs from original intent')
+            if cleanup_action == 'retire':
+                require(self._read('bound.json')['binding'] == intent['binding'], 'Cleanup bound scope differs')
 
     def _read(self, name):
         path = self.directory / name
@@ -173,8 +184,9 @@ class Authorization:
         finally:
             os.close(fd)
 
-    def _account(self):
-        require(self.now() < self.policy['expires_at'], 'Provider approval expired')
+    def _account(self, action=None):
+        require(self.cleanup_action is None or action == self.cleanup_action, 'Cleanup capability cannot issue, bind or change action')
+        require(self.now() < self.policy['expires_at'] or self.cleanup_action == action and action in ('revoke','retire'), 'Provider approval expired')
         code, accounts = self.request('GET', '/api/accounts')
         require(code == 200 and isinstance(accounts, list) and len(accounts) == 1
                 and accounts[0].get('id') == self.policy['account_id'], 'Provider account differs')
@@ -273,7 +285,7 @@ class Authorization:
 
     def revoke_setup_key(self):
         """Even a lost create response can be revoked by its exact durable name."""
-        self._account()
+        self._account('revoke')
         intent = self._read('intent.json')
         require(intent.get('provider_sha256') == hashlib.sha256(encode(self.policy)).hexdigest()
                 and intent.get('account_id') == self.policy['account_id'], 'Provider differs from original intent')
@@ -305,7 +317,7 @@ class Authorization:
 
     def retire_bound_peer(self, evidence):
         """One attributed DELETE; a lost reply is reconciled by absence only."""
-        self._account()
+        self._account('retire')
         intent, bound = self._read('intent.json'), self._read('bound.json')
         require(intent.get('provider_sha256') == hashlib.sha256(encode(self.policy)).hexdigest()
                 and bound['binding'] == intent['binding'], 'Provider/formation binding differs')

@@ -29,7 +29,7 @@ MAX_GENESIS_STAGE_REQUEST = 12*1024*1024
 GENESIS_FILES = {'genesis.json':4*1024*1024,'authority.json':1024*1024,'authority-root.pub':8192}
 ENGINE_MODULES = frozenset(('controller.py','synergy_linux.py','lifecycle.py','conformance.py',
                             'apqe_layout.py','vpn.py','canary_rpc_relay.py','root_guard.py','guest_lifecycle.py'))
-READS = frozenset(('network_transport_status','network_transport_export','guest_resources','guest_preflight','guest_status','target','inventory','health','install_preflight','upgrade_preflight',
+READS = frozenset(('commissioning_observation','network_transport_status','network_transport_export','guest_resources','guest_preflight','guest_status','target','inventory','health','install_preflight','upgrade_preflight',
                   'recovery_preflight','uninstall_preflight','vpn_status','diagnostics','identity_preflight','identity_status',
                   'formation_preflight','formation_status','formation_export','genesis_stage_preflight','genesis_binding_preflight','authorization_status','network_formation_status','network_formation_export'))
 MUTATIONS = frozenset(('network_transport_prepare','network_transport_sign','guest_create','guest_stop','guest_remove','install','commission','register','vpn_enroll','vpn_bind','vpn_retire','start','stop','restart','upgrade','uninstall','identity_generate',
@@ -728,9 +728,10 @@ class Controller:
                 'Genesis staging receipt differs; preserve and reconcile','reconciliation_required')
         return {'stage_request_sha256':request_sha256}
 
-    def genesis_binding(self,request=None):
+    def genesis_binding(self,request=None, *, locked=False):
+        import contextlib
         from lifecycle import _lifecycle_lock
-        with _lifecycle_lock(self.root):
+        with contextlib.nullcontext() if locked else _lifecycle_lock(self.root):
             selection,flags=self.formation_context()
             formation_pin=selection['formation_sha256']
             self.exact_request_receipt(FORMATION_INTENT,'formation_prepare','formation_sha256',formation_pin)
@@ -970,6 +971,99 @@ class Controller:
                 'Current native VPN must match the recorded, independently server-bound validator peer',
                 'vpn_readiness_required')
 
+    def commissioning_observation(self, *, locked=False):
+        import tempfile
+        import lifecycle as life
+        from synergy_linux import native,write_new,digest
+        from vpn import status
+        from apqe_layout import formation_stage_contents,FORMATION_PUBLIC_INPUTS,PUBLIC
+        import contextlib
+        with contextlib.nullcontext() if locked else life._lifecycle_lock(self.root):
+            receipt,_=life._sealed_receipt(self.root)
+            require(receipt['role']=='validator','Validator commissioning observation required')
+            state=life._unit_state('synergy-node.service')
+            require(state.get('MainPID','0') in ('','0') and state.get('ActiveState') in ('inactive','failed'),
+                    'Commissioning observations require a stopped uncommissioned validator')
+            self.require_bound_validator_vpn()
+            require(self.genesis_binding(locked=True).get('bound') is True,'Existing local custody must be bound to authenticated Genesis')
+            policy=self.policy();pins=policy.get('validator_commissioning_files')
+            require(isinstance(pins,dict) and set(pins)==FORMATION_PUBLIC_INPUTS,'Exact approved public commissioning inputs required')
+            public=self.control/'authorization/inputs/commissioning'
+            contents=formation_stage_contents(self.root,pins,public=public)
+            # Private staging exists only for the canonical native public verifier;
+            # the local keytool above independently verifies custody possession.
+            with tempfile.TemporaryDirectory(prefix='commission-observe-',dir=self.root/'tmp') as temporary:
+                stage=Path(temporary)
+                for name,(raw,_) in contents.items():
+                    path=stage/name;path.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
+                    with path.open('xb') as stream:
+                        os.fchmod(stream.fileno(),0o600);stream.write(raw)
+                config=json.loads(contents['config/node.json'][0])
+                manifest={'format':'synergy-apqe-commissioning-v1','root':str(self.root),
+                    'network_id':config['network_id'],'chain_id':config['chain_id'],'node_name':config['node_name'],
+                    'files':{name:pin for name,(_,pin) in contents.items()}}
+                write_new(stage/'commissioning.json',manifest)
+                life._validate_commissioning_native(self.root,stage,self.root,require_readiness=False)
+            require(all(config[k]==receipt[k] for k in ('network_id','chain_id','node_name')),'Installed network selection differs')
+            identity=json.loads(contents['keys/apqe/validator.pub.json'][0]);address=identity['node_address']
+            registry=json.loads(contents['network/transport-registry.json'][0])['payload']
+            entries=registry['validators'];require(isinstance(entries,list) and len(entries)==5,'Five signed transport members required')
+            roster=sorted(entry['node_address'] for entry in entries)
+            require(len(set(roster))==5 and address in roster and not any(entry['revoked'] for entry in entries),'Signed transport roster differs')
+            ips={}
+            for entry in entries:
+                host,port=entry['dial_address'].rsplit(':',1)
+                require(port.isdigit() and 0<int(port)<65536,'Invalid signed transport endpoint')
+                ips[entry['node_address']]=str(ipaddress.ip_address(host.strip('[]')))
+            require(len(set(ips.values()))==5,'Distinct signed VPN endpoints required')
+            enrollment=digest(self.root/'tmp/pending-validator-custody/bundle/enrollment-request.json')
+            require(next(e for e in entries if e['node_address']==address)['enrollment_sha256']==enrollment,
+                    'Signed transport enrollment differs from local custody')
+            vpn=self.vpn_status();live=status(self.root)
+            require(vpn['connected'] is True and vpn['server_bound'] is True,'Current VPN binding required')
+            own=vpn['server_binding'];ip=str(ipaddress.ip_address(own['ip']))
+            require(ip==ips[address] and live['publicKey']==own['wireguard_public_key']
+                    and str(ipaddress.ip_interface(live['netbirdIp']).ip)==ip,'Live VPN identity differs from signed endpoint')
+            provider_path=self.control/'authorization/inputs/vpn-provider.json'
+            provider_raw=self.direct(provider_path,True,16384).read_bytes()
+            provider_pin=hashlib.sha256(provider_raw).hexdigest()
+            require(policy.get('authorization_files',{}).get('vpn-provider.json')==provider_pin,'Independent VPN provider approval required')
+            provider=json.loads(provider_raw)
+            require(provider.get('version')==1 and provider.get('profile')=='nodenetwork-debug-vpn-provider-v1','Explicit approved engineering VPN profile required')
+            details=live['peers']['details'];require(isinstance(details,list) and len(details)<=1024,'Bounded native VPN peer inventory required')
+            peers={}
+            for other in roster:
+                if other==address:continue
+                matches=[peer for peer in details if str(ipaddress.ip_interface(peer['netbirdIp']).ip)==ips[other]]
+                require(len(matches)==1 and matches[0]['status']=='Connected','Exact connected VPN peer identity required')
+                # Route/device and source are fixed; no renderer destination.
+                routes=json.loads(native(['ip','-j','route','get',ips[other],'from',ip],timeout=4))
+                require(isinstance(routes,list) and len(routes)==1 and routes[0].get('dev')=='wt0','Peer route must use wt0')
+                native(['ping','-n','-I','wt0','-c','1','-W','2',ips[other]],timeout=4)
+                peers[other]={'ip':ips[other],'wireguard_public_key':matches[0]['publicKey'],'interface':'wt0','reachable':True}
+            selection,_=self.formation_context()
+            return {'schema':'nodenetwork-commissioning-observation-v1','observed_at_unix':int(time.time()),
+                'target':policy['engineering_target'],'manifest_sha256':receipt['package_sha256'],
+                'provider_report_sha256':config['aegis_provider']['authenticated_report_sha256'],
+                'vpn_provider_sha256':provider_pin,'network_id':receipt['network_id'],'chain_id':str(receipt['chain_id']),
+                'formation_sha256':selection['formation_sha256'],'address':address,'enrollment_sha256':enrollment,
+                'public_file_sha256':{name:pins['network/'+name] for name in PUBLIC},'commissioning_file_sha256':pins,
+                'validator_addresses':roster,'registry_peer_ips':ips,
+                'vpn_binding':{'account_id':provider['account_id'],'peer_id':own['peer_id'],'ip':ip,
+                    'wireguard_public_key':own['wireguard_public_key'],'enrollment_sha256':vpn['enrollment_sha256'],
+                    'server_binding_sha256':vpn['server_binding_sha256']},'peers':peers}
+
+    def commissioning_readiness(self, *, locked=False):
+        from apqe_layout import READINESS_FILE,validate_commissioning_readiness
+        path=self.control/'authorization/inputs'/READINESS_FILE
+        raw=self.direct(path,True,128*1024).read_bytes();pin=hashlib.sha256(raw).hexdigest()
+        require(self.policy().get('authorization_files',{}).get(READINESS_FILE)==pin,
+                'Readiness requires independent native approval','authorization_required')
+        value=json.loads(raw)
+        require(raw==canonical(value),'Canonical reviewed readiness bytes required')
+        validate_commissioning_readiness(value,self.commissioning_observation(locked=locked),int(time.time()))
+        return pin
+
     def diagnostics(self):
         import lifecycle as life
         from synergy_linux import native
@@ -1037,6 +1131,7 @@ class Controller:
         if op=='target': return self.target()
         require(platform.system()=='Linux' and platform.machine()=='x86_64','Linux x86_64 target required','unsupported_target')
         if op=='inventory': return self.inventory()
+        if op=='commissioning_observation':return self.commissioning_observation()
         # Enrollment/grant readback is required before the first installation.
         # Its own exact engine/policy checks run without inventing a receipt.
         if op=='authorization_status':
@@ -1117,9 +1212,10 @@ class Controller:
             require(isinstance(pins,dict) and set(pins)==FORMATION_PUBLIC_INPUTS
                     and all(isinstance(pin,str) and re.fullmatch('[a-f0-9]{64}',pin) for pin in pins.values()),
                     'Exact host approval for public commissioning inputs required','authorization_required')
-            self.authorize(request)
-            directory=(self.control/'authorization/inputs/commissioning' if self.policy().get('authorization_files') else self.root/'tmp/commissioning')
-            return life.commission(self.root,directory,formation_public_pins=pins)
+            readiness_sha256=self.commissioning_readiness()
+            directory=(self.control/'authorization/inputs/commissioning' if self.policy().get('authorization_files') else self.root/'tmp/commissioning-public')
+            return life.commission(self.root,self.root/'tmp/commissioning',formation_public_pins=pins,
+                                   formation_public_source=directory,readiness_sha256=readiness_sha256,authorize=lambda:self.authorize(request))
         if op in ('register','start','restart'):
             if op in ('start','restart'):
                 self.require_bound_validator_vpn()
@@ -1175,7 +1271,7 @@ def control_inventory(root):
     authorization=policy.get('authorization_files',{})
     require(isinstance(authorization,dict),'Malformed authorization inventory')
     # Fixed input names only. Never grants arbitrary caller-selected paths.
-    AUTHORIZATION_FILES={'managed-guest.json':16384,'formation-context.json':4096,'vpn-ca.pem':128*1024,'vpn-provider.json':16384,
+    AUTHORIZATION_FILES={'commissioning-readiness.json':128*1024,'managed-guest.json':16384,'formation-context.json':4096,'vpn-ca.pem':128*1024,'vpn-provider.json':16384,
         'vpn-server-binding.json':16384,'vpn-retirement.json':16384,
         'commissioning/config/node.json':1024*1024,'commissioning/config/start-authorized.json':65536,
         **{'commissioning/network/'+name:limit for name,limit in {
