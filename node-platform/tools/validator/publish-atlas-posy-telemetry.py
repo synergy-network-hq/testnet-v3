@@ -250,6 +250,27 @@ def observe_admission_rates(state, previous):
 
 MASTER_SOCKETS={}
 
+def retired_payload(network_id, genesis_hash, chain_id, timestamp):
+    """Explicit operator retirement record; never synthesize observations."""
+    if (not isinstance(network_id,str) or not re.fullmatch(r'[A-Za-z0-9._-]{1,256}',network_id)
+            or not isinstance(genesis_hash,str) or not re.fullmatch(r'[a-f0-9]{64}',genesis_hash)
+            or type(chain_id) is not int or not 0<chain_id<=2**53-1):
+        raise ValueError('Exact retired network identity required')
+    if datetime.datetime.fromisoformat(timestamp).tzinfo is None:
+        raise ValueError('Retirement timestamp requires an explicit timezone')
+    return {'observed_at':timestamp,
+            'chain':{'network_id':network_id,'chain_id':chain_id,'genesis_hash':genesis_hash,
+                     'lifecycle':'retired','retired_at':timestamp,'height':None,
+                     'finalized_height':None,'block_time_ms':None,'transactions':None,'wallets':None},
+            'validators':[{'id':f'val{n}','address':None,'public_ip':None,'vpn_ip':None,
+                'status':'unavailable' if n==5 else 'retired','height':None,'finalized_height':None,
+                'gap':None,'peers':None,'updated_at':timestamp,
+                'error':('Original Val5 VPS is outside retirement scope; temporary guest on Val4 removed.'
+                         if n==5 else 'Legacy validator installation and VPN membership removed.')}
+                for n in range(2,7)],
+            'tests':[{'name':'Legacy Canary retired','status':'blocked','started_at':None,
+                      'updated_at':timestamp,'detail':'The old Canary has been retired. Replacement validators must be provisioned through Portal and NodeNetwork; new-network acceptance is pending.'}]}
+
 def safe_native_telemetry(state):
     value=state.get('chain_telemetry')
     if not isinstance(value,dict) or value.get('schema_version')!=1:return None
@@ -579,11 +600,22 @@ if __name__=='__main__':
     parser.add_argument('--test-plan',type=Path,help='Current network-bound qualification status; reread each observation')
     parser.add_argument('--once',action='store_true',help='Publish one observation and exit')
     parser.add_argument('--baseline-report',type=Path,help='Explicit canonical baseline JSON; no automatic discovery')
+    parser.add_argument('--retired-network-id',help='Publish an explicit retirement record without probing validators')
+    parser.add_argument('--retired-genesis-hash')
+    parser.add_argument('--retired-chain-id',type=int)
     args=parser.parse_args()
     for mapping in args.master_socket:
         host,separator,socket=mapping.partition('=')
         if not separator or host in MASTER_SOCKETS:parser.error('unique HOST=PATH master required')
         MASTER_SOCKETS[host]=socket
+    if any(value is not None for value in (args.retired_network_id,args.retired_genesis_hash,args.retired_chain_id)):
+        if not args.once or args.test_plan or args.baseline_report or set(MASTER_SOCKETS)!={'synergy-index'}:
+            parser.error('Retirement requires --once, only the existing index master, and no live test inputs')
+        try:payload=retired_payload(args.retired_network_id,args.retired_genesis_hash,args.retired_chain_id,datetime.datetime.now(datetime.timezone.utc).isoformat())
+        except ValueError as error:parser.error(str(error))
+        owner.remote('synergy-index',MASTER_SOCKETS['synergy-index'],['python3','-c',PUBLISH],json.dumps(payload).encode())
+        print(json.dumps({'published_lifecycle':'retired','network_id':payload['chain']['network_id']}),flush=True)
+        raise SystemExit(0)
     if set(MASTER_SOCKETS)!={*[f'synergy-val{n}' for n in range(2,7)],'synergy-index'}:parser.error('explicit six existing owner masters required')
     report=None
     if args.baseline_report:

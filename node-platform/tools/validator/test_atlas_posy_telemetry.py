@@ -15,6 +15,20 @@ exec(collector.PROBE.split("configuration,_=")[0], probe)
 
 
 class StaffFeedContract(unittest.TestCase):
+    def test_retirement_does_not_fabricate_chain_activity_or_retire_out_of_scope_host(self):
+        record = collector.retired_payload('canary-network', 'a' * 64, 99999, '2026-11-17T06:00:00+00:00')
+        self.assertEqual(record['chain']['lifecycle'], 'retired')
+        for field in ('height', 'finalized_height', 'block_time_ms', 'transactions', 'wallets'):
+            self.assertIsNone(record['chain'][field])
+        self.assertEqual([node['id'] for node in record['validators'] if node['status'] == 'retired'],
+                         ['val2', 'val3', 'val4', 'val6'])
+        self.assertEqual(record['validators'][3]['status'], 'unavailable')
+        for arguments in [('canary', 'not-a-genesis', 99999, record['observed_at']),
+                          ('canary', 'a' * 64, True, record['observed_at']),
+                          ('canary', 'a' * 64, 99999, '2026-11-17T06:00:00')]:
+            with self.subTest(arguments=arguments), self.assertRaises(ValueError):
+                collector.retired_payload(*arguments)
+
     def test_every_shipped_objective_has_the_required_staff_timestamp_fields(self):
         plan = json.loads(Path(__file__).with_name('canary-99999-atlas-objectives.json').read_bytes())
         for item in plan['tests']:
