@@ -1,16 +1,22 @@
 # Core Protocol single source of truth
 
+Before every task, read the canonical workspace policy at
+`/Volumes/PortableSSD/02-Synergy-Network/AGENTS.md`. Stop if it is inaccessible.
+This applies to delegated agents and after context compaction. Node management
+must use Portal → dApp Hub → NodeNetwork; a master CLI invoked directly over SSH
+is not that workflow. Preserve the canonical policy's exact retirement scope.
+
 ## Canonical repository and implementation
 
 The only authoritative Core Protocol checkout is:
 
-`/Volumes/PortableSSD/Synergy-Network/01-Core-Protocol`
+`/Volumes/PortableSSD/02-Synergy-Network/01-Core-Protocol`
 
 on this Mac’s external SSD (relocated; confirmed by the user 2026-10-08).
 
 The one canonical universal node implementation is:
 
-`/Volumes/PortableSSD/Synergy-Network/01-Core-Protocol/node-platform`
+`/Volumes/PortableSSD/02-Synergy-Network/01-Core-Protocol/node-platform`
 
 Network-specific governed artifacts belong below `networks/<network>/` and do
 not own the universal node implementation. The former Testnet-v3 monolithic
@@ -63,14 +69,11 @@ Do not create nested clones, long-lived worktrees, or copied Core Protocol or
 Testnet trees. A temporary worktree requires a named purpose, reconciliation
 into this checkout, and removal with `git worktree remove`. Testnet-v2 source
 and runtime artifacts are forbidden. The Node Control Panel source belongs only
-at `/Volumes/PortableSSD/Synergy-Network/07-Node-Control-Panel`; do not copy it into
+at `/Volumes/PortableSSD/02-Synergy-Network/07-Node-Control-Panel`; do not copy it into
 Core Protocol.
 
-## Agent operating system
+## Persistent policy bootstrap
 
-Before every task, read and follow
-`/Users/jhutzler/.codex/agent-operating-system/AGENTS.md` and its canonical
-memory package. Preserve these repository rules with the global operating
-system. System and developer instructions remain higher priority, and explicit
-user instructions govern the task. Do not copy global memory into this
-repository unless the user explicitly requests it.
+`~/.codex/AGENTS.md` points to the canonical workspace policy above. Preserve
+compatible repository instructions and the separate Aegis scope. Do not recreate
+the retired Agent Operating System or require its removed supporting files.
