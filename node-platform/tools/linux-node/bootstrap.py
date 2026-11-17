@@ -27,6 +27,12 @@ ENGINE=('controller.py','synergy_linux.py','lifecycle.py','conformance.py','apqe
 def engine_names(files):
     return (*ENGINE,'guest_lifecycle.py') if 'tools/guest_lifecycle.py' in files else ENGINE
 
+def initial_engine_pins(stage, manifest):
+    # The extractor already authenticated this exact manifest. Include optional
+    # qualified modules in policy only when the pinned package actually owns them.
+    return {name:hashlib.sha256((stage/'tools'/name).read_bytes()).hexdigest()
+            for name in engine_names(manifest['files'])}
+
 def enrolled_engine(policy):
     names=set(policy.get('engine_files',{}))
     require(names in (set(ENGINE),set((*ENGINE,'guest_lifecycle.py'))),'Incomplete enrolled engine')
@@ -178,7 +184,7 @@ def bootstrap(stream):
         for name,data in host.items():save(control/'host'/name,data)
         policy={'format':'synergy-nodenetwork-host-policy-v1','root':str(ROOT),'community_enrollment':False,
                 'qualified_operations':[],
-                'engine_files':{name:hashlib.sha256((stage/'tools'/name).read_bytes()).hexdigest() for name in ENGINE},
+                'engine_files':initial_engine_pins(stage,manifest),
                 'host_files':{name:hashlib.sha256(data).hexdigest() for name,data in host.items()},
                 'releases':{header['release_id']:{'manifest_sha256':header['manifest_sha256'],'inventory_authenticated':True,
                             'networks':{header['network_id']:header['chain_id']}}}}
@@ -225,6 +231,245 @@ def bootstrap(stream):
         if account:subprocess.run(['/usr/sbin/userdel','synergy-nodenetwork'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         shutil.rmtree(ROOT)
         raise
+
+
+def bare_metadata(path, maximum=1024*1024):
+    require(path.is_absolute() and path.resolve()==path,'Bare bootstrap path contains a link')
+    metadata=path.lstat()
+    require(stat.S_ISREG(metadata.st_mode) and metadata.st_uid==0 and metadata.st_nlink==1
+            and stat.S_IMODE(metadata.st_mode)==0o600 and metadata.st_size<=maximum,
+            'Bare bootstrap file is unsafe')
+    return metadata
+
+
+def bare_file(path, maximum=1024*1024):
+    bare_metadata(path,maximum)
+    return path.read_bytes()
+
+
+def bare_digest(path, maximum=LIMIT):
+    bare_metadata(path,maximum)
+    digest=hashlib.sha256()
+    with path.open('rb') as stream:
+        for chunk in iter(lambda:stream.read(1024*1024),b''):digest.update(chunk)
+    return digest.hexdigest()
+
+
+def bare_tree(root, manifest):
+    """Exact bootstrap-only namespace; never a generic installation remover."""
+    stage=root/'tmp/bootstrap-master'
+    files={'tmp/controller/policy.json','tmp/bootstrap-master/package.json'}
+    files|={'tmp/bootstrap-master/'+name for name in manifest['files']}
+    files|={'tmp/controller/'+name if name=='controller.py' else 'tmp/controller/tools/'+name
+            for name in engine_names(manifest['files'])}
+    files|={'tmp/controller/host/'+name for name in ('authorized_keys','sshd.conf','sudoers')}
+    roles=json.loads(bare_file(stage/'roles/roles.json'))['roles']
+    require(isinstance(roles,list) and len(roles)==20 and len(set(roles))==20
+            and all(isinstance(name,str) and re.fullmatch('[a-z][a-z0-9_-]{0,63}',name) for name in roles),
+            'Bare staged role inventory differs')
+    directories={'tmp','tmp/controller','tmp/controller/tools','tmp/controller/host','tmp/controller/grants',
+                 'tmp/bootstrap-master'}
+    directories|={'tmp/bootstrap-master/'+name for name in DIRECTORIES}
+    directories|={'tmp/bootstrap-master/roles/'+name for name in roles}
+    for name in files:
+        directories|={str(parent) for parent in PurePosixPath(name).parents if str(parent)!='.'}
+    # Bootstrap may create no root presets today; permit only fixed EMPTY ones.
+    directories|=DIRECTORIES-{'tmp'}
+    observed_files=set();observed_dirs=set();snapshot=[];total=0
+    for current, children, members in os.walk(root,followlinks=False):
+        children.sort()
+        require(len(snapshot)<=8192,'Bare namespace exceeds bound')
+        for name in sorted(children+members):
+            path=Path(current)/name;relative=path.relative_to(root).as_posix();metadata=path.lstat()
+            require(metadata.st_uid==0 and not path.is_symlink(),'Bare namespace owner/link differs')
+            if stat.S_ISDIR(metadata.st_mode):
+                require(relative in directories and stat.S_IMODE(metadata.st_mode)==0o700,
+                        'Unknown or unsafe bare directory')
+                observed_dirs.add(relative)
+            else:
+                require(relative in files,'Bare bootstrap contains state, authorization or unknown files')
+                bare_metadata(path,LIMIT);total+=metadata.st_size
+                require(total<=LIMIT+4*1024*1024,'Bare namespace exceeds byte bound')
+                observed_files.add(relative)
+            snapshot.append([relative,metadata.st_dev,metadata.st_ino,metadata.st_mode,metadata.st_size,
+                             metadata.st_mtime_ns,metadata.st_ctime_ns])
+    require(observed_files==files,'Bare bootstrap inventory incomplete')
+    required={'tmp','tmp/controller','tmp/controller/tools','tmp/controller/host','tmp/controller/grants','tmp/bootstrap-master'}
+    require(required<=observed_dirs,'Bare bootstrap directories incomplete')
+    # Any fixed presets outside the stage must remain empty (including data,
+    # keys, network and VPN). No hosted-machines, custody or journal is allowed.
+    for name in DIRECTORIES-{'tmp'}:
+        path=root/name
+        require(not path.exists() or not any(path.iterdir()),'Bare bootstrap preset contains state')
+    return snapshot
+
+
+def bare_guard(root,policy,source):
+    import runpy
+    import shlex
+    guard=runpy.run_path(str(root/'tmp/controller/tools/root_guard.py'))
+    account=policy['host_account'];pin=policy['root_guard_sha256']
+    unit=guard['render'](root,account,source)
+    require(hashlib.sha256(unit).hexdigest()==pin,'Bare guard differs from original pinned source')
+    guard['check_registration'](pin)
+    require(guard['account_present'](account['uid'],account['label'].rsplit(' ',1)[1]),
+            'Bare bootstrap account is absent')
+    state=guard['state'](guard['UNIT']);pid=state.get('MainPID','')
+    require(pid.isdecimal() and int(pid)>1,'Bare guard is not running')
+    process=Path('/proc')/pid
+    require(process.stat().st_uid==0 and (process/'exe').resolve()==Path('/usr/bin/python3').resolve(),
+            'Bare guard process attribution differs')
+    command=[line[10:] for line in unit.decode('ascii').splitlines() if line.startswith('ExecStart=')]
+    require(len(command)==1,'Bare guard command is absent')
+    expected=b'\x00'.join(word.encode() for word in shlex.split(command[0]))+b'\x00'
+    require(bare_process_cmdline(process)==expected,'Bare guard loaded source differs')
+    for path in HOST_LINKS.values():
+        require(path.is_symlink() and path.lstat().st_uid==0
+                and os.readlink(path)==str(root/'tmp/controller/host'/next(k for k,v in HOST_LINKS.items() if v==path)),
+                'Bare host registration is not attributed')
+    # Bootstrap has no application service registration, even stopped ones.
+    for name in ('synergy-node.service','synergy-vpn.service','synergy-canary-rpc-relay.service'):
+        state=guard['state'](name)
+        require(state.get('LoadState')=='not-found' and state.get('MainPID')=='0'
+                and state.get('ControlPID')=='0' and not state.get('FragmentPath') and not state.get('DropInPaths'),
+                'Bare bootstrap has a runtime service')
+        require(not (guard['SYSTEM']/name).exists() and not (guard['SYSTEM']/name).is_symlink(),
+                'Bare bootstrap has a runtime registration')
+    return guard
+
+
+def bare_process_cmdline(process):
+    with (process/'cmdline').open('rb') as stream:return stream.read(32769)
+
+
+def bare_mounts(root):
+    # Bind mounts can share st_dev, so inspect explicit mount boundaries too.
+    with open('/proc/self/mountinfo') as stream:
+        for line in stream:
+            mount=line.split()[4]
+            for encoded,decoded in (('\\040',' '),('\\011','\t'),('\\012','\n'),('\\134','\\')):mount=mount.replace(encoded,decoded)
+            require(not (mount==str(root) or mount.startswith(str(root)+'/')),'Mounted bare subtree requires independent recovery')
+
+
+def bare_administrative_hashes():
+    return {name:hashlib.sha256(Path(name).read_bytes()).hexdigest()
+            for name in ('/etc/ssh/sshd_config','/etc/sudoers')}
+
+
+def bare_no_application_processes(root, pins, proc=Path('/proc')):
+    """Use only the enrolled, manifest-verified process guard, never CWD imports."""
+    import importlib.util
+    import runpy
+    paths={name:root/'tmp/controller/tools'/name for name in ('synergy_linux.py','lifecycle.py')}
+    for name,path in paths.items():
+        require(bare_digest(path,1024*1024)==pins.get(name),'Bare process guard engine drift')
+    previous=sys.modules.get('synergy_linux')
+    try:
+        spec=importlib.util.spec_from_file_location('synergy_linux',paths['synergy_linux.py'])
+        module=importlib.util.module_from_spec(spec);sys.modules['synergy_linux']=module
+        spec.loader.exec_module(module)
+        lifecycle=runpy.run_path(str(paths['lifecycle.py']))
+        lifecycle['_assert_no_application_processes'](root,proc=proc)
+    finally:
+        if previous is None:sys.modules.pop('synergy_linux',None)
+        else:sys.modules['synergy_linux']=previous
+
+
+def bare_snapshot(release_id,pin):
+    require(re.fullmatch('[a-zA-Z0-9._-]{1,128}',release_id) and re.fullmatch('[a-f0-9]{64}',pin),
+            'Exact bare bootstrap release and pin required')
+    require(globals().get('NATIVE_AUTHENTICATED_MANIFEST_SHA256')==pin,
+            'No independent native rollback authorization')
+    root=ROOT;metadata=root.lstat()
+    require(root.resolve()==root and stat.S_ISDIR(metadata.st_mode) and metadata.st_uid==0
+            and stat.S_IMODE(metadata.st_mode)==0o700,'Unsafe bare installation root')
+    bare_mounts(root)
+    stage=root/'tmp/bootstrap-master';raw=bare_file(stage/'package.json')
+    require(hashlib.sha256(raw).hexdigest()==pin,'Bare staged master differs from native old pin')
+    manifest=json.loads(raw)
+    require(manifest.get('format')=='synergy-universal-linux-v1' and manifest.get('architecture')=='x86_64'
+            and manifest.get('release_id')==release_id and isinstance(manifest.get('files'),dict)
+            and len(manifest['files'])<=4096,'Invalid bare staged master')
+    for name,expected in manifest['files'].items():
+        path=PurePosixPath(name)
+        require(isinstance(name,str) and name==path.as_posix() and not path.is_absolute()
+                and '..' not in path.parts and isinstance(expected,str) and re.fullmatch('[a-f0-9]{64}',expected),
+                'Unsafe bare manifest inventory')
+    # First authenticate the full fixed namespace without importing any tools.
+    inventory=bare_tree(root,manifest)
+    policy_raw=bare_file(root/'tmp/controller/policy.json');policy=json.loads(policy_raw)
+    require(set(policy)=={'format','root','community_enrollment','qualified_operations','releases',
+                         'engine_files','host_files','host_account','root_guard_sha256'}
+            and policy['format']=='synergy-nodenetwork-host-policy-v1' and policy['root']==str(root)
+            and policy['community_enrollment'] is False and policy['qualified_operations']==[],
+            'Bootstrap is no longer bare or has authorization')
+    require(set(policy['releases'])=={release_id},'Bare bootstrap release inventory differs')
+    selected=policy['releases'][release_id]
+    require(set(selected)=={'manifest_sha256','inventory_authenticated','networks'}
+            and selected['manifest_sha256']==pin and selected['inventory_authenticated'] is True
+            and isinstance(selected['networks'],dict) and len(selected['networks'])==1,
+            'Bare bootstrap release approval differs')
+    require(set(policy['engine_files'])==set(engine_names(manifest['files']))
+            and set(policy['host_files'])=={'authorized_keys','sshd.conf','sudoers'},'Bare engine/host inventory differs')
+    for name,expected in manifest['files'].items():
+        require(bare_digest(stage/name)==expected,'Bare staged payload drift')
+    for name,expected in policy['engine_files'].items():
+        path=root/'tmp/controller'/name if name=='controller.py' else root/'tmp/controller/tools'/name
+        require(manifest['files'].get('tools/'+name)==expected
+                and hashlib.sha256(bare_file(path)).hexdigest()==expected,'Bare enrolled engine drift')
+    for name,expected in policy['host_files'].items():
+        require(isinstance(expected,str) and re.fullmatch('[a-f0-9]{64}',expected)
+                and hashlib.sha256(bare_file(root/'tmp/controller/host'/name)).hexdigest()==expected,
+                'Bare host registration drift')
+    account=policy['host_account']
+    require(isinstance(account,dict) and set(account)=={'uid','gid','label'} and type(account['uid']) is int
+            and 0<account['uid']<2**32-1 and account['gid']==65534 and isinstance(account['label'],str)
+            and re.fullmatch('Synergy NodeNetwork [a-f0-9]{32}',account['label']), 'Bare account attribution differs')
+    # No import or execution of a staged tool occurs above this point.
+    guard=bare_guard(root,policy,bare_file(root/'tmp/controller/tools/root_guard.py'))
+    bare_no_application_processes(root,policy['engine_files'])
+    administrative=bare_administrative_hashes()
+    review={'root':str(root),'release_id':release_id,'manifest_sha256':pin,
+            'root_identity':[metadata.st_dev,metadata.st_ino],
+            'policy_sha256':hashlib.sha256(policy_raw).hexdigest(),'inventory':inventory,
+            'root_guard_sha256':policy['root_guard_sha256'],'administrative':administrative}
+    digest=hashlib.sha256(json.dumps(review,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    return {'schema':'nodenetwork-bare-bootstrap-rollback-preflight-v1','root':str(root),
+            'release_id':release_id,'manifest_sha256':pin,'review_sha256':digest,
+            'controller_enrolled':True,'software_installed':False,
+            'root_guard_sha256':policy['root_guard_sha256']},guard,policy,administrative
+
+
+def bare_rollback(release_id,pin,review_sha256=None):
+    import fcntl
+    require(os.geteuid()==0 and sys.platform=='linux' and os.uname().machine=='x86_64',
+            'Linux x86_64 root target required')
+    lock=os.open(ROOT,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:
+        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        locked=os.fstat(lock);current=ROOT.lstat()
+        require((locked.st_dev,locked.st_ino)==(current.st_dev,current.st_ino),'Bare root changed before lock')
+        result,guard,policy,administrative=bare_snapshot(release_id,pin)
+        if review_sha256 is None:return result
+        require(isinstance(review_sha256,str) and re.fullmatch('[a-f0-9]{64}',review_sha256)
+                and review_sha256==result['review_sha256'],'Bare rollback review changed; inspect again')
+        # Only the proven empty bootstrap is removed. Its original active guard
+        # owns account and OS-registration retirement; no alternate teardown.
+        current=ROOT.lstat()
+        require((locked.st_dev,locked.st_ino)==(current.st_dev,current.st_ino),'Bare root changed after review')
+        shutil.rmtree(ROOT)
+        guard['wait_for_retirement']()
+        require(not ROOT.exists() and not ROOT.is_symlink(),'Bare root remains')
+        require(all(not path.exists() and not path.is_symlink() for path in HOST_LINKS.values()),
+                'Bare host registrations remain')
+        require(not guard['account_present'](policy['host_account']['uid'],policy['host_account']['label'].rsplit(' ',1)[1]),
+                'Bare managed account remains')
+        require(all(hashlib.sha256(Path(name).read_bytes()).hexdigest()==expected for name,expected in administrative.items()),
+                'Administrative configuration changed during retirement')
+        return {'schema':'nodenetwork-bare-bootstrap-rollback-v1','release_id':release_id,
+                'manifest_sha256':pin,'review_sha256':review_sha256,'root_removed':True,
+                'registrations_removed':True,'administrative_configuration_preserved':True}
+    finally:os.close(lock)
 
 
 def effective_engineering_selection(root,policy):
@@ -671,7 +916,11 @@ def stage_engineering_authorization(stream):
 
 def main():
     try:
-        if len(sys.argv)==2 and sys.argv[1]=='--stage-engineering-authorization':
+        if len(sys.argv)==4 and sys.argv[1]=='--bare-rollback-preflight':
+            operation=bare_rollback(sys.argv[2],sys.argv[3])
+        elif len(sys.argv)==5 and sys.argv[1]=='--bare-rollback-apply':
+            operation=bare_rollback(sys.argv[2],sys.argv[3],sys.argv[4])
+        elif len(sys.argv)==2 and sys.argv[1]=='--stage-engineering-authorization':
             operation=stage_engineering_authorization(sys.stdin.buffer)
         elif len(sys.argv)==4 and sys.argv[1]=='--stage-engineering-update':
             operation=stage_engineering_update(sys.stdin.buffer,sys.argv[2],sys.argv[3])
