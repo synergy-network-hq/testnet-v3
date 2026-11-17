@@ -1,7 +1,9 @@
 """Offline package-boundary refusal tests; no native qualification claim."""
 import hashlib
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -28,6 +30,38 @@ class Provenance:
 
 
 class PackageBoundaryTests(unittest.TestCase):
+    def test_generated_package_is_private_and_tools_execute_under_both_umasks(self):
+        for mask in (0o022,0o077):
+            with self.subTest(umask=mask),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp)/'synergy'
+                previous=os.umask(mask)
+                try:
+                    for directory in ('bin','tools','lib/guest-tools/bin','lib/guest-tools/lib','config'):
+                        (root/directory).mkdir(parents=True,exist_ok=True)
+                    for name in ('bin/node','tools/controller','lib/guest-tools/bin/guest-tool'):
+                        (root/name).write_text('#!/bin/sh\nexit 0\n')
+                    (root/'config/input.json').write_text('{}')
+                    (root/'lib/guest-tools/lib/runtime.so').write_bytes(b'library')
+                    builder.private_package_modes(root)
+                    for path in [root,*root.rglob('*')]:
+                        expected=0o700 if path.is_dir() or path.parent.name in ('bin','tools') else 0o600
+                        self.assertEqual(path.stat().st_mode&0o777,expected,str(path))
+                    subprocess.run([str(root/'tools/controller')],check=True)
+                    subprocess.run([str(root/'lib/guest-tools/bin/guest-tool')],check=True)
+                finally:
+                    os.umask(previous)
+
+    def test_package_modes_refuse_links_without_changing_the_linked_file(self):
+        for symbolic in (True,False):
+            with self.subTest(symbolic=symbolic),tempfile.TemporaryDirectory() as temp:
+                parent=Path(temp);root=parent/'synergy';root.mkdir()
+                outside=parent/'outside';outside.write_bytes(b'unrelated');outside.chmod(0o644)
+                if symbolic:(root/'link').symlink_to(outside)
+                else:os.link(outside,root/'link')
+                with self.assertRaisesRegex(ValueError,'independent regular files'):
+                    builder.private_package_modes(root)
+                self.assertEqual(outside.stat().st_mode&0o777,0o644)
+
     def provider(self, root):
         report = {'validation': False, 'backend_policy': {'selected_backend': 'portable'},
                   'required_variant_count': 8, 'artifacts': []}

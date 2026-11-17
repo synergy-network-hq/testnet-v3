@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 
@@ -127,6 +128,20 @@ def copy_guest_resources(directory,destination,files):
             outgoing.flush();os.fsync(outgoing.fileno())
         require(file_digest(target)==pin and file_digest(source)==pin,'Guest resource changed while copying')
         target.chmod(0o700 if target.parent.name=='bin' else 0o600)
+
+
+def private_package_modes(root):
+    """Generated masters must be private and executable without post-build repair."""
+    paths=[root,*root.rglob('*')]
+    for path in paths:
+        meta=path.lstat()
+        require(not path.is_symlink() and (stat.S_ISDIR(meta.st_mode)
+                or stat.S_ISREG(meta.st_mode) and meta.st_nlink==1),
+                'Package permissions require independent regular files and directories')
+    for path in paths:
+        relative=path.relative_to(root)
+        executable=(relative.parts and relative.parts[0] in ('bin','tools')) or path.parent.name=='bin'
+        path.chmod(0o700 if path.is_dir() or executable else 0o600)
 
 
 def guest_archive_limit(master):
@@ -740,6 +755,7 @@ def main():
         manifest['native_build'] = prebuilt
         manifest['runtime_dependencies'][1] = prebuilt['glibc_requirement']
     (MASTER / 'package.json').write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
+    private_package_modes(MASTER)
     (args.evidence / 'package.json').write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
     subprocess.run([sys.executable, str(SOURCE/'tools/release/provenance.py'), 'inventory',
                     '--root',str(core),'--output',str(args.evidence/'source-after-package.json')],check=True)
