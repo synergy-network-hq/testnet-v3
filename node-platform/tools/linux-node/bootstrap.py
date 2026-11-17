@@ -885,17 +885,24 @@ def readiness_refresh_allowed(root,policy,doc,inputs,continuation,consumed):
     """
     name='commissioning-readiness.json';root=Path(root)
     source=root/'tmp/controller/authorization/inputs'/name
-    if name not in inputs or not source.exists():return False
+    if name not in inputs:return False
     from controller import Controller,request_digest
-    c=Controller(root);raw=c.direct(source,True,128*1024).read_bytes()
-    require(hashlib.sha256(raw).hexdigest()==policy.get('authorization_files',{}).get(name),
-            'Prior readiness artifact differs from approved policy')
-    if raw==inputs[name]:return False
+    c=Controller(root)
+    if source.exists() or source.is_symlink():
+        raw=c.direct(source,True,128*1024).read_bytes()
+        require(hashlib.sha256(raw).hexdigest()==policy.get('authorization_files',{}).get(name),
+                'Prior readiness artifact differs from approved policy')
     require(continuation and set(inputs)=={name}
             and doc['target']==policy['engineering_target']
             and all(doc[k]==effective_engineering_selection(root,policy)[k] for k in ('release_id','manifest_sha256','network_id','chain_id','node_name'))
             and doc['genesis_pins']==policy.get('validator_identity_network'),
             'Readiness refresh changes its approved target or network')
+    from apqe_layout import FORMATION_PUBLIC_INPUTS
+    approved=policy.get('validator_commissioning_files',{})
+    require(set(approved)==FORMATION_PUBLIC_INPUTS,'Exact existing commissioning input approval required')
+    for name,expected in approved.items():
+        path=c.direct(c.control/'authorization/inputs/commissioning'/name,True,4*1024*1024)
+        require(hashlib.sha256(path.read_bytes()).hexdigest()==expected,'Existing commissioning input changed')
     key=request_digest({'version':1,'operation':'commission','parameters':{}})
     require(doc['requests']==[{'operation':'commission','request_sha256':key}] and key not in consumed,
             'Consumed or foreign commissioning review cannot be refreshed')
@@ -1026,6 +1033,14 @@ def stage_engineering_authorization(stream):
         inputs=authorization_inputs(doc,wire['artifacts'])
         require(doc['sequence']==(previous['sequence']+1 if previous else 1),'Authorization sequence must advance exactly once')
         require(not replacement.exists() and not replacement.is_symlink(),'Interrupted authorization requires reconciliation')
+        consumed=set()
+        audit=old/'audit.jsonl'
+        if audit.exists():
+            Controller(ROOT).direct(audit,True)
+            for line in audit.read_bytes().splitlines():
+                item=json.loads(line);require(isinstance(item,dict) and isinstance(item.get('request_sha256'),str),'Invalid prior operation audit')
+                consumed.add(item['request_sha256'])
+        readiness_augmentation=readiness_refresh_allowed(ROOT,policy,doc,inputs,continuation,consumed)
         expired_grants=[]
         for grant_path in (old/'grants').iterdir():
             grant=Controller(ROOT).public_json(grant_path,True)
@@ -1033,7 +1048,9 @@ def stage_engineering_authorization(stream):
                     and grant.get('authorization_sequence')==previous['sequence']
                     and grant.get('request_sha256')==grant_path.stem and type(grant.get('expires_at')) is int,
                     'Prior grant attribution differs; preserve it for reconciliation')
-            require(grant['expires_at']<=int(time.time()),'Prior live grants require reconciliation')
+            require(grant['expires_at']<=int(time.time()) or readiness_augmentation
+                    and grant_path.stem==doc['requests'][0]['request_sha256'] and grant.get('operation')=='commission',
+                    'Prior live grants require reconciliation')
             expired_grants.append(grant_path.name)
         require(not (old/HOST_REMOVAL).exists() and not (old/VPN_ENROLLMENT).exists(),
                 'Prior enrollment or retirement requires reconciliation')
@@ -1055,13 +1072,6 @@ def stage_engineering_authorization(stream):
         vpn=_unit_state('synergy-vpn.service')
         if not active:_assert_no_application_processes(ROOT,vpn_pid=vpn.get('MainPID'))
         requests=[];seen=set()
-        consumed=set()
-        audit=old/'audit.jsonl'
-        if audit.exists():
-            Controller(ROOT).direct(audit,True)
-            for line in audit.read_bytes().splitlines():
-                item=json.loads(line);require(isinstance(item,dict) and isinstance(item.get('request_sha256'),str),'Invalid prior operation audit')
-                consumed.add(item['request_sha256'])
         for request in doc['requests']:
             require(request['operation'] in __import__('controller').MUTATIONS,'Authorization may grant only exact supported mutations')
             key=request['request_sha256'];require(key not in seen,'Duplicate exact request');seen.add(key)
@@ -1109,7 +1119,7 @@ def stage_engineering_authorization(stream):
             require(set(commissioning)==FORMATION_PUBLIC_INPUTS,'Complete public commissioning inventory required')
             require(doc['genesis_pins'] is not None and all(commissioning['network/'+name]==pin for name,pin in doc['genesis_pins'].items()),'Commissioning Genesis differs from independent pins')
             policy['validator_commissioning_files']=commissioning
-        refresh_readiness=readiness_refresh_allowed(ROOT,policy,doc,inputs,continuation,consumed)
+        refresh_readiness=readiness_augmentation
         predecessor=authorization_tree_digest(old)
         exchanged=False
         try:

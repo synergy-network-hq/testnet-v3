@@ -971,6 +971,33 @@ class Controller:
                 'Current native VPN must match the recorded, independently server-bound validator peer',
                 'vpn_readiness_required')
 
+    def commissioned_observation_contents(self,pins):
+        """Re-observe installed custody without reopening deleted formation state."""
+        from apqe_layout import INPUTS,FORMATION_PUBLIC_INPUTS
+        require(set(pins)==FORMATION_PUBLIC_INPUTS,'Exact immutable public commissioning approval required')
+        require(not any(self.exists(path) for path in (FORMATION_CUSTODY,FORMATION_INTENT,
+            'tmp/pending-validator-custody',GENESIS_BIND_INTENT,'tmp/commissioning')),
+            'Partial commissioning must reconcile before observation')
+        contents={}
+        for name in INPUTS:
+            raw=self.direct(self.root/name,True,4*1024*1024).read_bytes()
+            require(raw,'Empty installed commissioning input')
+            contents[name]=(raw,hashlib.sha256(raw).hexdigest())
+        for name in FORMATION_PUBLIC_INPUTS:
+            raw=self.direct(self.control/'authorization/inputs/commissioning'/name,True,4*1024*1024).read_bytes()
+            require(hashlib.sha256(raw).hexdigest()==pins[name],'Original public commissioning approval changed')
+            if name!='config/start-authorized.json':
+                require(contents[name][1]==pins[name],'Installed public commissioning input changed')
+            else:
+                draft=json.loads(raw);actual=json.loads(contents[name][0])
+                require(draft.get('all_validators_ready') is False and draft.get('all_pairs_vpn_verified') is False,
+                        'Original commissioning draft was not unapproved')
+                readiness=self.policy().get('authorization_files',{}).get('commissioning-readiness.json')
+                require(isinstance(readiness,str) and re.fullmatch('[a-f0-9]{64}',readiness),'Installed readiness provenance absent')
+                expected={**draft,'all_validators_ready':True,'all_pairs_vpn_verified':True,'commissioning_readiness_sha256':readiness}
+                require(actual==expected,'Installed commissioning policy changed after readiness')
+        return contents
+
     def commissioning_observation(self, *, locked=False):
         import tempfile
         import lifecycle as life
@@ -985,11 +1012,14 @@ class Controller:
             require(state.get('MainPID','0') in ('','0') and state.get('ActiveState') in ('inactive','failed'),
                     'Commissioning observations require a stopped uncommissioned validator')
             self.require_bound_validator_vpn()
-            require(self.genesis_binding(locked=True).get('bound') is True,'Existing local custody must be bound to authenticated Genesis')
+            commissioned=self.exists('data')
+            if not commissioned:
+                require(self.genesis_binding(locked=True).get('bound') is True,'Existing local custody must be bound to authenticated Genesis')
             policy=self.policy();pins=policy.get('validator_commissioning_files')
             require(isinstance(pins,dict) and set(pins)==FORMATION_PUBLIC_INPUTS,'Exact approved public commissioning inputs required')
             public=self.control/'authorization/inputs/commissioning'
-            contents=formation_stage_contents(self.root,pins,public=public)
+            contents=(self.commissioned_observation_contents(pins) if commissioned else
+                      formation_stage_contents(self.root,pins,public=public))
             # Private staging exists only for the canonical native public verifier;
             # the local keytool above independently verifies custody possession.
             with tempfile.TemporaryDirectory(prefix='commission-observe-',dir=self.root/'tmp') as temporary:
@@ -1003,7 +1033,27 @@ class Controller:
                     'network_id':config['network_id'],'chain_id':config['chain_id'],'node_name':config['node_name'],
                     'files':{name:pin for name,(_,pin) in contents.items()}}
                 write_new(stage/'commissioning.json',manifest)
-                life._validate_commissioning_native(self.root,stage,self.root,require_readiness=False)
+                life._validate_commissioning_native(self.root,stage,self.root,require_readiness=commissioned)
+                if commissioned:
+                    # Reuse the canonical custody verifier with exact installed
+                    # bytes; no raw secret is decoded or returned by Python.
+                    custody=stage/'verify-custody';(custody/'bundle').mkdir(parents=True,mode=0o700);custody.chmod(0o700)
+                    mapping={'unlock':'keys/apqe/unlock','bundle/validator.enc.json':'keys/apqe/custody.json',
+                        'bundle/enrollment-request.json':'keys/apqe/enrollment.json','node-identity.json':'keys/apqe/validator.pub.json'}
+                    for dest,source in mapping.items():
+                        path=custody/dest
+                        with path.open('xb') as output:os.fchmod(output.fileno(),0o600);output.write(contents[source][0])
+                    enrollment=json.loads(contents['keys/apqe/enrollment.json'][0])
+                    write_new(custody/'bundle/validator.pub.json',enrollment['payload']['identity'])
+                    verified=json.loads(native([self.root/'bin/synergy-keytool','verify-validator-custody',
+                        format(config['chain_id'],'064x'),pins['network/genesis.json'],custody,
+                        '--apqe-report',self.root/'lib/apqe/build-report.json','--apqe-report-sha256',
+                        config['aegis_provider']['authenticated_report_sha256']],timeout=120))
+                    address=json.loads(contents['keys/apqe/validator.pub.json'][0])['node_address']
+                    require(verified.get('possession_verified') is True and verified.get('address')==address
+                        and verified.get('genesis_sha256')==pins['network/genesis.json']
+                        and verified.get('chain_id_hex')==format(config['chain_id'],'064x'),
+                        'Installed APQE custody possession differs from selected network')
             require(all(config[k]==receipt[k] for k in ('network_id','chain_id','node_name')),'Installed network selection differs')
             identity=json.loads(contents['keys/apqe/validator.pub.json'][0]);address=identity['node_address']
             registry=json.loads(contents['network/transport-registry.json'][0])['payload']
@@ -1016,7 +1066,7 @@ class Controller:
                 require(port.isdigit() and 0<int(port)<65536,'Invalid signed transport endpoint')
                 ips[entry['node_address']]=str(ipaddress.ip_address(host.strip('[]')))
             require(len(set(ips.values()))==5,'Distinct signed VPN endpoints required')
-            enrollment=digest(self.root/'tmp/pending-validator-custody/bundle/enrollment-request.json')
+            enrollment=contents['keys/apqe/enrollment.json'][1]
             require(next(e for e in entries if e['node_address']==address)['enrollment_sha256']==enrollment,
                     'Signed transport enrollment differs from local custody')
             vpn=self.vpn_status();live=status(self.root)
@@ -1137,6 +1187,10 @@ class Controller:
         if op=='authorization_status':
             control_inventory(self.root)
             record=self.policy().get('engineering_authorization')
+            provider_report=None
+            if self.exists('installation.json'):
+                _,sealed=life._sealed_receipt(self.root)
+                provider_report=sealed['files'].get('lib/apqe/build-report.json')
             return {'schema':'nodenetwork-engineering-authorization-status-v1','authorization':record,
                     'initial_sha256':self.policy().get('engineering_initial_authorization_sha256'),
                     'selection':engineering_effective_selection(self.root,self.policy()),
@@ -1144,6 +1198,8 @@ class Controller:
                     'update':self.policy().get('engineering_update'), 'target':self.policy().get('engineering_target'),
                     'formation_sha256':self.policy().get('validator_formation_sha256'),
                     'genesis_pins':self.policy().get('validator_identity_network'),
+                    'commissioning_file_sha256':self.policy().get('validator_commissioning_files'),
+                    'provider_report_sha256':provider_report,
                     'pending_grants':[path.stem for path in (self.control/'grants').iterdir() if self.public_json(path,True).get('expires_at',0)>time.time()]}
         if op in ('install','install_preflight','upgrade','upgrade_preflight'):
             package,manifest,approval=self.approved_package(p,bootstrap=op.startswith('install'))

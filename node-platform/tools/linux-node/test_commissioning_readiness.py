@@ -82,14 +82,15 @@ class ObservationTests(unittest.TestCase):
         self.c=controller.Controller(self.root);self.value=observations()['observations'][0]
         self.provider={'version':1,'profile':'nodenetwork-debug-vpn-provider-v1','account_id':'account'}
         save(self.root/'tmp/controller/authorization/inputs/vpn-provider.json',self.provider)
-        save(self.root/'tmp/pending-validator-custody/bundle/enrollment-request.json',b'original enrollment')
+        save(self.root/'tmp/pending-validator-custody/bundle/enrollment-request.json',{'payload':{'identity':{'address':'synv10'}}})
         enrollment=layout.digest(self.root/'tmp/pending-validator-custody/bundle/enrollment-request.json')
         self.registry={'payload':{'validators':[{'node_address':a,'revoked':False,'dial_address':ip+':5622','enrollment_sha256':enrollment if a=='synv10' else pin(a)} for a,ip in self.value['registry_peer_ips'].items()]}}
         self.config={'network_id':'fresh','chain_id':99999,'node_name':'node0','aegis_provider':{'authenticated_report_sha256':pin('provider')}}
         self.contents={name:(b'{}',pin(name)) for name in layout.INPUTS}
         self.contents.update({'config/node.json':(json.dumps(self.config).encode(),pin('config')),
             'keys/apqe/validator.pub.json':(b'{"node_address":"synv10"}',pin('identity')),
-            'network/transport-registry.json':(json.dumps(self.registry).encode(),pin('registry'))})
+            'network/transport-registry.json':(json.dumps(self.registry).encode(),pin('registry')),
+            'keys/apqe/enrollment.json':((self.root/'tmp/pending-validator-custody/bundle/enrollment-request.json').read_bytes(),enrollment)})
         self.policy={'validator_commissioning_files':self.value['commissioning_file_sha256'],
             'authorization_files':{'vpn-provider.json':layout.digest(self.root/'tmp/controller/authorization/inputs/vpn-provider.json')},'engineering_target':self.value['target']}
         self.vpn={'connected':True,'server_bound':True,'server_binding':self.value['vpn_binding'],
@@ -97,12 +98,17 @@ class ObservationTests(unittest.TestCase):
         self.live={'publicKey':self.value['vpn_binding']['wireguard_public_key'],'netbirdIp':'100.97.0.1/16',
             'peers':{'details':[{'netbirdIp':v['ip']+'/16','publicKey':v['wireguard_public_key'],'status':'Connected'} for v in self.value['peers'].values()]}}
     def tearDown(self):self.temp.cleanup()
-    def run_observation(self,route='wt0'):
+    def run_observation(self,route='wt0',commissioned=False,valid_custody=True):
+        if commissioned:(self.root/'data').mkdir(exist_ok=True)
         def verifier(root,stage,package,**kw):
             self.assertEqual((stage/'config/node.json').read_bytes(),self.contents['config/node.json'][0])
-            self.assertEqual(kw,{'require_readiness':False})
+            self.assertEqual(kw,{'require_readiness':commissioned})
             return {}
         def native(args,**kwargs):
+            if str(args[0]).endswith('synergy-keytool'):
+                self.assertEqual(args[1],'verify-validator-custody');directory=args[4]
+                self.assertEqual((directory/'bundle/enrollment-request.json').read_bytes(),self.contents['keys/apqe/enrollment.json'][0])
+                return json.dumps({'possession_verified':valid_custody,'address':'synv10','genesis_sha256':args[3],'chain_id_hex':args[2]}).encode()
             if args[0]=='ip':return json.dumps([{'dev':route}]).encode()
             self.assertEqual(args[:7],['ping','-n','-I','wt0','-c','1','-W']);return b''
         with patch.object(lifecycle,'_sealed_receipt',return_value=({'role':'validator','package_sha256':pin('master'),**{k:self.config[k] for k in ('network_id','chain_id','node_name')}},{})),\
@@ -111,9 +117,12 @@ class ObservationTests(unittest.TestCase):
              patch.object(self.c,'policy',return_value=self.policy),patch.object(self.c,'require_bound_validator_vpn'),\
              patch.object(self.c,'genesis_binding',return_value={'bound':True}) as binding,patch.object(self.c,'vpn_status',return_value=self.vpn),\
              patch.object(self.c,'formation_context',return_value=({'formation_sha256':pin('formation')},[])),\
-             patch.object(layout,'formation_stage_contents',return_value=self.contents),patch('vpn.status',return_value=self.live),\
+             patch.object(layout,'formation_stage_contents',return_value=self.contents),patch.object(self.c,'commissioned_observation_contents',return_value=self.contents),patch('vpn.status',return_value=self.live),\
              patch('synergy_linux.native',side_effect=native):
-            value=self.c.commissioning_observation();binding.assert_called_once_with(locked=True);return value
+            value=self.c.commissioning_observation()
+            if commissioned:binding.assert_not_called()
+            else:binding.assert_called_once_with(locked=True)
+            return value
     def test_actual_native_staging_bytes_and_twenty_edge_contribution(self):
         value=self.run_observation();self.assertEqual(value['peers'],self.value['peers']);self.assertEqual(value['chain_id'],'99999')
         self.assertFalse(list((self.root/'tmp').glob('commission-observe-*')))
@@ -122,6 +131,30 @@ class ObservationTests(unittest.TestCase):
         self.live['publicKey']=base64.b64encode(b'wrong-key-material-32-bytes!!xxxx').decode()
         with self.assertRaisesRegex(ValueError,'Live VPN'):self.run_observation()
         self.assertFalse(list((self.root/'tmp').glob('commission-observe-*')))
+    def test_commissioned_observation_verifies_native_installed_custody_without_pending(self):
+        self.assertEqual(self.run_observation(commissioned=True)['peers'],self.value['peers'])
+        with self.assertRaisesRegex(ValueError,'custody possession'):
+            self.run_observation(commissioned=True,valid_custody=False)
+        self.assertFalse(list((self.root/'tmp').glob('commission-observe-*')))
+    def test_installed_observation_content_binds_exact_draft_and_rejects_drift(self):
+        pins={};readiness=pin('readiness');self.policy['authorization_files'][layout.READINESS_FILE]=readiness
+        for name,(raw,_) in self.contents.items():
+            if name=='config/start-authorized.json':raw=controller.canonical({'all_validators_ready':False,'all_pairs_vpn_verified':False})
+            if name in layout.FORMATION_PUBLIC_INPUTS:
+                save(self.c.control/'authorization/inputs/commissioning'/name,raw);pins[name]=hashlib.sha256(raw).hexdigest()
+            if name=='config/start-authorized.json':raw=controller.canonical({'all_validators_ready':True,'all_pairs_vpn_verified':True,'commissioning_readiness_sha256':readiness})
+            save(self.root/name,raw)
+        import shutil
+        shutil.rmtree(self.root/'tmp/pending-validator-custody')
+        with patch.object(self.c,'policy',return_value=self.policy):
+            self.assertEqual(set(self.c.commissioned_observation_contents(pins)),layout.INPUTS)
+            original=(self.root/'config/start-authorized.json').read_bytes()
+            save(self.root/'config/start-authorized.json',{'all_validators_ready':True,'all_pairs_vpn_verified':True,'commissioning_readiness_sha256':'f'*64})
+            with self.assertRaisesRegex(ValueError,'policy changed'):self.c.commissioned_observation_contents(pins)
+            save(self.root/'config/start-authorized.json',original)
+            save(self.root/'network/genesis.json',b'tampered')
+            with self.assertRaisesRegex(ValueError,'input changed'):self.c.commissioned_observation_contents(pins)
+
 
 class ReadinessAuthorizationTests(unittest.TestCase):
     def test_fixed_artifact_only_exact_commission_grant(self):
@@ -167,6 +200,10 @@ class ReadinessRefreshTests(unittest.TestCase):
             'engineering_authorization':{'sha256':pin('old approval'),'sequence':1,'expires_at':1300}}
         self.doc={**self.selection,'target':self.policy['engineering_target'],'genesis_pins':self.policy['validator_identity_network'],
             'requests':[{'operation':'commission','request_sha256':self.key}]}
+        self.policy['validator_commissioning_files']={}
+        for name in layout.FORMATION_PUBLIC_INPUTS:
+            raw=name.encode();save(self.c.control/'authorization/inputs/commissioning'/name,raw)
+            self.policy['validator_commissioning_files'][name]=hashlib.sha256(raw).hexdigest()
         self.grant=self.c.control/'grants'/(self.key+'.json')
         save(self.grant,{'root':str(self.root),'operation':'commission','request_sha256':self.key,'expires_at':1300,
             'authorization_sha256':self.policy['engineering_authorization']['sha256'],'authorization_sequence':1})
@@ -195,6 +232,16 @@ class ReadinessRefreshTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'published or uncertain'):self.refresh()
             path.unlink()
         self.assertEqual(self.path.read_bytes(),self.old);self.assertEqual(self.grant.read_bytes(),original)
+    def test_first_readiness_augments_the_same_live_unused_grant(self):
+        self.path.unlink();del self.policy['authorization_files'][layout.READINESS_FILE]
+        self.policy['engineering_authorization']['expires_at']=1800
+        grant=json.loads(self.grant.read_bytes());grant['expires_at']=1800;save(self.grant,grant)
+        self.assertTrue(self.refresh())
+        self.assertFalse(self.path.exists());self.assertTrue(self.grant.exists())
+        changed=self.c.control/'authorization/inputs/commissioning/config/node.json'
+        save(changed,b'changed')
+        with self.assertRaisesRegex(ValueError,'commissioning input changed'):self.refresh()
+
     def test_atomic_exchange_reconciliation_does_not_regenerate_grant(self):
         # Existing exchange protocol applies equally to a refreshed review: exact
         # committed receipt wins, even after expiry; no re-issuance is implied.
