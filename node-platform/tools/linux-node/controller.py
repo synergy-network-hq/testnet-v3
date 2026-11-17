@@ -31,9 +31,9 @@ ENGINE_MODULES = frozenset(('controller.py','synergy_linux.py','lifecycle.py','c
                             'apqe_layout.py','vpn.py','canary_rpc_relay.py','root_guard.py'))
 READS = frozenset(('target','inventory','health','install_preflight','upgrade_preflight',
                   'recovery_preflight','uninstall_preflight','vpn_status','diagnostics','identity_preflight','identity_status',
-                  'formation_preflight','formation_status','formation_export','genesis_stage_preflight','genesis_binding_preflight'))
+                  'formation_preflight','formation_status','formation_export','genesis_stage_preflight','genesis_binding_preflight','authorization_status','network_formation_status','network_formation_export'))
 MUTATIONS = frozenset(('install','commission','register','vpn_enroll','start','stop','restart','upgrade','uninstall','identity_generate',
-                       'formation_prepare','genesis_stage','genesis_bind'))
+                       'formation_prepare','genesis_stage','genesis_bind','network_formation_prepare','network_formation_sign'))
 FORMATION_CONTEXT = 'tmp/formation-context.json'
 FORMATION_CUSTODY = 'tmp/pre-genesis-validator'
 FORMATION_INTENT = 'tmp/formation-prepare-request.json'
@@ -71,7 +71,7 @@ def canonical(value):
 
 def request_digest(request):
     encoded=(json.dumps(request,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode('utf-8')
-             if request['operation']=='genesis_stage' else canonical(request))
+             if request['operation'] in ('genesis_stage','network_formation_prepare') else canonical(request))
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -151,9 +151,14 @@ def parse_request(raw):
     operation, parameters = value['operation'], value['parameters']
     require(isinstance(operation,str) and operation in READS | MUTATIONS
             and isinstance(parameters,dict), 'Unsupported operation', 'invalid_request')
-    require(operation=='genesis_stage' or len(raw)<=MAX_REQUEST,'Request exceeds operation limit','invalid_request')
-    expected = INSTALL if operation in ('install','install_preflight') else SELECT if operation in ('upgrade','upgrade_preflight') else {'confirmation'} if operation == 'uninstall' else {'genesis_sha256'} if operation in ('identity_generate','genesis_bind') else {'formation_sha256'} if operation=='formation_prepare' else {'artifacts'} if operation=='genesis_stage' else set()
+    require(operation=='genesis_stage' or operation=='network_formation_prepare' and len(raw)<=2*1024*1024 or len(raw)<=MAX_REQUEST,'Request exceeds operation limit','invalid_request')
+    expected = INSTALL if operation in ('install','install_preflight') else SELECT if operation in ('upgrade','upgrade_preflight') else {'confirmation'} if operation == 'uninstall' else {'genesis_sha256'} if operation in ('identity_generate','genesis_bind') else {'formation_sha256'} if operation=='formation_prepare' else {'artifacts'} if operation=='genesis_stage' else {'formation_sha256','recipe_json','registrations_json'} if operation=='network_formation_prepare' else {'review_sha256'} if operation=='network_formation_sign' else set()
     require(set(parameters) == expected, 'Unexpected operation parameters', 'invalid_request')
+    if operation=='network_formation_prepare':
+        require(isinstance(parameters['recipe_json'],str) and 0<len(parameters['recipe_json'].encode('utf-8'))<=1024*1024
+                and isinstance(parameters['registrations_json'],list) and len(parameters['registrations_json'])==5
+                and all(isinstance(v,str) and 0<len(v.encode('utf-8'))<=128*1024 for v in parameters['registrations_json']),
+                'Bounded recipe and five public registrations required','invalid_request')
     if operation=='genesis_stage':
         genesis_artifact_bytes(parameters['artifacts'])
     if expected & SELECT:
@@ -166,7 +171,7 @@ def parse_request(raw):
                 and isinstance(parameters['node_name'],str) and re.fullmatch(r'[A-Za-z0-9_-]{1,64}',parameters['node_name']),
                 'Invalid network or node selection','invalid_request')
     if operation == 'uninstall': require(parameters['confirmation'] == str(ROOT),'Exact root confirmation required','invalid_request')
-    for name in expected & {'genesis_sha256','formation_sha256'}:
+    for name in expected & {'genesis_sha256','formation_sha256','review_sha256'}:
         pin=parameters[name]
         require(isinstance(pin,str) and re.fullmatch('[0-9a-f]{64}',pin),'Exact public artifact SHA-256 required','invalid_request')
     return value
@@ -238,6 +243,13 @@ class Controller:
         require(grant.get('request_sha256')==key and grant.get('root')==str(self.root)
                 and type(grant.get('expires_at')) is int and time.time()<grant['expires_at']<=time.time()+3600,
                 'Host authorization expired or differs','authorization_required')
+        if policy.get('engineering_authorization') is not None:
+            require(grant.get('operation')==request['operation'] and grant.get('authorization_sha256')==policy['engineering_authorization']['sha256']
+                    and grant.get('authorization_sequence')==policy['engineering_authorization']['sequence'],'Exact engineering grant operation or receipt differs','authorization_required')
+            if request['operation'] in ('install','upgrade'):
+                selected=policy.get('engineering_selection',{})
+                expected=INSTALL if request['operation']=='install' else SELECT
+                require(request['parameters']=={key:selected.get(key) for key in expected},'Engineering installation selection differs','authorization_required')
         if request['operation']=='vpn_enroll':
             require(enrollment_pin is not None and grant.get('enrollment_sha256')==enrollment_pin,
                     'One-time host grant does not bind this VPN enrollment','authorization_required')
@@ -269,6 +281,11 @@ class Controller:
         path=self.root/relative
         return path.exists() or path.is_symlink()
 
+    def formation_context_path(self):
+        if 'formation-context.json' in self.policy().get('authorization_files',{}):
+            return self.control/'authorization/inputs/formation-context.json'
+        return self.root/FORMATION_CONTEXT
+
     def formation_context(self):
         from lifecycle import _sealed_receipt
         receipt,manifest=_sealed_receipt(self.root)
@@ -277,7 +294,7 @@ class Controller:
         pin=self.policy().get('validator_formation_sha256')
         require(isinstance(pin,str) and re.fullmatch('[a-f0-9]{64}',pin),
                 'Host operator has not pinned a formation context','authorization_required')
-        path=self.direct(self.root/FORMATION_CONTEXT,True)
+        path=self.direct(self.formation_context_path(),True)
         with path.open('rb') as stream:raw=stream.read(4097)
         require(0<len(raw)<=4096 and hashlib.sha256(raw).hexdigest()==pin,
                 'Independently approved formation context changed')
@@ -291,6 +308,70 @@ class Controller:
         flags=['--apqe-report',self.root/report,'--apqe-report-sha256',manifest['files'][report]]
         return {'schema':'nodenetwork-formation-v1','formation_sha256':pin,'network_id':receipt['network_id'],
                 'chain_id':str(receipt['chain_id']),'formation_id':value['formation_id']},flags
+
+    def network_formation(self,request):
+        from lifecycle import _lifecycle_lock, _unit_state, _assert_no_application_processes
+        from synergy_linux import native
+        op=request['operation']
+        directory=self.root/'tmp/network-formation'
+        prepare=self.root/'tmp/network-formation-prepare-request.json'
+        signing=self.root/'tmp/network-formation-sign-request.json'
+        with _lifecycle_lock(self.root):
+            selection,flags=self.formation_context()
+            if op=='network_formation_status' and not any(p.exists() or p.is_symlink() for p in (directory,prepare,signing)):
+                return {'pending':False}
+            if op in ('network_formation_prepare','network_formation_sign'):
+                state=_unit_state('synergy-node.service')
+                require((state.get('ActiveState') in ('inactive','failed') or state.get('LoadState')=='not-found') and int(state.get('MainPID',0) or 0)==0,
+                        'Stop the node before creating or signing a fresh network')
+                _assert_no_application_processes(self.root,vpn_pid=_unit_state('synergy-vpn.service').get('MainPID'))
+                if op=='network_formation_prepare':
+                    require(request['parameters']['formation_sha256']==selection['formation_sha256'],'Reviewed formation changed')
+                    require(not any(p.exists() or p.is_symlink() for p in (directory,prepare,signing)),
+                            'Existing network formation must be reconciled; no regeneration','reconciliation_required')
+                    path=prepare
+                else:
+                    self.direct(prepare,True,2*1024*1024)
+                    require(directory.is_dir() and not directory.is_symlink(),'No prepared network formation')
+                    require(not signing.exists() and not signing.is_symlink(),'Signing already dispatched; read network formation status','reconciliation_required')
+                    current=json.loads(native([self.root/'bin/synergy-keytool','review-network-formation',self.formation_context_path(),selection['formation_sha256'],directory,*flags]))
+                    require(current.get('signed') is False and current.get('review_sha256')==request['parameters']['review_sha256'],
+                            'Exact unsigned Genesis review changed')
+                    path=signing
+                self.authorize(request)
+                raw=json.dumps(request,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode('utf-8')
+                # Exclusive durable request: never regenerate custody or repeat a signature after an uncertain result.
+                fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+                with os.fdopen(fd,'wb') as stream:stream.write(raw);stream.flush();os.fsync(stream.fileno())
+                sync_directory(path.parent)
+                command='prepare-network-formation' if op=='network_formation_prepare' else 'sign-network-formation'
+                args=([path,request_digest(request),directory] if op=='network_formation_prepare' else [directory,path,request_digest(request)])
+            else:
+                self.direct(prepare,True,2*1024*1024)
+                command='export-network-formation' if op=='network_formation_export' else 'review-network-formation'
+                args=[directory]
+            argv=[self.root/'bin/synergy-keytool',command,self.formation_context_path(),selection['formation_sha256'],*args,*flags]
+            raw=native(argv,maximum_stdout=2*1024*1024 if op=='network_formation_export' else 1024*1024)
+            result=json.loads(raw)
+            if op=='network_formation_export':
+                require(result.get('schema')=='nodenetwork-network-formation-export-v1','Unsupported signed network export')
+                artifacts=genesis_artifact_bytes(result.get('artifacts'))
+                require(all(hashlib.sha256(artifacts[name]).hexdigest()==result.get(field) for name,field in
+                            (('genesis.json','genesis_sha256'),('authority.json','authority_sha256'),('authority-root.pub','authority_root_sha256'))),
+                        'Signed public artifact bytes differ')
+                return result
+            require(result.get('schema')=='nodenetwork-network-formation-v1' and result.get('pending') is True
+                    and type(result.get('signed')) is bool and result.get('formation_sha256')==selection['formation_sha256']
+                    and result.get('network_id')==selection['network_id'] and result.get('chain_id')==selection['chain_id'],
+                    'Native network formation scope differs')
+            prepare_request=parse_request(self.direct(prepare,True,2*1024*1024).read_bytes())
+            require(prepare_request['operation']=='network_formation_prepare' and result.get('request_sha256')==request_digest(prepare_request),
+                    'Native formation request evidence differs')
+            if result['signed']:
+                sign_request=parse_request(self.direct(signing,True).read_bytes())
+                require(sign_request['operation']=='network_formation_sign' and result.get('sign_request_sha256')==request_digest(sign_request)
+                        and sign_request['parameters']['review_sha256']==result.get('review_sha256'),'Native signing evidence differs')
+            return result
 
     def formation_preflight(self):
         require(not any(self.exists(path) for path in (FORMATION_CUSTODY,FORMATION_INTENT,
@@ -322,7 +403,7 @@ class Controller:
         from synergy_linux import native
         pin=selection['formation_sha256']
         request_sha256=self.exact_request_receipt(FORMATION_INTENT,'formation_prepare','formation_sha256',pin)
-        result=json.loads(native([self.root/'bin/synergy-keytool',command,self.root/FORMATION_CONTEXT,pin,
+        result=json.loads(native([self.root/'bin/synergy-keytool',command,self.formation_context_path(),pin,
                                   self.root/FORMATION_CUSTODY,*flags]))
         address=result.get('address')
         require(isinstance(address,str) and re.fullmatch(r'synv1[0-9a-z]{10,90}',address)
@@ -371,7 +452,7 @@ class Controller:
 
     def genesis_review(self,command,selection,flags,pins,path):
         from synergy_linux import native
-        value=json.loads(native([self.root/'bin/synergy-keytool',command,self.root/FORMATION_CONTEXT,
+        value=json.loads(native([self.root/'bin/synergy-keytool',command,self.formation_context_path(),
             selection['formation_sha256'],self.root/FORMATION_CUSTODY,path,self.root/'tmp/pending-validator-custody',
             *[pins[name] for name in GENESIS_FILES],*flags]))
         require(value.get('genesis_sha256')==pins['genesis.json']
@@ -720,7 +801,17 @@ class Controller:
         if op=='vpn_enroll': return self.vpn_enroll(request)
         if op=='identity_preflight': return self.identity_preflight()[0]
         if op=='identity_status': return self.identity_status()
+        if op=='authorization_status':
+            control_inventory(self.root)
+            record=self.policy().get('engineering_authorization')
+            return {'schema':'nodenetwork-engineering-authorization-status-v1','authorization':record,
+                    'initial_sha256':self.policy().get('engineering_initial_authorization_sha256'),
+                    'selection':self.policy().get('engineering_selection'), 'target':self.policy().get('engineering_target'),
+                    'formation_sha256':self.policy().get('validator_formation_sha256'),
+                    'genesis_pins':self.policy().get('validator_identity_network'),
+                    'pending_grants':[path.stem for path in (self.control/'grants').iterdir() if self.public_json(path,True).get('expires_at',0)>time.time()]}
         if op=='identity_generate': return self.identity_generate(request)
+        if op.startswith('network_formation_'): return self.network_formation(request)
         if op=='formation_preflight':
             with life._lifecycle_lock(self.root): return self.formation_preflight()[0]
         if op=='formation_status': return self.formation_status()
@@ -749,7 +840,8 @@ class Controller:
                     and all(isinstance(pin,str) and re.fullmatch('[a-f0-9]{64}',pin) for pin in pins.values()),
                     'Exact host approval for public commissioning inputs required','authorization_required')
             self.authorize(request)
-            return life.commission(self.root,self.root/'tmp/commissioning',formation_public_pins=pins)
+            directory=(self.control/'authorization/inputs/commissioning' if self.policy().get('authorization_files') else self.root/'tmp/commissioning')
+            return life.commission(self.root,directory,formation_public_pins=pins)
         if op in ('register','start','restart'):
             if op in ('start','restart'):
                 self.require_bound_validator_vpn()
@@ -802,6 +894,18 @@ def control_inventory(root):
         c.direct(path,True);approved.add('tmp/controller/grants/'+path.name)
     directories={'tmp/controller','tmp/controller/grants','tmp/controller/tools'}
     if host_files:directories.add('tmp/controller/host')
+    authorization=policy.get('authorization_files',{})
+    require(isinstance(authorization,dict),'Malformed authorization inventory')
+    # Fixed input names only. Never grants arbitrary caller-selected paths.
+    AUTHORIZATION_FILES={'formation-context.json':4096,**{'commissioning/'+name:6*1024*1024 for name in __import__('apqe_layout').FORMATION_PUBLIC_INPUTS}}
+    require(set(authorization)<=set(AUTHORIZATION_FILES)-{VPN_ENROLLMENT},'Unexpected authorization input')
+    for name,pin in authorization.items():
+        path=c.direct(c.control/'authorization/inputs'/name,True,AUTHORIZATION_FILES[name])
+        require(isinstance(pin,str) and hashlib.sha256(path.read_bytes()).hexdigest()==pin,'Authorization input drift')
+        approved.add(path.relative_to(root).as_posix())
+        for parent in path.parents:
+            if parent==c.control:break
+            directories.add(parent.relative_to(root).as_posix())
     actual={p.relative_to(root).as_posix() for p in c.control.rglob('*')}
     require(actual==(approved|directories)-{'tmp/controller'},'Unexpected controller member')
     return approved,directories

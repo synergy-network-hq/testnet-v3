@@ -322,9 +322,295 @@ def stage_engineering_update(stream, release_id, pin):
         os.close(lock)
 
 
+
+# Only an independently pinned isolated native build can authorize this path.
+# The document is not a public policy issuer, membership proof or credential API.
+AUTHORIZATION_PROFILE='nodenetwork-isolated-formation-authorization-v1'
+AUTHORIZATION_LIMIT=12*1024*1024
+AUTHORIZATION_FILES={'formation-context.json':4096,'vpn-enrollment.json':16384,
+    'commissioning/config/node.json':1024*1024,'commissioning/config/start-authorized.json':65536,
+    **{'commissioning/network/'+name:limit for name,limit in {
+        'genesis.json':4*1024*1024,'authority.json':1024*1024,'authority-root.pub':8192,
+        'network-manifest.json':1024*1024,'transport-registry.json':1024*1024,'transport-root.pub':8192}.items()}}
+
+
+def authorization_document(raw,authenticated_pin,now):
+    import base64
+    def unique(pairs):
+        value={}
+        for key,item in pairs:
+            require(key not in value,'Duplicate authorization field');value[key]=item
+        return value
+    require(isinstance(raw,str) and 0<len(raw.encode())<=65536 and
+            hashlib.sha256(raw.encode()).hexdigest()==authenticated_pin,
+            'Authorization differs from independent native approval')
+    doc=json.loads(raw,object_pairs_hook=unique)
+    fields={'version','profile','target','release_id','manifest_sha256','network_id','chain_id','node_name',
+            'sequence','expires_at','artifacts','requests','genesis_pins'}
+    require(isinstance(doc,dict) and set(doc)==fields and type(doc['version']) is int and doc['version']==1
+            and doc['profile']==AUTHORIZATION_PROFILE,'Unsupported engineering authorization')
+    target=doc['target']
+    require(isinstance(target,dict) and set(target)=={'kind','host','port','root','host_key','machine_id_sha256'}
+            and target['root']==str(ROOT),'Authorization target differs')
+    require(target['kind'] in ('local','remote'),'Unsupported authorization target')
+    if target['kind']=='local':
+        require(target['host'] is None and target['port'] is None and target['host_key'] is None\
+                and isinstance(target['machine_id_sha256'],str) and re.fullmatch('[a-f0-9]{64}',target['machine_id_sha256']),'Exact local machine identity required')
+    else:
+        require(target['machine_id_sha256'] is None,'Remote target identity must use its independently pinned SSH key')
+        require(isinstance(target['host'],str) and 0<len(target['host'])<=253
+                and re.fullmatch(r'[a-zA-Z0-9.:\[\]-]+',target['host'])
+                and type(target['port']) is int and 0<target['port']<65536,'Invalid remote target')
+        label=target['host'].strip('[]')
+        label=label if target['port']==22 else '['+label+']:'+str(target['port'])
+        require(isinstance(target['host_key'],str) and len(target['host_key'])<2048
+                and re.fullmatch(re.escape(label)+r' ssh-ed25519 [A-Za-z0-9+/]{68}={0,2}',target['host_key']),
+                'Exact independently pinned administrative host key required')
+    require(isinstance(doc['release_id'],str) and re.fullmatch('[A-Za-z0-9._-]{1,128}',doc['release_id'])
+            and isinstance(doc['manifest_sha256'],str) and re.fullmatch('[a-f0-9]{64}',doc['manifest_sha256'])
+            and isinstance(doc['network_id'],str) and re.fullmatch('[a-z0-9][a-z0-9_-]{1,127}',doc['network_id'])
+            and type(doc['chain_id']) is int and 0<doc['chain_id']<2**64
+            and isinstance(doc['node_name'],str) and re.fullmatch('[A-Za-z0-9_-]{1,64}',doc['node_name']),
+            'Invalid selected installation context')
+    require(type(doc['sequence']) is int and 0<doc['sequence']<2**53
+            and type(doc['expires_at']) is int and now<doc['expires_at']<=now+3600,'Authorization expired or exceeds lifetime')
+    require(isinstance(doc['artifacts'],dict) and set(doc['artifacts'])<=set(AUTHORIZATION_FILES)
+            and all(isinstance(pin,str) and re.fullmatch('[a-f0-9]{64}',pin) for pin in doc['artifacts'].values()),
+            'Only fixed, digest-bound authorization artifacts are allowed')
+    pins=doc['genesis_pins']
+    require(pins is None or isinstance(pins,dict) and set(pins)=={'genesis.json','authority.json','authority-root.pub'}
+            and all(isinstance(pin,str) and re.fullmatch('[a-f0-9]{64}',pin) for pin in pins.values()),'Invalid independent Genesis pins')
+    require(isinstance(doc['requests'],list) and 0<len(doc['requests'])<=16,'Bounded exact requests required')
+    # Request semantics are checked again against the enrolled canonical engine.
+    require(all(isinstance(r,dict) and set(r)=={'operation','request_sha256'}\
+                and isinstance(r['operation'],str) and isinstance(r['request_sha256'],str)\
+                and re.fullmatch('[a-f0-9]{64}',r['request_sha256']) for r in doc['requests']),
+            'Exact controller operation and request digests required')
+    return doc
+
+
+def authorization_inputs(doc,encoded):
+    import base64
+    require(isinstance(encoded,dict) and set(encoded)==set(doc['artifacts']),'Authorization artifacts incomplete')
+    result={}
+    for name,pin in doc['artifacts'].items():
+        text=encoded[name];limit=AUTHORIZATION_FILES[name]
+        require(isinstance(text,str) and len(text)<=4*((limit+2)//3),'Authorization artifact exceeds bound')
+        data=base64.b64decode(text,validate=True)
+        require(0<len(data)<=limit and base64.b64encode(data).decode()==text
+                and hashlib.sha256(data).hexdigest()==pin,'Authorization artifact digest or encoding differs')
+        result[name]=data
+    return result
+
+
+
+def authorization_reconciliation(policy,pin,raw):
+    previous=policy.get('engineering_authorization')
+    require(previous is None or isinstance(previous,dict) and set(previous)=={'sha256','sequence','expires_at'}
+            and isinstance(previous['sha256'],str) and re.fullmatch('[a-f0-9]{64}',previous['sha256'])
+            and type(previous['sequence']) is int and previous['sequence']>0,'Invalid prior authorization receipt')
+    if previous is None or previous['sha256']!=pin:return None
+    require(isinstance(raw,str) and hashlib.sha256(raw.encode()).hexdigest()==pin,'Authorization bytes differ')
+    return {'schema':'nodenetwork-engineering-authorization-v1',**previous,
+            'applied':True,'reconciled':True,'grants_recreated':False}
+
+
+def authorization_tree_digest(directory):
+    # Previous controller contains no one-use VPN input (checked before staging).
+    # This digest permits cleanup only of the exact exchanged predecessor tree.
+    digest=hashlib.sha256();members=sorted(directory.rglob('*'));total=0
+    require(len(members)<=8192,'Controller predecessor inventory exceeds bound')
+    for path in members:
+        st=path.lstat()
+        require(st.st_uid==0 and not stat.S_ISLNK(st.st_mode)
+                and (stat.S_ISREG(st.st_mode) and st.st_nlink==1 or stat.S_ISDIR(st.st_mode)),
+                'Unsafe controller predecessor')
+        name=path.relative_to(directory).as_posix().encode()
+        digest.update(len(name).to_bytes(8,'big'));digest.update(name)
+        digest.update(stat.S_IMODE(st.st_mode).to_bytes(4,'big'))
+        if path.is_file():
+            total+=st.st_size;require(total<=16*1024*1024,'Controller predecessor exceeds bound')
+            digest.update(st.st_size.to_bytes(8,'big'));digest.update(hashlib.sha256(path.read_bytes()).digest())
+        else:digest.update(b'directory')
+    return digest.hexdigest()
+
+
+def stage_engineering_authorization(stream):
+    """Atomic exact engineering grants through the native application's admin transport.
+
+    No renderer pin or package content can authorize itself. Repeating an applied
+    document returns the durable receipt without recreating a consumed grant.
+    """
+    import ctypes
+    import fcntl
+    import time
+    require(os.geteuid()==0 and sys.platform=='linux' and os.uname().machine=='x86_64','Linux x86_64 root required')
+    raw=stream.read(AUTHORIZATION_LIMIT+1)
+    require(0<len(raw)<=AUTHORIZATION_LIMIT,'Authorization transfer exceeds bound')
+    wire=json.loads(raw)
+    require(isinstance(wire,dict) and set(wire)=={'authorization','artifacts'},'Invalid authorization transfer')
+    pin=globals().get('NATIVE_AUTHENTICATED_AUTHORIZATION_SHA256')
+    require(isinstance(pin,str) and re.fullmatch('[a-f0-9]{64}',pin),'No independent native authorization')
+    require(ROOT.resolve()==ROOT and ROOT.stat().st_uid==0 and stat.S_IMODE(ROOT.stat().st_mode)==0o700,'Private canonical root required')
+    old=ROOT/'tmp/controller';replacement=ROOT/'tmp/controller-authorization'
+    # Authenticate the installed engine before importing privileged code.
+    for ancestor in (old,*old.parents):
+        st=ancestor.lstat()
+        require(stat.S_ISDIR(st.st_mode) and st.st_uid==0 and not st.st_mode&0o022,'Unsafe controller ancestry')
+    policy_path=old/'policy.json';st=policy_path.lstat()
+    require(stat.S_ISREG(st.st_mode) and st.st_nlink==1 and st.st_uid==0 and stat.S_IMODE(st.st_mode)==0o600
+            and st.st_size<=1024*1024,'Unsafe enrolled policy')
+    policy=json.loads(policy_path.read_bytes())
+    require(set(policy.get('engine_files',{}))==set(ENGINE),'Incomplete enrolled engine')
+    for name in ENGINE:
+        path=old/name if name=='controller.py' else old/'tools'/name
+        require(path.resolve()==path and path.is_file() and path.stat().st_uid==0 and not path.stat().st_mode&0o022 and path.stat().st_nlink==1
+                and hashlib.sha256(path.read_bytes()).hexdigest()==policy['engine_files'][name],'Enrolled engine drift')
+    sys.path[:0]=[str(old),str(old/'tools')]
+    from controller import Controller, control_inventory, parse_request, request_digest, sync_directory, HOST_REMOVAL, VPN_ENROLLMENT
+    from lifecycle import _unit_state, _assert_no_application_processes
+    lock=os.open(ROOT,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:
+        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        control_inventory(ROOT)
+        policy=Controller(ROOT).policy()
+        # Read-only reconciliation precedes expiration checks; never grants twice.
+        previous=policy.get('engineering_authorization')
+        reconciled=authorization_reconciliation(policy,pin,wire['authorization'])
+        if reconciled is not None:
+            if replacement.exists() or replacement.is_symlink():
+                require(replacement.is_dir() and not replacement.is_symlink()
+                        and authorization_tree_digest(replacement)==policy.get('authorization_predecessor_sha256'),
+                        'Interrupted predecessor differs; preserve for reconciliation')
+                shutil.rmtree(replacement);sync_directory(ROOT/'tmp')
+            return reconciled
+        doc=authorization_document(wire['authorization'],pin,int(time.time()))
+        initial=globals().get('NATIVE_AUTHENTICATED_AUTHORIZATION_INITIAL_SHA256')
+        continuation=initial is not None
+        if continuation:
+            require(previous is not None and initial==policy.get('engineering_initial_authorization_sha256')
+                    and globals().get('NATIVE_AUTHENTICATED_AUTHORIZATION_PARENT_SHA256')==previous['sha256'],
+                    'Continuation differs from the authenticated initial or current receipt')
+            require(doc['target']==policy.get('engineering_target') and len(doc['requests'])==1,
+                    'Continuation must retain its exact target and grant one request')
+            require(all(doc[key]==policy.get('engineering_selection',{}).get(key) for key in
+                        ('release_id','manifest_sha256','network_id','chain_id','node_name')),
+                    'Continuation changes the approved master or network')
+            require(globals().get('NATIVE_AUTHENTICATED_AUTHORIZATION_FORMATION_SHA256')==policy.get('validator_formation_sha256')
+                    and isinstance(policy.get('validator_formation_sha256'),str),'Continuation changes the approved formation')
+        else:
+            require(previous is None,'An enrolled engineering authorization requires a bound continuation')
+        if doc['target']['kind']=='local':
+            machine=Path('/etc/machine-id').read_bytes()
+            require(0<len(machine)<=128 and hashlib.sha256(machine).hexdigest()==doc['target']['machine_id_sha256'],'Local machine identity differs')
+        inputs=authorization_inputs(doc,wire['artifacts'])
+        require(doc['sequence']==(previous['sequence']+1 if previous else 1),'Authorization sequence must advance exactly once')
+        require(not replacement.exists() and not replacement.is_symlink(),'Interrupted authorization requires reconciliation')
+        expired_grants=[]
+        for grant_path in (old/'grants').iterdir():
+            grant=Controller(ROOT).public_json(grant_path,True)
+            require(previous is not None and grant.get('authorization_sha256')==previous['sha256']
+                    and grant.get('authorization_sequence')==previous['sequence']
+                    and grant.get('request_sha256')==grant_path.stem and type(grant.get('expires_at')) is int,
+                    'Prior grant attribution differs; preserve it for reconciliation')
+            require(grant['expires_at']<=int(time.time()),'Prior live grants require reconciliation')
+            expired_grants.append(grant_path.name)
+        require(not (old/HOST_REMOVAL).exists() and not (old/VPN_ENROLLMENT).exists(),
+                'Prior enrollment or retirement requires reconciliation')
+        selected=policy.get('releases',{}).get(doc['release_id'])
+        require(selected and selected.get('manifest_sha256')==doc['manifest_sha256'] and selected.get('inventory_authenticated') is True
+                and selected.get('networks',{}).get(doc['network_id'])==doc['chain_id'],'Authorization differs from approved master/network')
+        receipt_path=ROOT/'installation.json'
+        if receipt_path.exists():
+            from lifecycle import _sealed_receipt
+            receipt,_=_sealed_receipt(ROOT)
+            require(all(receipt[key]==doc[key] for key in ('network_id','chain_id','node_name'))
+                    and receipt['package_sha256']==doc['manifest_sha256'],'Installed selection differs')
+        status=_unit_state('synergy-node.service')
+        active=status.get('MainPID','0') not in ('','0') or status.get('ActiveState') not in ('inactive','failed')
+        pure_lifecycle=(continuation and not inputs and doc['genesis_pins'] in (None,policy.get('validator_identity_network'))
+                        and doc['requests'][0]['operation'] in ('stop','restart'))
+        require(not active or pure_lifecycle,'Stop validator before artifact, formation or configuration authorization change')
+        vpn=_unit_state('synergy-vpn.service')
+        if not active:_assert_no_application_processes(ROOT,vpn_pid=vpn.get('MainPID'))
+        requests=[];seen=set()
+        consumed=set()
+        audit=old/'audit.jsonl'
+        if audit.exists():
+            Controller(ROOT).direct(audit,True)
+            for line in audit.read_bytes().splitlines():
+                item=json.loads(line);require(isinstance(item,dict) and isinstance(item.get('request_sha256'),str),'Invalid prior operation audit')
+                consumed.add(item['request_sha256'])
+        for request in doc['requests']:
+            require(request['operation'] in __import__('controller').MUTATIONS,'Authorization may grant only exact supported mutations')
+            key=request['request_sha256'];require(key not in seen,'Duplicate exact request');seen.add(key)
+            require(key not in consumed or continuation and request['operation'] in ('start','stop','restart'),'Consumed non-lifecycle request cannot be granted again')
+            requests.append((request,key))
+            if request['operation']=='vpn_enroll':require('vpn-enrollment.json' in inputs,'Exact one-use VPN input required')
+        formation=inputs.get('formation-context.json')
+        if formation is not None:
+            value=json.loads(formation)
+            require(set(value)=={'network_id','chain_id_hex','formation_id'} and value['network_id']==doc['network_id']
+                    and value['chain_id_hex']==format(doc['chain_id'],'064x') and isinstance(value['formation_id'],str)
+                    and re.fullmatch('[a-f0-9]{64}',value['formation_id']) and value['formation_id']!='0'*64,'Formation context differs')
+            prior=policy.get('validator_formation_sha256')
+            require(prior is None or prior==doc['artifacts']['formation-context.json'],'Cannot replace prepared formation context')
+            policy['validator_formation_sha256']=doc['artifacts']['formation-context.json']
+        if doc['genesis_pins'] is not None:
+            prior=policy.get('validator_identity_network')
+            require(prior is None or prior==doc['genesis_pins'],'Cannot substitute authorized Genesis')
+            policy['validator_identity_network']=doc['genesis_pins']
+        commissioning={name[len('commissioning/'):]:pin for name,pin in doc['artifacts'].items() if name.startswith('commissioning/')}
+        if commissioning:
+            from apqe_layout import FORMATION_PUBLIC_INPUTS
+            require(set(commissioning)==FORMATION_PUBLIC_INPUTS,'Complete public commissioning inventory required')
+            require(doc['genesis_pins'] is not None and all(commissioning['network/'+name]==pin for name,pin in doc['genesis_pins'].items()),'Commissioning Genesis differs from independent pins')
+            policy['validator_commissioning_files']=commissioning
+        predecessor=authorization_tree_digest(old)
+        exchanged=False
+        try:
+            shutil.copytree(old,replacement)
+            for name in expired_grants:(replacement/'grants'/name).unlink()
+            policy['authorization_predecessor_sha256']=predecessor
+            # Retain previous authenticated inputs needed by already prepared custody.
+            for name,data in inputs.items():
+                path=replacement/(VPN_ENROLLMENT if name=='vpn-enrollment.json' else 'authorization/inputs/'+name)
+                if path.exists():require(path.read_bytes()==data,'Existing authorization input differs')
+                else:save(path,data)
+            policy['qualified_operations']=sorted({request['operation'] for request,_ in requests})
+            policy['engineering_selection']={key:doc[key] for key in ('release_id','manifest_sha256','network_id','chain_id','node_name')}
+            policy['engineering_initial_authorization_sha256']=initial if continuation else pin
+            policy['engineering_target']=doc['target']
+            policy['engineering_authorization']={'sha256':pin,'sequence':doc['sequence'],'expires_at':doc['expires_at']}
+            policy['authorization_files']={**policy.get('authorization_files',{}),**{name:hashlib.sha256(data).hexdigest() for name,data in inputs.items() if name!='vpn-enrollment.json'}}
+            for request,key in requests:
+                grant={'root':str(ROOT),'operation':request['operation'],'request_sha256':key,'expires_at':doc['expires_at'],'authorization_sha256':pin,'authorization_sequence':doc['sequence']}
+                if request['operation']=='vpn_enroll':grant['enrollment_sha256']=doc['artifacts']['vpn-enrollment.json']
+                save(replacement/'grants'/(key+'.json'),json.dumps(grant,sort_keys=True).encode())
+            (replacement/'policy.json').unlink();save(replacement/'policy.json',json.dumps(policy,sort_keys=True).encode())
+            for path in replacement.rglob('*'):
+                if path.is_file():
+                    with path.open('rb') as stream:os.fsync(stream.fileno())
+            for path in sorted([p for p in replacement.rglob('*') if p.is_dir()],key=lambda p:-len(p.parts)):sync_directory(path)
+            sync_directory(replacement);sync_directory(ROOT/'tmp')
+            exchange=ctypes.CDLL(None,use_errno=True).renameat2
+            exchange.argtypes=(ctypes.c_int,ctypes.c_char_p,ctypes.c_int,ctypes.c_char_p,ctypes.c_uint);exchange.restype=ctypes.c_int
+            if exchange(-100,os.fsencode(old),-100,os.fsencode(replacement),2):raise OSError(ctypes.get_errno(),'Controller exchange failed')
+            exchanged=True;sync_directory(ROOT/'tmp');control_inventory(ROOT)
+            shutil.rmtree(replacement);sync_directory(ROOT/'tmp')
+        except Exception:
+            if not exchanged and replacement.exists():shutil.rmtree(replacement)
+            raise
+        return {'schema':'nodenetwork-engineering-authorization-v1',**policy['engineering_authorization'],
+                'applied':True,'reconciled':False,'grants_recreated':False}
+    finally:os.close(lock)
+
+
 def main():
     try:
-        if len(sys.argv)==4 and sys.argv[1]=='--stage-engineering-update':
+        if len(sys.argv)==2 and sys.argv[1]=='--stage-engineering-authorization':
+            operation=stage_engineering_authorization(sys.stdin.buffer)
+        elif len(sys.argv)==4 and sys.argv[1]=='--stage-engineering-update':
             operation=stage_engineering_update(sys.stdin.buffer,sys.argv[2],sys.argv[3])
         else:
             require(len(sys.argv)==1,'Unsupported bootstrap invocation')

@@ -128,12 +128,13 @@ def safe_root(value, existing=True):
     return root
 
 
-def native(argv, timeout=120, data=None):
+def native(argv, timeout=120, data=None, maximum_stdout=1024*1024):
+    require(type(maximum_stdout) is int and 0 < maximum_stdout <= 2*1024*1024, 'native response bound is invalid')
     # A tool may mention custody paths, but secret output/stderr is never relayed.
     result = subprocess.run([str(v) for v in argv], input=data, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, timeout=timeout, check=False)
     require(result.returncode == 0, f'native {Path(argv[0]).name} operation failed (exit {result.returncode})')
-    require(len(result.stdout) <= 1024 * 1024, 'native response exceeds bound')
+    require(len(result.stdout) <= maximum_stdout, 'native response exceeds bound')
     return result.stdout
 
 
