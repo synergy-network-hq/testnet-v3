@@ -407,6 +407,49 @@ impl<'a> CandidateProtectedAccounts<'a> {
         Ok((true, fee))
     }
 
+    /// Candidate only. An invalid wire, sponsor, enrollment, or commitment
+    /// changes neither the payer nor the target. Valid settlement is one write.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    fn execute_sponsored_reveal(
+        &self,
+        provider: &PqProvider<Mldsa87>,
+        identity_verifier: &ApqeIdentityVerifier,
+        network_id: &str,
+        finalized: &FinalizedSnapshot<'_>,
+        world: &mut WorldState,
+        inclusion: Position,
+        payload: &[u8],
+        sponsor: &SponsorProof<'_>,
+        proofs: EnrollmentProofs<'_>,
+        fee_schedule: &synergy_execution::FeeSchedule,
+        gas_used: u64,
+    ) -> Result<u128, String> {
+        use super::protected_action_wire::{decode, Payload, ENROLL_REVEAL};
+        let Payload::Reveal { enrollment, salt } = decode(ENROLL_REVEAL, payload)? else {
+            return Err("expected enrollment reveal".into());
+        };
+        if proofs.salt != &salt {
+            return Err("enrollment salt differs from the signed reveal payload".into());
+        }
+        let (fee_diff, fee) = self.prepare_sponsor_fee(
+            provider,
+            identity_verifier,
+            network_id,
+            finalized,
+            world,
+            inclusion,
+            ENROLL_REVEAL,
+            payload,
+            sponsor,
+            fee_schedule,
+            gas_used,
+        )?;
+        self.prepare_reveal(provider, finalized, world, inclusion, enrollment, proofs)?
+            .apply_with_fee(world, &fee_diff)?;
+        Ok(fee)
+    }
+
     /// The finalized snapshot is independent of the working proposal overlay:
     /// an unfinalized or same-block commitment cannot authorize a reveal.
     pub(super) fn prepare_reveal(
@@ -1270,7 +1313,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires independently authenticated engineering and validation APQE artifacts"]
-    fn protected_sponsor_pays_once_and_paid_duplicate_never_changes_commitment() {
+    fn protected_sponsor_commit_and_reveal_settle_once_with_exact_native_proofs() {
         use std::sync::{Arc, Mutex};
         use synergy_address_engine::{apqe::native_manifest::validator_engine, types::Algorithm};
         use synergy_identity::authorization::*;
@@ -1373,9 +1416,12 @@ mod tests {
                 ..Default::default()
             },
         );
+        let fixture = load_enrollment_fixture();
         let wire = wire();
-        let genesis = NativeGenesisHash::from_bytes([0x11; 32]);
-        let registry = registry(&wire, genesis, [0x22; 32]);
+        let encoded = fixture_bytes(&fixture, "enrollment_cbor");
+        let enrollment = CanonicalEnrollment::decode(&encoded, &wire).unwrap();
+        let genesis = enrollment.genesis();
+        let registry = registry(&wire, genesis, enrollment.policy().provider_manifest_hash);
         let (pointer, certificate) = finalized(1, &base);
         let snapshot = registry
             .finalized_snapshot(&base, &pointer, &certificate, 1000)
@@ -1387,13 +1433,15 @@ mod tests {
             base_fee_per_gas_nwei: 2,
             collector: "test-collector".into(),
         };
-        let intent_for = |nonce: u8, cap: u8, expiry: u8| {
+        let intent_for = |nonce: u8, cap: u8, expiry: u8, action: u16, content: &[u8]| {
             let mut bytes = vec![0xa8, 0, 1, 1, 0x58, 32];
             bytes.extend_from_slice(genesis.as_bytes());
             bytes.extend_from_slice(&[2, 0x78, address.len().try_into().unwrap()]);
             bytes.extend_from_slice(address.as_bytes());
-            bytes.extend_from_slice(&[3, nonce, 4, 0x19, 0x70, 1, 5, 0x58, 32]);
-            bytes.extend_from_slice(&Primitives.hash(HashAlgorithm::Sha3256, &payload).unwrap());
+            bytes.extend_from_slice(&[3, nonce, 4, 0x19]);
+            bytes.extend_from_slice(&action.to_be_bytes());
+            bytes.extend_from_slice(&[5, 0x58, 32]);
+            bytes.extend_from_slice(&Primitives.hash(HashAlgorithm::Sha3256, content).unwrap());
             bytes.extend_from_slice(&[6, 0x58, 32]);
             bytes.extend_from_slice(&[0; 31]);
             bytes.extend_from_slice(&[cap, 7, expiry]);
@@ -1426,13 +1474,16 @@ mod tests {
                 5,
             )
         };
-        let first = intent_for(0, 10, 1);
+        use super::super::protected_action_wire::{ENROLL_COMMIT, ENROLL_REVEAL};
+        let commit_intent =
+            |nonce, cap, expiry| intent_for(nonce, cap, expiry, ENROLL_COMMIT, &payload);
+        let first = commit_intent(0, 10, 1);
         assert_eq!(
             execute(&mut world, &first, &first, "test-sponsor", &payload).unwrap(),
             (true, 10)
         );
         let after_first = state_root(&world).unwrap();
-        let second = intent_for(1, 10, 1);
+        let second = commit_intent(1, 10, 1);
         let mut changed_payload = payload.clone();
         changed_payload[6] ^= 1;
         for (encoded, signed, network, content) in [
@@ -1446,14 +1497,14 @@ mod tests {
                 &changed_payload,
             ),
             (
-                intent_for(1, 9, 1),
-                intent_for(1, 9, 1),
+                commit_intent(1, 9, 1),
+                commit_intent(1, 9, 1),
                 "test-sponsor",
                 &payload,
             ),
             (
-                intent_for(1, 10, 0),
-                intent_for(1, 10, 0),
+                commit_intent(1, 10, 0),
+                commit_intent(1, 10, 0),
                 "test-sponsor",
                 &payload,
             ),
@@ -1470,6 +1521,125 @@ mod tests {
         assert_eq!(world.accounts[&address].balance_nwei, 80);
         assert_eq!(world.accounts[&address].nonce, 2);
         assert_eq!(world.accounts[&schedule.collector].balance_nwei, 20);
+
+        let commitment = EnrollmentCommitment::from_bytes(
+            fixture_bytes(&fixture, "commitment").try_into().unwrap(),
+        );
+        let salt: [u8; 32] = fixture_bytes(&fixture, "commit_salt").try_into().unwrap();
+        let (ordinary, recovery, ownership) = enrollment_proofs(&fixture, &enrollment, &registry);
+        let target = enrollment.account().to_native(&Primitives).unwrap();
+        registry
+            .prepare_commit(&world, commitment, position(2, 1001))
+            .unwrap()
+            .apply(&mut world)
+            .unwrap();
+        let committed = world.clone();
+        let (pointer, certificate) = finalized(3, &committed);
+        let snapshot = registry
+            .finalized_snapshot(&committed, &pointer, &certificate, 1002)
+            .unwrap();
+
+        // Exact canonical DCBOR reveal payload; its own salt is signed.
+        let length = u16::try_from(encoded.len()).unwrap();
+        assert!(length > 255);
+        let mut reveal = vec![0xa3, 0, 1, 1, 0x59];
+        reveal.extend_from_slice(&length.to_be_bytes());
+        reveal.extend_from_slice(&encoded);
+        reveal.extend_from_slice(&[2, 0x58, 32]);
+        reveal.extend_from_slice(&salt);
+        let position = position(4, 1003);
+        let reveal_intent = intent_for(2, 10, 3, ENROLL_REVEAL, &reveal);
+        let signature = verifier_test_signer(
+            &report,
+            report_pin,
+            signer.private_key.as_bytes(),
+            &reveal_intent,
+        );
+        let execute_reveal = |world: &mut WorldState,
+                              content: &[u8],
+                              proof_salt: &[u8; 32],
+                              intent: &[u8],
+                              signature: &Signature<Mldsa87>| {
+            registry.execute_sponsored_reveal(
+                &provider,
+                &verifier,
+                "test-sponsor",
+                &snapshot,
+                world,
+                position,
+                content,
+                &SponsorProof {
+                    intent,
+                    binding: &carrier,
+                    signing_key: &key,
+                    signature,
+                },
+                EnrollmentProofs {
+                    ordinary: &ordinary,
+                    recovery: &recovery,
+                    ownership: &ownership,
+                    salt: proof_salt,
+                },
+                &schedule,
+                5,
+            )
+        };
+        let mut bad_salt = salt;
+        bad_salt[0] ^= 1;
+        let mut altered = reveal.clone();
+        let salt_offset = altered.len() - salt.len();
+        altered[salt_offset..].copy_from_slice(&bad_salt);
+        let bad_intent = intent_for(2, 10, 3, ENROLL_REVEAL, &altered);
+        let bad_signature = verifier_test_signer(
+            &report,
+            report_pin,
+            signer.private_key.as_bytes(),
+            &bad_intent,
+        );
+        assert!(
+            execute_reveal(&mut world, &reveal, &bad_salt, &reveal_intent, &signature).is_err()
+        );
+        assert!(
+            execute_reveal(&mut world, &altered, &bad_salt, &reveal_intent, &signature).is_err()
+        );
+        assert!(
+            execute_reveal(&mut world, &altered, &bad_salt, &bad_intent, &bad_signature).is_err()
+        );
+        assert_eq!(world, committed);
+
+        assert_eq!(
+            execute_reveal(&mut world, &reveal, &salt, &reveal_intent, &signature).unwrap(),
+            10
+        );
+        assert_eq!(world.accounts[&target], AccountState::default());
+        assert_eq!(world.accounts[&address].balance_nwei, 70);
+        assert_eq!(world.accounts[&address].nonce, 3);
+        assert_eq!(world.accounts[&schedule.collector].balance_nwei, 30);
+        assert!(registry.pending_commit(&world, commitment).is_err());
+        assert_eq!(
+            registry
+                .read_policy(&world, enrollment.account())
+                .unwrap()
+                .enrollment,
+            encoded
+        );
+        let settled = world.clone();
+        let fresh_intent = intent_for(3, 10, 3, ENROLL_REVEAL, &reveal);
+        let fresh_signature = verifier_test_signer(
+            &report,
+            report_pin,
+            signer.private_key.as_bytes(),
+            &fresh_intent,
+        );
+        assert!(execute_reveal(&mut world, &reveal, &salt, &reveal_intent, &signature).is_err());
+        assert!(
+            execute_reveal(&mut world, &reveal, &salt, &fresh_intent, &fresh_signature).is_err()
+        );
+        assert_eq!(world, settled);
+        assert_eq!(
+            registry.require_activation(),
+            Err(RegistryError::ProfileUnapproved)
+        );
     }
 
     fn verifier_test_signer(
@@ -1575,30 +1745,20 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    #[ignore = "requires explicit APQE public fixture and pinned native validation artifact"]
-    fn protected_candidate_apqe_proofs_are_atomic_and_survive_restart() {
-        let fixture_path = std::env::var_os("CORE_APQE_ENROLLMENT_FIXTURE").unwrap();
-        let fixture: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(fixture_path).unwrap()).unwrap();
-        let bytes = |name: &str| hex(fixture[name].as_str().unwrap());
-        let library_path = PathBuf::from(std::env::var_os("CORE_APQE_MLDSA87_LIBRARY").unwrap());
-        let digest = hex(&std::env::var("CORE_APQE_MLDSA87_SHA256").unwrap())
-            .try_into()
-            .unwrap();
-        // Only an independently selected, digest-pinned validation library.
-        let provider = unsafe {
-            PqProvider::<Mldsa87>::open_verified(library_path, digest, Profile::Validation)
-        }
-        .unwrap();
-        let wire = wire();
-        let encoded = bytes("enrollment_cbor");
-        let enrollment = CanonicalEnrollment::decode(&encoded, &wire).unwrap();
-        let registry = registry(
-            &wire,
-            enrollment.genesis(),
-            enrollment.policy().provider_manifest_hash,
-        );
+    fn load_enrollment_fixture() -> serde_json::Value {
+        let path = std::env::var_os("CORE_APQE_ENROLLMENT_FIXTURE").unwrap();
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    fn fixture_bytes(fixture: &serde_json::Value, name: &str) -> Vec<u8> {
+        hex(fixture[name].as_str().unwrap())
+    }
+
+    fn enrollment_proofs(
+        fixture: &serde_json::Value,
+        enrollment: &CanonicalEnrollment<'_>,
+        registry: &CandidateProtectedAccounts<'_>,
+    ) -> ([EnrollmentSignature; 2], EnrollmentSignature, [u8; 65]) {
         let signature = |i: usize| {
             let role = enrollment.policy().roles[i];
             EnrollmentSignature {
@@ -1627,10 +1787,36 @@ mod tests {
         let ownership = Primitives
             .secp256k1_normalize_der_prehash(
                 binding.digest(&registry.chain).unwrap().as_bytes(),
-                &bytes("ecdsa_der"),
+                &fixture_bytes(fixture, "ecdsa_der"),
                 point.as_sec1_bytes(),
             )
             .unwrap();
+        (ordinary, recovery, ownership)
+    }
+
+    #[test]
+    #[ignore = "requires explicit APQE public fixture and pinned native validation artifact"]
+    fn protected_candidate_apqe_proofs_are_atomic_and_survive_restart() {
+        let fixture = load_enrollment_fixture();
+        let bytes = |name: &str| fixture_bytes(&fixture, name);
+        let library_path = PathBuf::from(std::env::var_os("CORE_APQE_MLDSA87_LIBRARY").unwrap());
+        let digest = hex(&std::env::var("CORE_APQE_MLDSA87_SHA256").unwrap())
+            .try_into()
+            .unwrap();
+        // Only an independently selected, digest-pinned validation library.
+        let provider = unsafe {
+            PqProvider::<Mldsa87>::open_verified(library_path, digest, Profile::Validation)
+        }
+        .unwrap();
+        let wire = wire();
+        let encoded = bytes("enrollment_cbor");
+        let enrollment = CanonicalEnrollment::decode(&encoded, &wire).unwrap();
+        let registry = registry(
+            &wire,
+            enrollment.genesis(),
+            enrollment.policy().provider_manifest_hash,
+        );
+        let (ordinary, recovery, ownership) = enrollment_proofs(&fixture, &enrollment, &registry);
         let salt = bytes("commit_salt").try_into().unwrap();
         let commitment = EnrollmentCommitment::from_bytes(bytes("commitment").try_into().unwrap());
         let address = enrollment.account().to_native(&Primitives).unwrap();
