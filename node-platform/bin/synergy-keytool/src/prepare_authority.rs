@@ -166,6 +166,27 @@ fn prepare_canary_testing_treasury(
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) fn qualify_treasury_allocation(public: serde_json::Value, engine: crate::provider::Engine) {
+    let mut recipe=tests::genesis_recipe();
+    recipe["network"]["network_id"]="new-treasury-fixture".into();
+    recipe["network"]["chain_id"]=99999.into();
+    recipe["network"]["activation_unix"]=1700000001_u64.into();
+    recipe["canary_testing_treasury"]=public.clone();
+    let mut request:PrepareGenesisInput=serde_json::from_value(recipe.clone()).unwrap();
+    prepare_canary_testing_treasury(&mut request,Some(&engine)).unwrap();
+    let world=&request.authority.protected.as_ref().unwrap().initial_world_state;
+    let address=public["address"].as_str().unwrap();
+    assert_eq!(world.accounts[address].balance_nwei,CANARY_TESTING_ALLOCATION_NWEI);
+    assert_eq!(world.accounts[address].nonce,0);
+    assert!(canonical_binding_commitment_if_present(&world.protocol,address).unwrap().is_some());
+    request.canary_testing_treasury=Some(serde_json::from_value(public).unwrap());
+    assert!(prepare_canary_testing_treasury(&mut request,Some(&engine)).is_err());
+    let mut wrong:PrepareGenesisInput=serde_json::from_value(recipe).unwrap();
+    wrong.network.chain_id+=1;
+    assert!(prepare_canary_testing_treasury(&mut wrong,Some(&engine)).is_err());
+}
+
 fn current_genesis_format() -> u32 {
     2
 }

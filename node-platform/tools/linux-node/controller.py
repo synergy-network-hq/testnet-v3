@@ -29,10 +29,10 @@ MAX_GENESIS_STAGE_REQUEST = 12*1024*1024
 GENESIS_FILES = {'genesis.json':4*1024*1024,'authority.json':1024*1024,'authority-root.pub':8192}
 ENGINE_MODULES = frozenset(('controller.py','synergy_linux.py','lifecycle.py','conformance.py',
                             'apqe_layout.py','vpn.py','canary_rpc_relay.py','root_guard.py','guest_lifecycle.py'))
-READS = frozenset(('commissioning_observation','network_transport_status','network_transport_export','guest_resources','guest_preflight','guest_status','target','inventory','health','install_preflight','upgrade_preflight',
+READS = frozenset(('treasury_preflight','treasury_status','treasury_export','commissioning_observation','network_transport_status','network_transport_export','guest_resources','guest_preflight','guest_status','target','inventory','health','install_preflight','upgrade_preflight',
                   'recovery_preflight','uninstall_preflight','vpn_status','diagnostics','identity_preflight','identity_status',
                   'formation_preflight','formation_status','formation_export','genesis_stage_preflight','genesis_binding_preflight','authorization_status','network_formation_status','network_formation_export'))
-MUTATIONS = frozenset(('network_transport_prepare','network_transport_sign','guest_create','guest_stop','guest_remove','install','commission','register','vpn_enroll','vpn_bind','vpn_retire','start','stop','restart','upgrade','uninstall','identity_generate',
+MUTATIONS = frozenset(('treasury_prepare','network_transport_prepare','network_transport_sign','guest_create','guest_stop','guest_remove','install','commission','register','vpn_enroll','vpn_bind','vpn_retire','start','stop','restart','upgrade','uninstall','identity_generate',
                        'formation_prepare','genesis_stage','genesis_bind','network_formation_prepare','network_formation_sign'))
 FORMATION_CONTEXT = 'tmp/formation-context.json'
 FORMATION_CUSTODY = 'tmp/pre-genesis-validator'
@@ -152,6 +152,13 @@ def parse_request(raw):
     require(isinstance(operation,str) and operation in READS | MUTATIONS
             and isinstance(parameters,dict), 'Unsupported operation', 'invalid_request')
     require(operation=='genesis_stage' or operation in ('network_formation_prepare','network_transport_prepare') and len(raw)<=2*1024*1024 or len(raw)<=MAX_REQUEST,'Request exceeds operation limit','invalid_request')
+    if operation.startswith('treasury_'):
+        require(set(parameters)==({'formation_sha256','effective_at_unix'} if operation=='treasury_prepare' else set()),'Exact treasury parameters required','invalid_request')
+        if operation=='treasury_prepare':
+            require(isinstance(parameters['formation_sha256'],str) and re.fullmatch('[a-f0-9]{64}',parameters['formation_sha256'])
+                    and type(parameters['effective_at_unix']) is int and 0<parameters['effective_at_unix']<2**63,
+                    'Exact treasury formation and effective time required','invalid_request')
+        return value
     if operation.startswith('network_transport_'):
         transport_parameters(operation,parameters)
         return value
@@ -422,6 +429,53 @@ class Controller:
         flags=['--apqe-report',self.root/report,'--apqe-report-sha256',manifest['files'][report]]
         return {'schema':'nodenetwork-formation-v1','formation_sha256':pin,'network_id':receipt['network_id'],
                 'chain_id':str(receipt['chain_id']),'formation_id':value['formation_id']},flags
+
+    def treasury(self,request):
+        from lifecycle import _lifecycle_lock, _unit_state, _assert_no_application_processes
+        from synergy_linux import native
+        op=request['operation'];directory=self.root/'keys/formation-treasury'
+        intent=self.root/'tmp/treasury-prepare-request.json'
+        with _lifecycle_lock(self.root):
+            selection,flags=self.formation_context()
+            present=any(path.exists() or path.is_symlink() for path in (directory,intent))
+            if op=='treasury_status' and not present:return {'pending':False}
+            if op=='treasury_preflight':
+                require(not present,'Existing treasury must be reconciled; no regeneration','reconciliation_required')
+                return {'schema':'nodenetwork-formation-treasury-preflight-v1',
+                    **{key:selection[key] for key in ('formation_sha256','network_id','chain_id')},
+                    'effective_at_unix':int(time.time())}
+            if op=='treasury_prepare':
+                require(not present,'Existing treasury must be reconciled; no regeneration','reconciliation_required')
+                require(request['parameters']['formation_sha256']==selection['formation_sha256'],'Treasury formation changed')
+                require(abs(time.time()-request['parameters']['effective_at_unix'])<=300,'Treasury preparation review expired')
+                require(not any(self.exists(path) for path in ('data','tmp/network-formation')),
+                        'Prepare treasury before Genesis formation or runtime initialization')
+                state=_unit_state('synergy-node.service')
+                require((state.get('ActiveState') in ('inactive','failed') or state.get('LoadState')=='not-found') and int(state.get('MainPID',0) or 0)==0,
+                        'Stop the node before treasury preparation')
+                _assert_no_application_processes(self.root,vpn_pid=_unit_state('synergy-vpn.service').get('MainPID'))
+                self.authorize(request)
+                raw=canonical(request)
+                fd=os.open(intent,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+                with os.fdopen(fd,'wb') as stream:stream.write(raw);stream.flush();os.fsync(stream.fileno())
+                sync_directory(intent.parent)
+                command='prepare-formation-treasury';args=[intent,request_digest(request),directory]
+            else:
+                self.direct(intent,True)
+                command='export-formation-treasury' if op=='treasury_export' else 'review-formation-treasury'
+                args=[directory]
+            result=json.loads(native([self.root/'bin/synergy-keytool',command,self.formation_context_path(),selection['formation_sha256'],*args,*flags],maximum_stdout=128*1024))
+            prepared=parse_request(self.direct(intent,True).read_bytes())
+            require(prepared['operation']=='treasury_prepare' and prepared['parameters']['formation_sha256']==selection['formation_sha256']
+                    and result.get('request_sha256')==request_digest(prepared)
+                    and result.get('effective_at_unix')==prepared['parameters']['effective_at_unix']
+                    and all(result.get(key)==selection[key] for key in ('network_id','chain_id','formation_sha256'))
+                    and result.get('schema')==('nodenetwork-formation-treasury-export-v1' if op=='treasury_export' else 'nodenetwork-formation-treasury-v1')
+                    and result.get('pending') is True and result.get('possession_verified') is True
+                    and result.get('allocation_nwei')=='5000000000000000'
+                    and isinstance(result.get('address'),str) and result['address'].startswith('syna'),
+                    'Native treasury scope, request or custody differs')
+            return result
 
     def network_formation(self,request):
         from lifecycle import _lifecycle_lock, _unit_state, _assert_no_application_processes
@@ -1241,6 +1295,7 @@ class Controller:
         if op=='identity_preflight': return self.identity_preflight()[0]
         if op=='identity_status': return self.identity_status()
         if op=='identity_generate': return self.identity_generate(request)
+        if op.startswith('treasury_'): return self.treasury(request)
         if op.startswith('network_formation_'): return self.network_formation(request)
         if op.startswith('network_transport_'): return self.network_transport(request)
         if op=='formation_preflight':

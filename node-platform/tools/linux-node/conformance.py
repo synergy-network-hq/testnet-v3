@@ -355,6 +355,36 @@ def approved_upgrade_members(root, candidate_pin, stage):
     return paths
 
 
+def approved_treasury_members(root):
+    """Only the complete APQE-verified ordinary treasury is managed custody."""
+    from controller import Controller, parse_request, request_digest
+    from apqe_layout import require_frozen_tree
+    from synergy_linux import native
+    root=Path(root);directory=root/'keys/formation-treasury';intent=root/'tmp/treasury-prepare-request.json'
+    if not any(path.exists() or path.is_symlink() for path in (directory,intent)):return set()
+    c=Controller(root);selection,flags=c.formation_context()
+    require_frozen_tree(directory)
+    files={'request.json','treasury-public.json','treasury.enc.json','unlock'}
+    children=list(directory.iterdir())
+    require({path.name for path in children}==files,'Incomplete or unexpected treasury custody inventory')
+    for path in (directory,*children):
+        metadata=path.lstat()
+        require(metadata.st_uid==os.geteuid() and stat.S_IMODE(metadata.st_mode)==(0o700 if path==directory else 0o600)
+                and (path==directory or stat.S_ISREG(metadata.st_mode) and metadata.st_nlink==1),
+                'Treasury custody ownership, permissions or links differ')
+    prepared=parse_request(c.direct(intent,True).read_bytes())
+    require(prepared['operation']=='treasury_prepare' and prepared['parameters']['formation_sha256']==selection['formation_sha256']
+            and digest(directory/'request.json')==digest(intent),'Treasury prepare request scope differs')
+    result=json.loads(native([root/'bin/synergy-keytool','review-formation-treasury',c.formation_context_path(),
+                             selection['formation_sha256'],directory,*flags],maximum_stdout=128*1024))
+    require(result.get('schema')=='nodenetwork-formation-treasury-v1' and result.get('pending') is True
+            and result.get('possession_verified') is True and result.get('request_sha256')==request_digest(prepared)
+            and result.get('effective_at_unix')==prepared['parameters']['effective_at_unix']
+            and all(result.get(key)==selection[key] for key in ('network_id','chain_id','formation_sha256')),
+            'Native treasury custody verification or scope differs')
+    return {path.relative_to(root).as_posix() for path in (directory,intent,*children)}
+
+
 def approved_network_formation_members(root):
     """Admit only complete formation owned and reverified by the native keytool.
 
@@ -510,6 +540,7 @@ def installed(root, expected_manifest=None, host=False, initialized=True, schema
     pending_upgrade=approved_upgrade_members(root,pending_upgrade_sha256,stage) if pending_upgrade_sha256 is not None else set()
     pending_upgrade |= approved_network_formation_members(root)
     pending_upgrade |= approved_network_transport_members(root)
+    pending_upgrade |= approved_treasury_members(root)
     if (root/'hosted-machines').exists() or (root/'hosted-machines').is_symlink():
         from controller import Controller
         from guest_lifecycle import approved_inventory

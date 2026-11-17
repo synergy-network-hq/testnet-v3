@@ -4,6 +4,8 @@ mod authority_custody;
 mod capsule_verify;
 mod consensus_keys;
 mod etdag_keys;
+#[cfg(unix)]
+mod formation_treasury;
 mod import_consensus;
 mod inspect;
 #[cfg(unix)]
@@ -35,6 +37,14 @@ fn run() -> Result<(), String> {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     let (arguments, engine) = selected_arguments(&arguments)?;
     match arguments {
+        #[cfg(unix)]
+        [command, context, pin, request, request_pin, directory] if command == "prepare-formation-treasury" => {
+            println!("{}",formation_treasury::prepare(Path::new(context),pin,Path::new(request),request_pin,Path::new(directory),engine.ok_or("authenticated APQE provider required")?)?);
+        }
+        #[cfg(unix)]
+        [command, context, pin, directory] if command == "review-formation-treasury" || command == "export-formation-treasury" => {
+            println!("{}",formation_treasury::status(Path::new(context),pin,Path::new(directory),engine.ok_or("authenticated APQE provider required")?,command == "export-formation-treasury")?);
+        }
         #[cfg(unix)]
         [command, context, pin, formation, request, request_pin, directory] if command=="prepare-network-transport" => {
             println!("{}",network_transport::prepare(Path::new(context),pin,Path::new(formation),Path::new(request),request_pin,Path::new(directory),engine.ok_or("authenticated APQE provider required")?)?);

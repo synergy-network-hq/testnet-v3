@@ -487,7 +487,7 @@ def bare_initial_authorization(root,policy,release_id,pin):
     for request in doc['requests']:
         operation=request['operation'];key=request['request_sha256']
         require(operation in ('install','commission','register','start','stop','restart','upgrade','uninstall',
-            'identity_generate','formation_prepare','genesis_stage','genesis_bind','network_formation_prepare',
+            'identity_generate','formation_prepare','treasury_prepare','genesis_stage','genesis_bind','network_formation_prepare',
             'network_formation_sign','network_transport_prepare','network_transport_sign','vpn_enroll','vpn_bind','vpn_retire',
             'guest_create','guest_stop','guest_remove') and key not in grants,'Invalid initial grant inventory')
         relative='tmp/controller/grants/'+key+'.json';grant_raw=bare_file(root/relative,65536)
