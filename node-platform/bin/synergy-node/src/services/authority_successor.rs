@@ -1608,6 +1608,11 @@ pub(super) fn qualify_offline_successor(
         serde_json::from_slice(&serde_json::to_vec(&derived).unwrap()).unwrap(),
     )
     .unwrap();
+    crate::services::rpc::proofs::qualify_first_epoch_timeout(
+        Arc::clone(&active), &derived.witness.quorum_certificates[2],
+        &signed_previous.payload.validators.iter().map(|v|v.record.clone()).collect::<Vec<_>>(),
+        keys, engine,
+    );
     let closing_candidate = Arc::new(closing_candidate.unwrap());
     let qc = &second.witness.quorum_certificates[0];
     assert!(closing_candidate.validate().is_err());

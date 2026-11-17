@@ -1304,6 +1304,18 @@ mod tests {
     }
 
     #[test]
+    fn proof_page_method_and_max_page_survive_native_relay_without_reencoding() {
+        let request = br#"{"jsonrpc":"2.0","method":"synergy_getFinalizedProofPageV1","params":{"height":1,"kind":"world_state"},"id":1}"#;
+        assert_eq!(validate_request(request).unwrap().method,
+            synergy_rpc::methods::FINALIZED_PROOF_PAGE_V1);
+        let page = json!({"version":1,"bytes_base64":"A".repeat(65536usize.div_ceil(3)*4),
+            "total_bytes":1048576,"offset":0,"next_offset":65536});
+        let response = serde_json::to_vec(&json!({"jsonrpc":"2.0","id":1,"result":page})).unwrap();
+        let forwarded = bind_response(&response,99999,"selected-network","pinned-genesis").unwrap();
+        assert!(forwarded.len() < MAX_BODY);
+        assert!(std::str::from_utf8(&forwarded).unwrap().contains(std::str::from_utf8(&response[1..response.len()-1]).unwrap()));
+    }
+    #[test]
     fn binds_null_large_numbers_and_errors_without_reencoding() {
         for raw in [
             br#"{"jsonrpc":"2.0","id":1,"result":null}"#.as_slice(),

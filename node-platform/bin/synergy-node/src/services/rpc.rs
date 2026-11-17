@@ -42,6 +42,10 @@ use synergy_storage::NodeStorageLayout;
 use synergy_transaction::ReceiptStatus;
 use synergy_ws::{server::WsServer, WsTopic};
 
+#[path = "rpc_proofs.rs"]
+pub(super) mod proofs;
+pub(crate) use proofs::verify_finality_proof_cli;
+
 /// Reads only the durable records jointly owned by execution, PoSy finality,
 /// and finalized state. Every public result is re-bound across all three
 /// owners; a speculative execution candidate is never exposed as finalized.
@@ -310,6 +314,9 @@ impl CanonicalQueryStore {
 }
 
 impl CanonicalReadProvider for CanonicalQueryStore {
+    fn finalized_proof_page(&self, query: &Value) -> Result<Value, RpcError> {
+        self.canonical_proof_page(query)
+    }
     fn resource_observations(&self) -> Option<Value> {
         Some(json!({"scope":"shared_process_world_reservations",
             "limit_bytes":self.world_budget.limit(), "used_bytes":self.world_budget.used()}))
@@ -735,6 +742,7 @@ struct RuntimeDispatcher {
     preparation: Option<super::preparation::Handle>,
     network_identity: Option<VerifiedRpcNetwork>,
     telemetry_samples: Mutex<TelemetrySamples>,
+    proof_throttle: Mutex<proofs::ProofThrottle>,
 }
 
 #[derive(Default)]
@@ -937,6 +945,24 @@ impl RpcDispatcher for RuntimeDispatcher {
                 .context_v2()
                 .map_err(RpcError::unavailable),
             CHAIN_TELEMETRY => self.chain_telemetry(params),
+            synergy_rpc::methods::FINALIZED_PROOF_PAGE_V1 => {
+                self.proof_throttle.lock()
+                    .map_err(|_| RpcError::unavailable("proof request budget unavailable"))?.admit()?;
+                let query = proofs::ProofQuery::decode(params)?;
+                if query.kind == proofs::ProofKind::Finality {
+                    // Bind the requested height to durable execution and finality
+                    // before reading cryptographic certification history.
+                    self.query_store.block(&BlockQuery { height: Some(query.height), hash: None })?
+                        .ok_or_else(|| RpcError::unavailable("requested finalized block unavailable"))?;
+                    let proof = self.admission.as_ref()
+                        .ok_or_else(|| RpcError::unavailable("authenticated finality unavailable"))?
+                        .finality_proof(query.height).map_err(RpcError::unavailable)?;
+                    proofs::page(&query, &proof)
+                } else {
+                    self.query_store.finalized_proof_page(&serde_json::to_value(query)
+                        .map_err(|_| RpcError::unavailable("encode proof query"))?)
+                }
+            }
             EPOCH_TRANSITION_PROOF_V1 => {
                 #[derive(serde::Deserialize)]
                 #[serde(deny_unknown_fields)]
@@ -1177,6 +1203,7 @@ impl ManagedService for RpcService {
                     preparation: self.preparation.clone(),
                     network_identity: self.network_identity.clone(),
                     telemetry_samples: Mutex::new(TelemetrySamples::default()),
+                    proof_throttle: Mutex::new(proofs::ProofThrottle::default()),
                 }),
                 Arc::new(PublicOnlyAuthenticator),
                 self.limits,
@@ -2015,6 +2042,20 @@ mod nonblocking_http_tests {
             .unwrap()
             .put_once(&candidate, &synergy_state::WorldState::default())
             .unwrap();
+        // Exercise the real dispatch branch using this exact durable three-owner
+        // fixture, rather than testing a second implementation of the handler.
+        let proof_request = |params: Value| {
+            RuntimeDispatcher {
+                runtime: Arc::clone(&service.runtime),
+                query_store: Arc::clone(&service.query_store),
+                admission: None, preparation: None, network_identity: None,
+                telemetry_samples: Mutex::new(TelemetrySamples::default()),
+                proof_throttle: Mutex::new(proofs::ProofThrottle::default()),
+            }.dispatch(synergy_rpc::methods::FINALIZED_PROOF_PAGE_V1, params)
+        };
+        // Retaining a valid execution candidate grants no finalized proof.
+        assert!(proof_request(json!({"height":1,"kind":"block_commitment"})).is_err());
+        assert!(proof_request(json!({"height":1,"kind":"world_state"})).is_err());
         FinalizedStateStore::load(layout.state().join("execution"))
             .unwrap()
             .commit_verified_world_state(
@@ -2026,6 +2067,8 @@ mod nonblocking_http_tests {
                 &candidate.state,
             )
             .unwrap();
+        // Even a durable World requires the matching PoSy finalized owner.
+        assert!(proof_request(json!({"height":1,"kind":"block_commitment"})).is_err());
         let finality = FinalizedBlockRecord {
             height: 1,
             block_id: candidate.block_id.clone(),
@@ -2036,6 +2079,27 @@ mod nonblocking_http_tests {
             .unwrap()
             .commit_exactly_once(&finality, None)
             .unwrap();
+        let block = proof_request(json!({"height":1,"kind":"block_commitment"})).unwrap();
+        let block_bytes = BASE64.decode(block["bytes_base64"].as_str().unwrap()).unwrap();
+        assert_eq!(synergy_block::hash_block_bytes(&block_bytes), candidate.block_id);
+        assert_eq!(block_bytes, serde_json::to_vec(&(candidate.height,
+            &candidate.parent_block_id,&candidate.protected_execution_root,
+            &candidate.state_root,&candidate.transactions,&candidate.receipts)).unwrap());
+        let state = proof_request(json!({"height":1,"kind":"world_state"})).unwrap();
+        let state_bytes = BASE64.decode(state["bytes_base64"].as_str().unwrap()).unwrap();
+        let decoded: synergy_state::WorldState = serde_json::from_slice(&state_bytes).unwrap();
+        assert_eq!(synergy_state::state_root(&decoded).unwrap(),candidate.state_root);
+        assert_eq!(state_bytes,serde_json::to_vec(candidate.state.as_ref()).unwrap());
+        assert_eq!(state["commitment"]["type"],"full_canonical_world_preimage");
+        for invalid in [
+            json!({"height":2,"kind":"world_state"}),
+            json!({"height":1,"kind":"finality"}), // no authenticated ingress
+            json!({"height":1,"kind":"world_state","hidden":true}),
+            json!({"height":1,"kind":"world_state","limit":65537}),
+            json!({"height":"1","kind":"world_state"}),
+            json!({"height":1,"kind":"world_state","offset":1}),
+            json!({"height":1,"kind":"world_state","expected_sha256":"0".repeat(64)}),
+        ] { assert!(proof_request(invalid).is_err()); }
         for at_height in [None, Some(1)] {
             let account = service
                 .query_store
@@ -2078,6 +2142,7 @@ mod nonblocking_http_tests {
                 genesis_hash: "a".repeat(64),
             }),
             telemetry_samples: Mutex::new(TelemetrySamples::default()),
+                    proof_throttle: Mutex::new(proofs::ProofThrottle::default()),
         };
         for _ in 0..16 {
             let observed = dispatcher.chain_telemetry(json!({"at_height":1})).unwrap();
@@ -2155,6 +2220,7 @@ mod nonblocking_http_tests {
                 genesis_hash: "a".repeat(64),
             }),
             telemetry_samples: Mutex::new(TelemetrySamples::default()),
+                    proof_throttle: Mutex::new(proofs::ProofThrottle::default()),
         };
         let observed = dispatcher.chain_telemetry(json!({})).unwrap();
         assert_eq!(observed["network_identity"], "verified-incarnation");

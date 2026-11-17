@@ -16,6 +16,10 @@ fn main() {
 
 fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
     let mut args = args.into_iter().peekable();
+    if args.peek().is_some_and(|arg| arg == "finality-proof") {
+        args.next();
+        return services::rpc::verify_finality_proof_cli(args);
+    }
     if args.peek().is_some_and(|arg| arg == "canary-rpc-relay") {
         args.next();
         return services::apqe_rpc_service::cli(args);

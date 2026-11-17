@@ -210,6 +210,17 @@ pub(super) struct LocalProtectedVertexRequest {
     encoded_bytes: usize,
 }
 
+/// Typed original witness, with its response charge retained through paging.
+/// No per-signature-byte JSON Value tree is constructed.
+#[derive(serde::Serialize)]
+pub(crate) struct PublicFinalityEvidence {
+    version: u8,
+    finalized: synergy_posy::FinalizedBlockRecord,
+    witness: synergy_posy::FinalitySyncWitness,
+    #[serde(skip)]
+    _permit: synergy_state::world_resources::WorldResourcePermit,
+}
+
 #[derive(Clone)]
 struct FinalityHistory {
     root: std::path::PathBuf,
@@ -2302,6 +2313,55 @@ impl AuthenticatedIngress {
             queues.finalized_records.insert(height, record.clone());
         }
         Ok(Some(record))
+    }
+
+    /// Public evidence is reconstructed under each certificate's original
+    /// authenticated authority, including the cross-epoch finality tail.
+    pub(crate) fn finality_proof(&self, height: u64) -> Result<PublicFinalityEvidence, String> {
+        let _permit = self.world_budget().reserve(super::rpc::proofs::PROOF_SCRATCH)
+            .map_err(|error| error.to_string())?;
+        let mut timeout_work = 128u64;
+        let history = self.0.lock().map_err(|_| "runtime pipeline lock poisoned")?
+            .finality_history.clone().ok_or("authenticated finality history unavailable")?;
+        let store = synergy_posy::persistence::FinalityStore::new(&history.root)
+            .map_err(|error| error.to_string())?;
+        let record = store.get(height).map_err(|error| error.to_string())?
+            .ok_or("requested finalized record unavailable")?;
+        let qcs = synergy_posy::VerifiedQuorumCertificateStore::new(&history.root)
+            .map_err(|error| error.to_string())?;
+        let tcs = synergy_posy::VerifiedTimeoutCertificateStore::new(&history.root)
+            .map_err(|error| error.to_string())?;
+        let end = height.checked_add(2).ok_or("finality proof height overflow")?;
+        let mut certificates = Vec::with_capacity(3);
+        let mut timeouts = BTreeMap::new();
+        let mut finality = synergy_posy::ThreeQcFinality::default();
+        for certified_height in height..=end {
+            let qc = history.verified_qc(&qcs, certified_height)?
+                .ok_or("finality proof lacks certified history")?;
+            let selected = history.authority.authenticated_history_at(certified_height)
+                .ok_or("finality proof lies outside authenticated history")?;
+            let owner = super::authority::VerifiedAuthority::worker_context(selected)?;
+            super::rpc::proofs::charge_timeout_search(&mut timeout_work,
+                qc.context.round, owner.epoch.leader_lease_blocks)?;
+            for tc in synergy_posy::FinalitySyncWitness::collect_verified_timeouts(
+                &qc, &tcs, &owner.epoch, &owner.registry, owner.as_ref()
+            ).map_err(|error| error.to_string())? {
+                timeouts.insert((tc.context.height, tc.context.round), tc);
+            }
+            finality.accept(qc.clone()).map_err(|error| error.to_string())?;
+            certificates.push(qc);
+        }
+        if finality.last_finalized() != Some(&record) {
+            return Err("finality proof differs from durable finalized record".into());
+        }
+        let witness = synergy_posy::FinalitySyncWitness {
+            quorum_certificates: certificates.try_into().map_err(|_| "three QCs required")?,
+            timeout_certificates: timeouts.into_values().collect(),
+        };
+        let evidence = PublicFinalityEvidence { version: 1, finalized: record,
+            witness, _permit };
+        super::rpc::proofs::bounded_document(&evidence)?;
+        Ok(evidence)
     }
 
     /// Reads the exact durable record and its authenticated three-QC witness.

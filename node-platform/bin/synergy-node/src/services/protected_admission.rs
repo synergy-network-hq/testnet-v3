@@ -575,6 +575,11 @@ impl Drop for AdmissionTimingSpan {
 }
 
 impl AdmissionHandle {
+    pub(crate) fn finality_proof(&self, height: u64) -> Result<super::ingress::PublicFinalityEvidence, String> {
+        let ingress = self.0.lock().map_err(|_| "admission lock poisoned")?
+            .ingress.clone().ok_or("authenticated finality history unavailable")?;
+        ingress.finality_proof(height)
+    }
     pub fn bind_ingress(
         &self,
         ingress: super::ingress::AuthenticatedIngress,

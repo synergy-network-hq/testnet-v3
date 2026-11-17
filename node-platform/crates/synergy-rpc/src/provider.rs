@@ -63,6 +63,11 @@ pub struct FinalizedBlockCommitment {
 /// boundaries before returning data. Missing records are represented by
 /// `None`; corrupt or unverifiable records fail closed.
 pub trait CanonicalReadProvider: Send + Sync {
+    /// Original canonical commitment bytes, bounded and pinned by height.
+    /// A page is evidence transport; clients still authenticate its three-QC witness.
+    fn finalized_proof_page(&self, _query: &Value) -> Result<Value, RpcError> {
+        Err(RpcError::unavailable("finalized proof pages unavailable"))
+    }
     /// Optional process resource observations; these confer no chain authority.
     fn resource_observations(&self) -> Option<Value> {
         None
