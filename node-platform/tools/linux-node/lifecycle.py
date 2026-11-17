@@ -228,6 +228,9 @@ def _sealed_receipt(root):
     require(digest(root/'package.json') == receipt['package_sha256'], 'installed manifest drift')
     manifest = read(root/'package.json')
     require(receipt['package_files'] == manifest['files'], 'installation inventory differs')
+    if any(name.startswith(('hosted-machines/','lib/guest-tools/')) for name in manifest['files']):
+        from guest_lifecycle import resource_file_pins
+        resource_file_pins(manifest)
     for name, expected in manifest['files'].items():
         _software_path(root, name)
         require(digest(root/name) == expected, 'installed package drift: '+name)
@@ -237,7 +240,7 @@ def _sealed_receipt(root):
 def _software_path(root, name):
     relative = Path(name)
     require(name and not relative.is_absolute() and '..' not in relative.parts
-            and (relative.parts[0] in ('bin','lib','assets','systemd','tools','roles') or name == 'README.md'),
+            and (relative.parts[0] in ('bin','lib','assets','systemd','tools','roles') or name in ('README.md','hosted-machines/images/os.qcow2')),
             'upgrade must preserve runtime identity, state and configuration')
     path = root/relative
     for parent in [path, *path.parents]:
@@ -483,6 +486,32 @@ def _replace_bytes(root, path, data, mode, token):
         os.replace(temporary,path);_sync_directory(path.parent)
     finally:
         if temporary.exists(): temporary.unlink();_sync_directory(temporary.parent)
+
+
+def _replace_guest_resource(root,path,source,expected,mode,token):
+    """Large pinned resources use the same upgrade intent, without a RAM copy."""
+    metadata=source.lstat()
+    require(stat.S_ISREG(metadata.st_mode) and not source.is_symlink() and metadata.st_nlink==1
+            and 0<metadata.st_size<=1024**3,'Unsafe guest upgrade source')
+    path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+    temporary=path.parent/('.'+path.name+'.upgrade-'+token[:16])
+    if temporary.exists() or temporary.is_symlink():
+        st=temporary.lstat()
+        require(stat.S_ISREG(st.st_mode) and not temporary.is_symlink() and st.st_uid==os.geteuid()
+                and not st.st_mode&0o022,'unsafe interrupted upgrade staging member')
+        temporary.unlink();_sync_directory(temporary.parent)
+    try:
+        checksum=hashlib.sha256();total=0
+        with source.open('rb') as incoming,temporary.open('xb') as outgoing:
+            os.fchmod(outgoing.fileno(),mode)
+            for chunk in iter(lambda:incoming.read(1024*1024),b''):
+                total+=len(chunk);require(total<=metadata.st_size,'Guest source grew during upgrade')
+                checksum.update(chunk);outgoing.write(chunk)
+            require(total==metadata.st_size and checksum.hexdigest()==expected,'Guest resource changed during upgrade')
+            outgoing.flush();os.fsync(outgoing.fileno())
+        os.replace(temporary,path);_sync_directory(path.parent)
+    finally:
+        if temporary.exists():temporary.unlink();_sync_directory(temporary.parent)
 
 
 def _assert_no_application_processes(root, vpn_pid=None, proc=Path('/proc'), invoking_lifecycle=None):
@@ -767,6 +796,11 @@ def upgrade(root, package):
                 allowed = {mapping[name] for mapping in (receipt['package_files'],manifest['files']) if name in mapping}
                 require(digest(path) in allowed, 'upgrade member is neither recorded old nor new: '+name)
         for name,expected in manifest['files'].items():
+            if name.startswith(('hosted-machines/','lib/guest-tools/')):
+                target=root/name
+                if not target.exists() or digest(target)!=expected:
+                    _replace_guest_resource(root,target,package/name,expected,0o700 if target.parent.name=='bin' else 0o600,token)
+                continue
             data = (package/name).read_bytes()
             require(_hash_bytes(data) == expected, 'candidate changed after package verification')
             target = root/name
@@ -1229,6 +1263,9 @@ def _replace_application_locked(root, package, staged, authorization):
     for name,expected in new['files'].items():
         if name in preserved: continue
         target=_software_path(root,name);target.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+        if name.startswith(('hosted-machines/','lib/guest-tools/')):
+            _replace_guest_resource(root,target,package/name,expected,0o700 if target.parent.name=='bin' else 0o600,token)
+            continue
         data=(package/name).read_bytes()
         require(hashlib.sha256(data).hexdigest()==expected,'package changed during replacement')
         _replace_bytes(root,target,data,0o700 if target.parent.name in ('bin','tools') else 0o600,token)

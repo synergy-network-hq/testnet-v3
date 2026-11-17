@@ -29,7 +29,7 @@ MAX_GENESIS_STAGE_REQUEST = 12*1024*1024
 GENESIS_FILES = {'genesis.json':4*1024*1024,'authority.json':1024*1024,'authority-root.pub':8192}
 ENGINE_MODULES = frozenset(('controller.py','synergy_linux.py','lifecycle.py','conformance.py',
                             'apqe_layout.py','vpn.py','canary_rpc_relay.py','root_guard.py','guest_lifecycle.py'))
-READS = frozenset(('network_transport_status','network_transport_export','guest_preflight','guest_status','target','inventory','health','install_preflight','upgrade_preflight',
+READS = frozenset(('network_transport_status','network_transport_export','guest_resources','guest_preflight','guest_status','target','inventory','health','install_preflight','upgrade_preflight',
                   'recovery_preflight','uninstall_preflight','vpn_status','diagnostics','identity_preflight','identity_status',
                   'formation_preflight','formation_status','formation_export','genesis_stage_preflight','genesis_binding_preflight','authorization_status','network_formation_status','network_formation_export'))
 MUTATIONS = frozenset(('network_transport_prepare','network_transport_sign','guest_create','guest_stop','guest_remove','install','commission','register','vpn_enroll','vpn_bind','vpn_retire','start','stop','restart','upgrade','uninstall','identity_generate',
@@ -154,6 +154,9 @@ def parse_request(raw):
     require(operation=='genesis_stage' or operation in ('network_formation_prepare','network_transport_prepare') and len(raw)<=2*1024*1024 or len(raw)<=MAX_REQUEST,'Request exceeds operation limit','invalid_request')
     if operation.startswith('network_transport_'):
         transport_parameters(operation,parameters)
+        return value
+    if operation=='guest_resources':
+        require(not parameters,'Guest resources read is parameterless','invalid_request')
         return value
     if operation.startswith('guest_'):
         from guest_lifecycle import validate_parameters
@@ -1005,7 +1008,7 @@ class Controller:
         operations=[]
         for op in sorted(READS | MUTATIONS):
             reason=None if op in READS else blocker or ('Operation has not passed host qualification' if op not in qualified else None)
-            if op.startswith('guest_') and not isinstance(policy.get('managed_guest'),dict):
+            if op.startswith('guest_') and op!='guest_resources' and not isinstance(policy.get('managed_guest'),dict):
                 reason='Independently approved guest image, toolchain and resources required'
             if not supported and op!='target': reason='Linux x86_64 target required'
             operations.append({'operation':op,'kind':'read' if op in READS else 'mutation','available':reason is None,'blocker':reason})
@@ -1043,6 +1046,17 @@ class Controller:
                 life._sealed_receipt(safe_root(self.root))
                 return {'packageVerified':True,'release':manifest['release_id'],'automaticRestart':False}
         else: safe_root(self.root)
+        if op=='guest_resources':
+            from guest_lifecycle import resource_file_pins,operator_public_key
+            with life._lifecycle_lock(self.root):
+                receipt,manifest=life._sealed_receipt(self.root)
+                require('guest' not in self.policy().get('engineering_target',{}),'Guest resources require a physical target')
+                files=resource_file_pins(manifest)
+                return {'schema':'nodenetwork-guest-resources-v1','release_id':manifest['release_id'],
+                    'manifest_sha256':receipt['package_sha256'],
+                    'resource_manifest_sha256':manifest['managed_guest_resources']['manifest_sha256'],
+                    'archive_limit_bytes':manifest['managed_guest_resources']['archive_limit_bytes'],
+                    'files':files,'operator_ssh_public_key':operator_public_key(self.root)}
         if op.startswith('guest_'):
             from guest_lifecycle import GuestManager
             with life._lifecycle_lock(self.root):
@@ -1159,7 +1173,7 @@ def control_inventory(root):
     authorization=policy.get('authorization_files',{})
     require(isinstance(authorization,dict),'Malformed authorization inventory')
     # Fixed input names only. Never grants arbitrary caller-selected paths.
-    AUTHORIZATION_FILES={'formation-context.json':4096,'vpn-ca.pem':128*1024,'vpn-provider.json':16384,
+    AUTHORIZATION_FILES={'managed-guest.json':16384,'formation-context.json':4096,'vpn-ca.pem':128*1024,'vpn-provider.json':16384,
         'vpn-server-binding.json':16384,'vpn-retirement.json':16384,
         'commissioning/config/node.json':1024*1024,'commissioning/config/start-authorized.json':65536,
         **{'commissioning/network/'+name:limit for name,limit in {

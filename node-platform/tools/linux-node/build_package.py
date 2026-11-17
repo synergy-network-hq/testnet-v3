@@ -37,6 +37,107 @@ def native_storage_formats(source=SOURCE):
             'downgrade_after_schema2_activation': 'unsupported'}
 
 
+def guest_resource_input(directory, manifest_path, expected):
+    """Only the separately pinned fixed resource inventory can enlarge a master."""
+    from guest_lifecycle import RESOURCE_FORMAT, resource_paths
+    require(isinstance(expected,str) and re.fullmatch('[a-f0-9]{64}',expected),'Independent guest manifest SHA256 required')
+    require(directory.is_dir() and not directory.is_symlink() and manifest_path.is_file()
+            and not manifest_path.is_symlink() and manifest_path.stat().st_size<=65536,'Bounded guest resource source required')
+    raw=manifest_path.read_bytes()
+    require(hashlib.sha256(raw).hexdigest()==expected,'Guest resource source manifest pin mismatch')
+    def unique(pairs):
+        result={}
+        for key,value in pairs:
+            require(key not in result,'Duplicate guest manifest key');result[key]=value
+        return result
+    value=json.loads(raw,object_pairs_hook=unique)
+    require(isinstance(value,dict) and set(value)=={'format','architecture','files'}
+            and value['format']==RESOURCE_FORMAT and value['architecture']=='x86_64','Unsupported guest resource manifest')
+    files=resource_paths(value['files'])
+    total=0
+    for name,pin in files.items():
+        path=directory/name
+        require(not any(part.is_symlink() for part in (path,*path.parents))
+                and path.is_file() and path.stat().st_nlink==1,'Regular contained guest resource required')
+        total+=path.stat().st_size
+        require(0<path.stat().st_size<=1024**3 and total<=1024**3,'Guest resource inputs exceed the 1GiB bound')
+        require(file_digest(path)==pin,'Guest resource source drift: '+name)
+    verify_guest_elf_closure(directory,files)
+    return files
+
+
+def file_digest(path):
+    value=hashlib.sha256()
+    with path.open('rb') as source:
+        for block in iter(lambda:source.read(1024*1024),b''):value.update(block)
+    return value.hexdigest()
+
+
+def guest_elf_needed(path):
+    """Read only bounded ELF64 dynamic metadata; never execute untrusted tools."""
+    import struct
+    with path.open('rb') as source:
+        header=source.read(64)
+        require(len(header)==64 and header[:7]==b'\x7fELF\x02\x01\x01' and struct.unpack_from('<H',header,18)[0]==62,'Guest runtime must be x86_64 ELF64')
+        offset=struct.unpack_from('<Q',header,32)[0];size,count=struct.unpack_from('<HH',header,54)
+        require(size==56 and 0<count<=256 and offset+count*size<=path.stat().st_size,'Bounded ELF program headers required')
+        source.seek(offset);segments=[struct.unpack('<IIQQQQQQ',source.read(56)) for _ in range(count)]
+        dynamic=[p for p in segments if p[0]==2]
+        require(len(dynamic)==1 and dynamic[0][5]<=1024*1024 and dynamic[0][5]%16==0,'Bounded ELF dynamic table required')
+        source.seek(dynamic[0][2]);entries=[]
+        for _ in range(dynamic[0][5]//16):
+            tag,value=struct.unpack('<qQ',source.read(16))
+            if tag==0:break
+            entries.append((tag,value))
+        else:raise ValueError('Unterminated ELF dynamic table')
+        require(not any(t in (15,29) for t,_ in entries),'Guest runtime cannot use external ELF RPATH/RUNPATH')
+        strings=[v for t,v in entries if t==5];lengths=[v for t,v in entries if t==10]
+        require(len(strings)==len(lengths)==1 and lengths[0]<=1024*1024,'Bounded ELF string table required')
+        address,length=strings[0],lengths[0]
+        loads=[p for p in segments if p[0]==1 and p[3]<=address and address+length<=p[3]+p[5]]
+        require(len(loads)==1,'ELF string table must be file-backed')
+        source.seek(loads[0][2]+address-loads[0][3]);table=source.read(length)
+        needed=[]
+        for tag,index in entries:
+            if tag!=1:continue
+            end=table.find(b'\0',index)
+            require(index<len(table) and end>=index,'Invalid ELF dependency string')
+            name=table[index:end].decode('ascii')
+            require(re.fullmatch('[A-Za-z0-9][A-Za-z0-9._+-]{0,127}',name),'Unsafe ELF dependency name')
+            needed.append(name)
+        return needed
+
+
+def verify_guest_elf_closure(directory,files):
+    runtime={Path(name).name for name in files if name.startswith('lib/guest-tools/lib/')}
+    runtime.add('ld-linux-x86-64.so.2')
+    for name in files:
+        if '/bin/' in name or '/lib/' in name:
+            missing=set(guest_elf_needed(directory/name))-runtime
+            require(not missing,'Guest runtime missing contained ELF dependencies: '+','.join(sorted(missing)))
+
+
+def copy_guest_resources(directory,destination,files):
+    for name,pin in files.items():
+        source=directory/name;target=destination/name
+        require(not source.is_symlink() and source.is_file() and source.stat().st_nlink==1,'Guest source changed before copy')
+        target.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+        with source.open('rb') as incoming,target.open('xb') as outgoing:
+            shutil.copyfileobj(incoming,outgoing,1024*1024)
+            outgoing.flush();os.fsync(outgoing.fileno())
+        require(file_digest(target)==pin and file_digest(source)==pin,'Guest resource changed while copying')
+        target.chmod(0o700 if target.parent.name=='bin' else 0o600)
+
+
+def guest_archive_limit(master):
+    # Conservative uncompressed tar bound including headers, PAX overhead and
+    # directory entries; native streaming is still independently byte bounded.
+    total=sum(((p.stat().st_size+511)//512+4)*512 for p in master.rglob('*') if p.is_file())+4*1024*1024
+    for limit in (512*1024**2,1024**3):
+        if total<=limit:return limit
+    raise ValueError('Guest-capable master exceeds the 1GiB reviewed archive limit')
+
+
 def desired_files(templates):
     """The source inventory defines the release; existing master bytes do not."""
     return ({p.relative_to(templates).as_posix() for p in templates.rglob('*')
@@ -484,6 +585,9 @@ def main():
         build_replacement_recovery(args.output,args.base_package_sha256)
         return
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--guest-resource-dir',type=Path)
+    p.add_argument('--guest-resource-manifest',type=Path)
+    p.add_argument('--guest-resource-manifest-sha256')
     p.add_argument('--evidence', type=Path, required=True)
     p.add_argument('--netbird-binary', type=Path, required=True)
     p.add_argument('--netbird-sha256', required=True)
@@ -524,6 +628,10 @@ def main():
              for v in enum_body.split(',') if v.strip()]
     require(len(roles) == 20 and len(set(roles)) == 20, 'canonical role taxonomy changed; review required')
     expected=desired_files(templates)
+    guest_options=(args.guest_resource_dir,args.guest_resource_manifest,args.guest_resource_manifest_sha256)
+    require(all(guest_options) or not any(guest_options),'Guest resource directory, manifest and independent pin must be supplied together')
+    guest_files=guest_resource_input(*guest_options) if all(guest_options) else {}
+    expected.update(guest_files)
     provider = args.apqe_provider_dir
     dependencies_before = dependency_sources(provenance)
     provider_files = verify_apqe_provider(provider, args.apqe_report_sha256, provenance)
@@ -603,6 +711,8 @@ def main():
         shutil.copyfile(Path(__file__).parent/name, MASTER/'tools'/name)
     for role in json.loads((MASTER / 'roles/roles.json').read_text())['roles']:
         (MASTER / 'roles' / role).mkdir(exist_ok=True)
+    if guest_files:
+        copy_guest_resources(args.guest_resource_dir,MASTER,guest_files)
     check_master_inventory(MASTER, expected, roles)
     files = {name:provenance.digest(MASTER/name) for name in sorted(expected)}
     manifest = {'format': 'synergy-universal-linux-v1', 'architecture': 'x86_64',
@@ -619,6 +729,10 @@ def main():
                                'report_sha256':args.apqe_report_sha256,
                                'profile':'PQ-VSESSION-01-candidate-v1',
                                'production_qualified':False}
+    if guest_files:
+        manifest['managed_guest_resources']={'version':1,'manifest_sha256':args.guest_resource_manifest_sha256,
+            'archive_limit_bytes':guest_archive_limit(MASTER),'files':guest_files}
+        require(guest_resource_input(*guest_options)==guest_files,'Guest inputs changed while packaging')
     manifest['dependency_sources'] = dependencies_before
     verify_copied_provider(MASTER/'lib/apqe', provider_files, provenance)
     require(dependency_sources(provenance) == dependencies_before, 'dependency sources changed while packaging')

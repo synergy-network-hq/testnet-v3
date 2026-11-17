@@ -24,6 +24,55 @@ FILES = {'guest.service', 'disk.qcow2', 'seed.iso', 'ssh-host',
 SYSTEM = Path('/etc/systemd/system')
 
 
+LOADER = 'ld-linux-x86-64.so.2'
+RESOURCE_FORMAT = 'synergy-managed-guest-resources-v1'
+RESOURCE_REQUIRED = {'hosted-machines/images/os.qcow2','lib/guest-tools/bios.bin',
+                     'lib/guest-tools/bin/'+LOADER, *('lib/guest-tools/bin/'+name for name in TOOLS)}
+RESOURCE_PREFIXES = ('hosted-machines/', 'lib/guest-tools/')
+
+
+def resource_paths(files):
+    require(isinstance(files,dict) and 7<=len(files)<=135,'Bounded guest resource inventory required')
+    require(RESOURCE_REQUIRED<=set(files),'Complete image, tools, firmware and loader required')
+    for name,pin in files.items():
+        require(isinstance(name,str) and (name in RESOURCE_REQUIRED or
+                re.fullmatch(r'lib/guest-tools/lib/[A-Za-z0-9][A-Za-z0-9._+-]{0,127}',name))
+                and isinstance(pin,str) and re.fullmatch('[a-f0-9]{64}',pin),'Unsafe guest resource member')
+    return files
+
+
+def resource_file_pins(manifest):
+    declaration=manifest.get('managed_guest_resources')
+    require(isinstance(declaration,dict) and set(declaration)=={'version','manifest_sha256','archive_limit_bytes','files'}
+            and type(declaration['version']) is int and declaration['version']==1
+            and isinstance(declaration['manifest_sha256'],str) and re.fullmatch('[a-f0-9]{64}',declaration['manifest_sha256'])
+            and type(declaration['archive_limit_bytes']) is int and declaration['archive_limit_bytes'] in (512*1024**2,1024**3),
+            'Authenticated guest resource declaration required')
+    files=resource_paths(declaration['files'])
+    selected={name:pin for name,pin in manifest['files'].items() if name.startswith(RESOURCE_PREFIXES)}
+    require(selected==files,'Guest resource declaration differs from sealed master inventory')
+    return files
+
+
+def validate_resource_policy(root, value, files, operator_public):
+    manager=GuestManager(root,{'managed_guest':value})
+    selected={'hosted-machines/images/os.qcow2':value['image_sha256'],
+              'lib/guest-tools/bios.bin':value['bios_sha256'],
+              **{'lib/guest-tools/bin/'+name:pin for name,pin in value['tools'].items()},
+              **value['runtime_files']}
+    require(selected==files and public_ssh(value['operator_ssh_public_key'].encode())[0]==operator_public,
+            'Guest policy differs from authenticated master or operator public identity')
+    return manager.spec
+
+
+def operator_public_key(root):
+    raw=checked(Path(root)/'tmp/controller/host/authorized_keys',maximum=8192).read_bytes()
+    prefix=b'restrict,command="/usr/bin/sudo -n /usr/bin/python3 -I -B /opt/synergy/tmp/controller/controller.py" '
+    require(raw.startswith(prefix) and raw.endswith(b'\n') and raw.count(b'\n')==1,
+            'Managed host operator public identity is not canonical')
+    return public_ssh(raw[len(prefix):])[0]
+
+
 def valid_id(value):
     return isinstance(value, str) and re.fullmatch(r'[a-z][a-z0-9-]{0,31}', value) is not None
 
@@ -45,7 +94,7 @@ def checked(path, directory=False, maximum=None):
     st = path.lstat()
     require(not path.is_symlink() and st.st_uid == os.geteuid()
             and (stat.S_ISDIR(st.st_mode) if directory else stat.S_ISREG(st.st_mode) and st.st_nlink == 1)
-            and stat.S_IMODE(st.st_mode) == (0o700 if directory or path.name in TOOLS else 0o600)
+            and stat.S_IMODE(st.st_mode) == (0o700 if directory or path.name in (*TOOLS,LOADER) else 0o600)
             and (maximum is None or st.st_size <= maximum), 'Unsafe managed guest member')
     return path
 
@@ -97,7 +146,7 @@ class GuestManager:
         self.base = self.root/'hosted-machines'
         self.spec = policy.get('managed_guest')
         s = self.spec
-        require(isinstance(s, dict) and set(s) == CREATE | {'version', 'tools', 'bios_sha256', 'ssh_forward_port', 'operator_ssh_public_key'}
+        require(isinstance(s, dict) and set(s) == CREATE | {'version', 'tools', 'bios_sha256', 'ssh_forward_port', 'operator_ssh_public_key', 'runtime_files'}
                 and type(s['version']) is int and s['version'] == 1 and isinstance(s['tools'], dict) and set(s['tools']) == set(TOOLS), 'Independent managed guest policy is missing or malformed')
         validate_parameters('guest_create', {key:s[key] for key in CREATE})
         require(type(s['ssh_forward_port']) is int and 1024 <= s['ssh_forward_port'] <= 65535,
@@ -105,6 +154,13 @@ class GuestManager:
         public_ssh(s['operator_ssh_public_key'].encode('ascii'))
         require(all(isinstance(pin, str) and re.fullmatch('[a-f0-9]{64}', pin) for pin in [*s['tools'].values(), s['bios_sha256']]),
                 'Exact approved guest toolchain pins required')
+        runtime=s['runtime_files']
+        require(isinstance(runtime,dict) and 1<=len(runtime)<=128
+                and 'lib/guest-tools/bin/'+LOADER in runtime
+                and all(isinstance(name,str) and (name=='lib/guest-tools/bin/'+LOADER or
+                    re.fullmatch(r'lib/guest-tools/lib/[A-Za-z0-9][A-Za-z0-9._+-]{0,127}',name))
+                    and isinstance(pin,str) and re.fullmatch('[a-f0-9]{64}',pin) for name,pin in runtime.items()),
+                'Exact contained guest loader and library pins required')
         self.directory = self.base/s['guest_id']
         self.unit_name = 'synergy-guest-'+s['guest_id']+'.service'
         self.registration = SYSTEM/self.unit_name
@@ -119,7 +175,11 @@ class GuestManager:
         env = {'PATH':str(self.root/'lib/guest-tools/bin')+':/usr/bin:/bin',
                'HOME':str(self.root), 'TMPDIR':str(self.directory if self.directory.exists() else self.root/'tmp'),
                'LANG':'C', 'LC_ALL':'C'}
-        result = subprocess.run([str(v) for v in argv], input=None, stdout=subprocess.PIPE,
+        env['QEMU_MODULE_DIR']=str(self.root/'lib/guest-tools/modules')
+        argv=list(map(str,argv))
+        if Path(argv[0]).parent==self.root/'lib/guest-tools/bin' and Path(argv[0]).name in TOOLS:
+            argv=self.tool_argv(Path(argv[0]).name)+argv[1:]
+        result = subprocess.run(argv, input=None, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, timeout=timeout, env=env, check=False)
         require(result.returncode == 0, 'Managed guest native operation failed: '+Path(argv[0]).name)
         require(len(result.stdout) <= 1024*1024, 'Managed guest native response exceeds bound')
@@ -135,6 +195,15 @@ class GuestManager:
         checked(tools.parent, directory=True); checked(tools, directory=True)
         for name in TOOLS:
             require(digest(checked(tools/name)) == self.spec['tools'][name], 'Approved guest toolchain changed')
+        for name,pin in self.spec['runtime_files'].items():
+            require(digest(checked(self.root/name))==pin,'Contained guest runtime changed')
+        libraries=tools.parent/'lib'
+        checked(libraries,directory=True)
+        require(set(libraries.iterdir())=={self.root/name for name in self.spec['runtime_files'] if name.startswith('lib/guest-tools/lib/')},
+                'Contained guest library inventory changed')
+        modules=tools.parent/'modules'
+        require(not modules.exists() or checked(modules,directory=True) and not any(modules.iterdir()),
+                'Unapproved QEMU module directory')
         # No external backing chain or external data file is accepted.
         require(digest(checked(tools.parent/'bios.bin')) == self.spec['bios_sha256'], 'Approved guest firmware changed')
         self.command([tools/'qemu-system-x86_64', '--version'], timeout=30)
@@ -146,9 +215,15 @@ class GuestManager:
                 'Guest image has an unsupported format, size or external dependency')
         return image, tools
 
+    def tool_argv(self,name):
+        require(name in TOOLS,'Unsupported contained guest executable')
+        return [str(self.root/'lib/guest-tools/bin'/LOADER),'--inhibit-cache','--library-path',
+                str(self.root/'lib/guest-tools/lib'),str(self.root/'lib/guest-tools/bin'/name)]
+
     def argv(self):
         s = self.spec
-        return [str(self.root/'lib/guest-tools/bin/qemu-system-x86_64'), '-no-user-config', '-nodefaults',
+        return self.tool_argv('qemu-system-x86_64')+['-no-user-config', '-nodefaults',
+                '-L',str(self.root/'lib/guest-tools'),
                 '-bios', str(self.root/'lib/guest-tools/bios.bin'), '-machine', 'q35,accel=kvm', '-cpu', 'host', '-smp', str(s['cpu_count']), '-m', str(s['memory_mib']),
                 '-drive', 'file='+str(self.directory/'disk.qcow2')+',if=virtio,format=qcow2',
                 '-drive', 'file='+str(self.directory/'seed.iso')+',if=virtio,format=raw,readonly=on',
@@ -169,6 +244,7 @@ ConditionPathExists={self.base}/record.json
 Type=exec
 User=root
 UMask=0077
+Environment=QEMU_MODULE_DIR={self.root}/lib/guest-tools/modules
 WorkingDirectory={self.directory}
 ExecStart={command}
 KillMode=control-group
@@ -210,7 +286,7 @@ StandardError=append:{self.directory}/qemu.log
         require(isinstance(pid,str) and pid.isdecimal() and int(pid)>1, 'Invalid managed guest PID')
         process=Path('/proc')/pid
         require(process.stat().st_uid == 0
-                and (process/'exe').resolve() == self.root/'lib/guest-tools/bin/qemu-system-x86_64',
+                and (process/'exe').resolve() == self.root/'lib/guest-tools/bin'/LOADER,
                 'Managed guest process executable differs')
         with (process/'cmdline').open('rb') as stream: raw=stream.read(16385)
         require(len(raw)<=16384 and raw == b'\x00'.join(arg.encode() for arg in self.argv())+b'\x00',
@@ -373,6 +449,14 @@ def approved_inventory(root, policy):
     root = Path(root)
     base = root/'hosted-machines'
     if not base.exists() and not base.is_symlink(): return set()
+    if not isinstance(policy.get('managed_guest'),dict):
+        from lifecycle import _sealed_receipt
+        _,manifest=_sealed_receipt(root)
+        resource_file_pins(manifest)
+        require(set(checked(base,directory=True).iterdir())=={base/'images'}
+                and set(checked(base/'images',directory=True).iterdir())=={base/'images/os.qcow2'},
+                'Guest runtime requires an independently approved policy')
+        return {path.relative_to(root).as_posix() for path in (base,base/'images',base/'images/os.qcow2')}
     manager = GuestManager(root, policy)
     manager.dependencies()
     allowed = {base, base/'images', base/'images/os.qcow2'}
@@ -391,8 +475,11 @@ def approved_inventory(root, policy):
     require(set(base.iterdir()) <= {base/'images', manager.directory, base/'removed.json', base/'record.json'}, 'Unattributed hosted guest directory')
     require(set((base/'images').iterdir()) == {base/'images/os.qcow2'}, 'Unexpected guest image inventory')
     tools = root/'lib/guest-tools'
-    allowed |= {tools, tools/'bios.bin', tools/'bin', *(tools/'bin'/name for name in TOOLS)}
-    require(set(tools.iterdir()) == {tools/'bin', tools/'bios.bin'} and set((tools/'bin').iterdir()) == {tools/'bin'/name for name in TOOLS},
+    allowed |= {tools, tools/'bios.bin', tools/'bin', tools/'lib', *(tools/'bin'/name for name in TOOLS),
+                *(root/name for name in manager.spec['runtime_files'])}
+    if (tools/'modules').exists():allowed.add(tools/'modules')
+    require(set(tools.iterdir()) <= {tools/'bin', tools/'lib', tools/'bios.bin',tools/'modules'}
+            and set((tools/'bin').iterdir()) == {tools/'bin'/name for name in (*TOOLS,LOADER)},
             'Unexpected guest toolchain inventory')
     return {path.relative_to(root).as_posix() for path in allowed}
 

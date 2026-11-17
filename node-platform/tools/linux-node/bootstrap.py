@@ -86,8 +86,49 @@ def public_header(line):
     return value
 
 
+def master_archive_limit(manifest):
+    declaration=manifest.get('managed_guest_resources')
+    if declaration is None:
+        require(not any(name.startswith(('hosted-machines/','lib/guest-tools/')) for name in manifest['files']),
+                'Guest assets require an authenticated declaration')
+        return LIMIT
+    required={'hosted-machines/images/os.qcow2','lib/guest-tools/bios.bin',
+              *('lib/guest-tools/bin/'+name for name in ('qemu-system-x86_64','qemu-img','ssh-keygen','genisoimage','ld-linux-x86-64.so.2'))}
+    require(isinstance(declaration,dict) and set(declaration)=={'version','manifest_sha256','archive_limit_bytes','files'}
+            and type(declaration['version']) is int and declaration['version']==1
+            and isinstance(declaration['manifest_sha256'],str) and re.fullmatch('[a-f0-9]{64}',declaration['manifest_sha256'])
+            and type(declaration['archive_limit_bytes']) is int and declaration['archive_limit_bytes'] in (512*1024**2,1024**3)
+            and isinstance(declaration['files'],dict) and 7<=len(declaration['files'])<=135
+            and required<=set(declaration['files']),'Invalid guest master declaration')
+    for name,pin in declaration['files'].items():
+        require(name in required or re.fullmatch(r'lib/guest-tools/lib/[A-Za-z0-9][A-Za-z0-9._+-]{0,127}',name),
+                'Unsafe guest master resource path')
+        require(isinstance(pin,str) and re.fullmatch('[a-f0-9]{64}',pin),'Invalid guest master resource pin')
+    require({name:pin for name,pin in manifest['files'].items() if name.startswith(('hosted-machines/','lib/guest-tools/'))}==declaration['files'],
+            'Guest master resource inventory differs')
+    return declaration['archive_limit_bytes']
+
+
+def save_stream(path,stream,size,expected):
+    path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+    digest=hashlib.sha256();remaining=size
+    try:
+        with path.open('xb') as target:
+            os.fchmod(target.fileno(),0o600)
+            while remaining:
+                chunk=stream.read(min(1024*1024,remaining))
+                require(bool(chunk),'Truncated package member')
+                target.write(chunk);digest.update(chunk);remaining-=len(chunk)
+            require(digest.hexdigest()==expected,'Package file digest mismatch')
+            target.flush();os.fsync(target.fileno())
+    except Exception:
+        # Never remove an existing member after an exclusive-open refusal.
+        # The caller owns cleanup of the fresh extraction root on failure.
+        raise
+
+
 def extract(stream,stage,header):
-    seen=set();expected=None;total=0;directories=set()
+    seen=set();expected=None;total=0;directories=set();limit=LIMIT
     with tarfile.open(fileobj=stream,mode='r|') as tar:
         for member in tar:
             name=member.name;relative=PurePosixPath(name)
@@ -95,7 +136,7 @@ def extract(stream,stage,header):
             seen.add(name)
             require(len(seen)<=8192,'Package member count exceeds bound')
             require(member.isfile() or member.isdir(),'Package links and special members are forbidden')
-            require(member.size>=0 and member.size<=LIMIT-total,'Package exceeds bound');total+=member.size
+            require(member.size>=0 and member.size<=limit-total,'Package exceeds bound');total+=member.size
             if expected is None:
                 require(name=='package.json' and member.isfile() and member.size<=1024*1024,'First archive member must be the manifest')
                 raw=tar.extractfile(member).read()
@@ -103,14 +144,13 @@ def extract(stream,stage,header):
                 manifest=json.loads(raw)
                 require(manifest.get('format')=='synergy-universal-linux-v1' and manifest.get('architecture')=='x86_64' and manifest.get('release_id')==header['release_id'] and isinstance(manifest.get('files'),dict),'Invalid selected package')
                 expected=manifest['files']
+                limit=master_archive_limit(manifest)
                 require(len(expected)<=4096 and all(isinstance(n,str) and n==PurePosixPath(n).as_posix() and not PurePosixPath(n).is_absolute() and '..' not in PurePosixPath(n).parts and isinstance(d,str) and re.fullmatch('[a-f0-9]{64}',d) for n,d in expected.items()),'Unsafe manifest inventory')
                 save(stage/name,raw);continue
             if member.isdir():
                 directories.add(name);(stage/name).mkdir(parents=True,exist_ok=True,mode=0o700);continue
             require(name in expected,'Undeclared package file')
-            data=tar.extractfile(member).read()
-            require(hashlib.sha256(data).hexdigest()==expected[name],'Package file digest mismatch')
-            save(stage/name,data)
+            save_stream(stage/name,tar.extractfile(member),member.size,expected[name])
     require(expected is not None and seen-directories==set(expected)|{'package.json'},'Incomplete package inventory')
     roles=json.loads((stage/'roles/roles.json').read_bytes())['roles']
     require(isinstance(roles,list) and len(roles)==20 and len(set(roles))==20
@@ -258,6 +298,7 @@ def bare_digest(path, maximum=LIMIT):
 def bare_tree(root, manifest):
     """Exact bootstrap-only namespace; never a generic installation remover."""
     stage=root/'tmp/bootstrap-master'
+    limit=master_archive_limit(manifest)
     files={'tmp/controller/policy.json','tmp/bootstrap-master/package.json'}
     files|={'tmp/bootstrap-master/'+name for name in manifest['files']}
     files|={'tmp/controller/'+name if name=='controller.py' else 'tmp/controller/tools/'+name
@@ -288,8 +329,8 @@ def bare_tree(root, manifest):
                 observed_dirs.add(relative)
             else:
                 require(relative in files,'Bare bootstrap contains state, authorization or unknown files')
-                bare_metadata(path,LIMIT);total+=metadata.st_size
-                require(total<=LIMIT+4*1024*1024,'Bare namespace exceeds byte bound')
+                bare_metadata(path,limit);total+=metadata.st_size
+                require(total<=limit+4*1024*1024,'Bare namespace exceeds byte bound')
                 observed_files.add(relative)
             snapshot.append([relative,metadata.st_dev,metadata.st_ino,metadata.st_mode,metadata.st_size,
                              metadata.st_mtime_ns,metadata.st_ctime_ns])
@@ -412,7 +453,7 @@ def bare_snapshot(release_id,pin):
     require(set(policy['engine_files'])==set(engine_names(manifest['files']))
             and set(policy['host_files'])=={'authorized_keys','sshd.conf','sudoers'},'Bare engine/host inventory differs')
     for name,expected in manifest['files'].items():
-        require(bare_digest(stage/name)==expected,'Bare staged payload drift')
+        require(bare_digest(stage/name,master_archive_limit(manifest))==expected,'Bare staged payload drift')
     for name,expected in policy['engine_files'].items():
         path=root/'tmp/controller'/name if name=='controller.py' else root/'tmp/controller/tools'/name
         require(manifest['files'].get('tools/'+name)==expected
@@ -632,7 +673,7 @@ def stage_engineering_update(stream, release_id, pin):
 # The document is not a public policy issuer, membership proof or credential API.
 AUTHORIZATION_PROFILE='nodenetwork-isolated-formation-authorization-v1'
 AUTHORIZATION_LIMIT=12*1024*1024
-AUTHORIZATION_FILES={'formation-context.json':4096,'vpn-ca.pem':128*1024,'vpn-provider.json':16384,'vpn-enrollment.json':16384,'vpn-server-binding.json':16384,'vpn-retirement.json':16384,
+AUTHORIZATION_FILES={'managed-guest.json':16384,'formation-context.json':4096,'vpn-ca.pem':128*1024,'vpn-provider.json':16384,'vpn-enrollment.json':16384,'vpn-server-binding.json':16384,'vpn-retirement.json':16384,
     'commissioning/config/node.json':1024*1024,'commissioning/config/start-authorized.json':65536,
     **{'commissioning/network/'+name:limit for name,limit in {
         'genesis.json':4*1024*1024,'authority.json':1024*1024,'authority-root.pub':8192,
@@ -772,6 +813,15 @@ def authorization_tree_digest(directory):
     return digest.hexdigest()
 
 
+def active_guest_policy_only(continuation,inputs,doc,policy):
+    # This exception changes only contained guest policy/grant, never the
+    # running validator's Genesis, identity, configuration or current master.
+    return (continuation and set(inputs)=={'managed-guest.json'}
+            and len(doc['requests'])==1 and doc['requests'][0]['operation']=='guest_create'
+            and doc['genesis_pins']==policy.get('validator_identity_network')
+            and 'guest' not in doc['target'])
+
+
 def stage_engineering_authorization(stream):
     """Atomic exact engineering grants through the native application's admin transport.
 
@@ -868,7 +918,8 @@ def stage_engineering_authorization(stream):
         active=status.get('MainPID','0') not in ('','0') or status.get('ActiveState') not in ('inactive','failed')
         pure_lifecycle=(continuation and not inputs and doc['genesis_pins'] in (None,policy.get('validator_identity_network'))
                         and doc['requests'][0]['operation'] in ('stop','restart'))
-        require(not active or pure_lifecycle,'Stop validator before artifact, formation or configuration authorization change')
+        guest_policy_only=active_guest_policy_only(continuation,inputs,doc,policy)
+        require(not active or pure_lifecycle or guest_policy_only,'Stop validator before artifact, formation or configuration authorization change')
         vpn=_unit_state('synergy-vpn.service')
         if not active:_assert_no_application_processes(ROOT,vpn_pid=vpn.get('MainPID'))
         requests=[];seen=set()
@@ -887,6 +938,26 @@ def stage_engineering_authorization(stream):
             if request['operation']=='vpn_enroll':require('vpn-enrollment.json' in inputs,'Exact one-use VPN input required')
             if request['operation']=='vpn_bind':require('vpn-server-binding.json' in inputs,'Exact native provider binding required')
             if request['operation']=='vpn_retire':require('vpn-retirement.json' in inputs,'Exact verified provider retirement required')
+        guest_input=inputs.get('managed-guest.json')
+        if guest_input is not None:
+            require(guest_policy_only,'Guest resource approval must be its exact existing-host continuation')
+            from guest_lifecycle import resource_file_pins,validate_resource_policy,operator_public_key
+            # The exact current installed release, not caller pins, supplies all
+            # executable/image trust. Initial bootstrap cannot install guest policy.
+            from lifecycle import _sealed_receipt
+            receipt,manifest=_sealed_receipt(ROOT)
+            require(receipt['package_sha256']==doc['manifest_sha256'] and receipt['role']=='validator'
+                    and 'guest' not in doc['target'],'Managed guests require the physical installed host')
+            require(not (ROOT/'hosted-machines/record.json').exists()
+                    and not (ROOT/'hosted-machines/removed.json').exists(), 'Prior guest lifecycle must not be replaced')
+            spec=validate_resource_policy(ROOT,json.loads(guest_input),resource_file_pins(manifest),operator_public_key(ROOT))
+            prior=policy.get('managed_guest')
+            require(prior is None or prior==spec,'An approved guest policy cannot be replaced')
+            expected_request=__import__('controller').request_digest({'version':1,'operation':'guest_create',
+                'parameters':{key:spec[key] for key in ('guest_id','image_sha256','cpu_count','memory_mib','disk_gib')}})
+            require(len(doc['requests'])==1 and doc['requests'][0]=={'operation':'guest_create','request_sha256':expected_request},
+                    'Guest policy requires its one exact native-approved creation request')
+            policy['managed_guest']=spec
         formation=inputs.get('formation-context.json')
         if formation is not None:
             value=json.loads(formation)

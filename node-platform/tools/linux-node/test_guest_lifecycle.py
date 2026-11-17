@@ -16,12 +16,15 @@ class GuestTests(unittest.TestCase):
  def setUp(self):
   self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
   self.root=Path(self.temp.name).resolve()/'synergy'
-  for n in ('','tmp','hosted-machines','hosted-machines/images','lib','lib/guest-tools','lib/guest-tools/bin'):(self.root/n).mkdir(mode=0o700,exist_ok=True)
+  for n in ('','tmp','hosted-machines','hosted-machines/images','lib','lib/guest-tools','lib/guest-tools/bin','lib/guest-tools/lib'):(self.root/n).mkdir(mode=0o700,exist_ok=True)
   self.system=Path(self.temp.name)/'systemd';self.system.mkdir()
   self.spec={'version':1,'guest_id':'temporary-validator','cpu_count':2,'memory_mib':2048,'disk_gib':8,'ssh_forward_port':22280,'operator_ssh_public_key':KEY,'tools':{}}
   self.file('hosted-machines/images/os.qcow2',b'image');self.spec['image_sha256']=g.digest(self.root/'hosted-machines/images/os.qcow2')
   for tool in g.TOOLS:
    self.file('lib/guest-tools/bin/'+tool,tool.encode(),0o700);self.spec['tools'][tool]=g.digest(self.root/'lib/guest-tools/bin'/tool)
+  self.file('lib/guest-tools/bin/'+g.LOADER,b'loader',0o700)
+  self.file('lib/guest-tools/lib/libc.so.6',b'libc')
+  self.spec['runtime_files']={name:g.digest(self.root/name) for name in ('lib/guest-tools/bin/'+g.LOADER,'lib/guest-tools/lib/libc.so.6')}
   self.file('lib/guest-tools/bios.bin',b'bios');self.spec['bios_sha256']=g.digest(self.root/'lib/guest-tools/bios.bin')
   self.start_patch(patch.object(g,'SYSTEM',self.system));self.manager=g.GuestManager(self.root,{'managed_guest':self.spec})
   self.params={k:self.spec[k] for k in g.CREATE};self.calls=[];self.authorized=0;self.active=False;self.loaded=False
