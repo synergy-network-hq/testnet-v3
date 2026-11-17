@@ -1,7 +1,7 @@
 //! Read-only transport of existing commitments, without a new state-root format.
 use super::*;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use synergy_address_engine::apqe::{HashAlgorithm, HashStream, Primitives};
 
 const MAX_PAGE: usize = 64 * 1024;
 // A proof is a bounded transport of the existing commitment preimage, not a
@@ -104,7 +104,20 @@ struct PageWriter {
     limit: usize,
     total: usize,
     bytes: Vec<u8>,
-    hash: Sha256,
+    hash: HashStream,
+}
+impl PageWriter {
+    fn new(offset: usize, limit: usize) -> Result<Self, String> {
+        Ok(Self {
+            offset,
+            limit,
+            total: 0,
+            bytes: Vec::with_capacity(limit),
+            hash: Primitives
+                .hash_stream(HashAlgorithm::Sha256)
+                .map_err(|error| format!("APQE disclosure digest unavailable: {error:?}"))?,
+        })
+    }
 }
 impl Write for PageWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -131,30 +144,23 @@ impl Write for PageWriter {
 // Preflight typed evidence before allocating an owned JSON Value. This writer
 // retains no document bytes and enforces the same complete-document ceiling.
 pub(crate) fn bounded_document(value: &impl Serialize) -> Result<(), String> {
-    let mut writer = PageWriter {
-        offset: 0,
-        limit: 0,
-        total: 0,
-        bytes: Vec::new(),
-        hash: Sha256::new(),
-    };
+    let mut writer = PageWriter::new(0, 0)?;
     serde_json::to_writer(&mut writer, value).map_err(|error| error.to_string())
 }
 
 pub(super) fn page(query: &ProofQuery, value: &impl Serialize) -> Result<Value, RpcError> {
-    let mut output = PageWriter {
-        offset: query.offset,
-        limit: query.limit,
-        total: 0,
-        bytes: Vec::with_capacity(query.limit),
-        hash: Sha256::new(),
-    };
+    let mut output = PageWriter::new(query.offset, query.limit).map_err(RpcError::unavailable)?;
     serde_json::to_writer(&mut output, value)
         .map_err(|error| RpcError::unavailable(format!("serialize proof evidence: {error}")))?;
     if query.offset >= output.total {
         return Err(RpcError::invalid_params("proof offset outside document"));
     }
-    let digest = format!("{:x}", output.hash.finalize());
+    let digest: String = output
+        .hash
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     if query
         .expected_sha256
         .as_ref()
@@ -635,14 +641,41 @@ mod tests {
         }
     }
     #[test]
+    fn apqe_disclosure_stream_preserves_exact_sha256_across_pages() {
+        use sha2::{Digest, Sha256};
+        for size in [0, 1, 1024, MAX_PAGE + 37] {
+            let value = json!({"disclosure": "x".repeat(size)});
+            let bytes = serde_json::to_vec(&value).unwrap();
+            let expected = format!("{:x}", Sha256::digest(&bytes));
+            for offset in [0, bytes.len() / 2, bytes.len() - 1] {
+                let query = ProofQuery {
+                    height: 7,
+                    kind: ProofKind::WorldState,
+                    offset,
+                    limit: 31,
+                    expected_sha256: Some(expected.clone()),
+                };
+                let response = page(&query, &value).unwrap();
+                assert_eq!(response["sha256"], expected);
+                assert_eq!(response["total_bytes"], bytes.len());
+                assert_eq!(
+                    BASE64
+                        .decode(response["bytes_base64"].as_str().unwrap())
+                        .unwrap(),
+                    bytes[offset..(offset + 31).min(bytes.len())]
+                );
+                let wrong = ProofQuery {
+                    expected_sha256: Some("0".repeat(64)),
+                    ..query
+                };
+                assert!(page(&wrong, &value).is_err());
+            }
+        }
+    }
+
+    #[test]
     fn streaming_writer_bounds_retained_memory_and_rejects_document_overflow() {
-        let mut writer = PageWriter {
-            offset: 2,
-            limit: 3,
-            total: 0,
-            bytes: Vec::new(),
-            hash: Sha256::new(),
-        };
+        let mut writer = PageWriter::new(2, 3).unwrap();
         writer.write_all(b"ab").unwrap();
         writer.write_all(b"cdefgh").unwrap();
         assert_eq!(writer.bytes, b"cde");
