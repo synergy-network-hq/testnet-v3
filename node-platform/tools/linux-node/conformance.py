@@ -209,6 +209,30 @@ def verify_registered_unit(root,name,text,allow_legacy=False):
     return text
 
 
+def verify_vpn_wrapper(root,manifest,allow_legacy=False):
+    import ast
+    import lifecycle
+    from controller import Controller
+    c=Controller(root)
+    actual=c.direct(root/'tools/netbird-client',False,16384).read_text()
+    if actual==lifecycle.wrapper_text(root):return
+    require(allow_legacy,'NetBird wrapper drift')
+    source=c.direct(root/'tools/lifecycle.py',False).read_bytes()
+    require(hashlib.sha256(source).hexdigest()==manifest['files'].get('tools/lifecycle.py'),
+            'Legacy wrapper source is not authenticated')
+    functions=[n for n in ast.parse(source).body if isinstance(n,ast.FunctionDef) and n.name=='wrapper_text']
+    require(len(functions)==1,'Legacy wrapper source missing')
+    function=functions[0]
+    allowed=(ast.FunctionDef,ast.arguments,ast.arg,ast.Return,ast.JoinedStr,ast.FormattedValue,ast.Name,ast.Load,ast.Constant)
+    require(len(function.body)==1 and isinstance(function.body[0],ast.Return)
+            and all(isinstance(n,allowed) for n in ast.walk(function))
+            and all(n.id=='root' for n in ast.walk(function) if isinstance(n,ast.Name)),
+            'Unsupported legacy wrapper generator')
+    namespace={}
+    exec(compile(ast.Module(body=[function],type_ignores=[]),'authenticated-legacy-wrapper','exec'),namespace)
+    require(actual==namespace['wrapper_text'](root),'NetBird wrapper differs from authenticated prior source')
+
+
 def _outside_path(path,root,allowed):
     # Resolve existing symlinks as well as lexical traversal; aliases must not
     # redirect reviewed external references into this installation.
@@ -399,6 +423,41 @@ def approved_network_formation_members(root):
     return paths
 
 
+def approved_network_transport_members(root):
+    from controller import Controller, parse_request, request_digest
+    from apqe_layout import require_frozen_tree
+    from synergy_linux import native
+    root=Path(root);directory=root/'tmp/network-transport'
+    prepare=root/'tmp/network-transport-prepare-request.json';signing=root/'tmp/network-transport-sign-request.json'
+    if not any(p.exists() or p.is_symlink() for p in (directory,prepare,signing)):return set()
+    c=Controller(root);selection,flags=c.formation_context()
+    require_frozen_tree(directory)
+    signed=directory/'signed';has_signed=signed.exists() or signed.is_symlink()
+    names={'request.json','unlock','issuer.enc.json','issuer-root.pub','registry-payload.json','review.json'}
+    if has_signed:names|={'signed/sign-request.json','signed/transport-registry.json'}
+    children=list(directory.rglob('*'))
+    require({p.relative_to(directory).as_posix() for p in children if p.is_file()}==names
+            and {p.relative_to(directory).as_posix() for p in children if p.is_dir()}==({'signed'} if has_signed else set()),
+            'Transport issuance inventory is incomplete or unexpected')
+    for p in [directory,*children]:
+        st=p.lstat()
+        require(st.st_uid==os.geteuid() and stat.S_IMODE(st.st_mode)==(0o700 if p.is_dir() else 0o600)
+                and (p.is_dir() or st.st_nlink==1),'Transport issuance ownership or private permissions differ')
+    prepared=parse_request(c.direct(prepare,True,2*1024*1024).read_bytes())
+    require(prepared['operation']=='network_transport_prepare' and digest(directory/'request.json')==digest(prepare),
+            'Transport prepare request differs')
+    source=json.loads(native([root/'bin/synergy-keytool','review-network-formation',c.formation_context_path(),selection['formation_sha256'],root/'tmp/network-formation',*flags]))
+    require(source.get('signed') is True,'Signed Genesis formation required')
+    result=json.loads(native([root/'bin/synergy-keytool','review-network-transport',c.formation_context_path(),selection['formation_sha256'],root/'tmp/network-formation',directory,*flags]))
+    c.transport_receipt(result,selection,source,prepare,signing)
+    require(result['signed']==has_signed,'Transport signing inventory differs')
+    paths={p.relative_to(root).as_posix() for p in [directory,*children,prepare]}
+    if has_signed:
+        require(digest(directory/'signed/sign-request.json')==digest(signing),'Transport signed request differs')
+        paths.add(signing.relative_to(root).as_posix())
+    return paths
+
+
 def installed(root, expected_manifest=None, host=False, initialized=True, schema=None, stage=None, allow_legacy_integrations=False, pending_upgrade_sha256=None):
     stage=stage or ('commissioned' if initialized else 'fresh')
     require(stage in ('fresh','uncommissioned','commissioned'),'unknown installation stage')
@@ -446,8 +505,15 @@ def installed(root, expected_manifest=None, host=False, initialized=True, schema
     if (root/'tmp/controller').exists():
         from controller import control_inventory
         control_files,control_dirs=control_inventory(root)
+        from vpn import client_environment
+        client_environment(root)
     pending_upgrade=approved_upgrade_members(root,pending_upgrade_sha256,stage) if pending_upgrade_sha256 is not None else set()
     pending_upgrade |= approved_network_formation_members(root)
+    pending_upgrade |= approved_network_transport_members(root)
+    if (root/'hosted-machines').exists() or (root/'hosted-machines').is_symlink():
+        from controller import Controller
+        from guest_lifecycle import approved_inventory
+        pending_upgrade |= approved_inventory(root,Controller(root).policy())
     unknown=[]; runtime=0; directories=0; runtime_names=[]
     for current,dirs,files in os.walk(root,followlinks=False):
         for name in dirs+files:
@@ -544,8 +610,7 @@ def installed(root, expected_manifest=None, host=False, initialized=True, schema
             require(set(shlex.split(environment))==expected_environment,'effective service environment differs: '+name)
             require('DropInPaths=\n' in result.stdout and ('FragmentPath='+str(path)+'\n' in result.stdout
                     or 'FragmentPath='+str(target)+'\n' in result.stdout),'service override: '+name)
-        expected_wrapper=f'#!/bin/sh\nexport HOME={root} TMPDIR={root}/tmp XDG_CONFIG_HOME={root}/vpn XDG_CACHE_HOME={root}/cache NB_STATE_DIR={root}/vpn NB_DNS_STATE_FILE={root}/vpn/state.json\nexec {root}/bin/netbird --daemon-addr unix://{root}/run/netbird.sock "$@"\n'
-        require((root/'tools/netbird-client').read_text()==expected_wrapper,'NetBird wrapper drift')
+        verify_vpn_wrapper(root,manifest,allow_legacy_integrations)
         registered=subprocess.run(['systemctl','list-unit-files','--no-legend','--no-pager','synergy*','posy*'],capture_output=True,text=True,check=True)
         external={line.split()[0] for line in registered.stdout.splitlines() if line.strip()} - set(lifecycle.rendered_units(root))
         controller=root/'tmp/controller/policy.json'

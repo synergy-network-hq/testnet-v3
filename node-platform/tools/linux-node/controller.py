@@ -28,11 +28,11 @@ MAX_REQUEST = 16384
 MAX_GENESIS_STAGE_REQUEST = 12*1024*1024
 GENESIS_FILES = {'genesis.json':4*1024*1024,'authority.json':1024*1024,'authority-root.pub':8192}
 ENGINE_MODULES = frozenset(('controller.py','synergy_linux.py','lifecycle.py','conformance.py',
-                            'apqe_layout.py','vpn.py','canary_rpc_relay.py','root_guard.py'))
-READS = frozenset(('target','inventory','health','install_preflight','upgrade_preflight',
+                            'apqe_layout.py','vpn.py','canary_rpc_relay.py','root_guard.py','guest_lifecycle.py'))
+READS = frozenset(('network_transport_status','network_transport_export','guest_preflight','guest_status','target','inventory','health','install_preflight','upgrade_preflight',
                   'recovery_preflight','uninstall_preflight','vpn_status','diagnostics','identity_preflight','identity_status',
                   'formation_preflight','formation_status','formation_export','genesis_stage_preflight','genesis_binding_preflight','authorization_status','network_formation_status','network_formation_export'))
-MUTATIONS = frozenset(('install','commission','register','vpn_enroll','start','stop','restart','upgrade','uninstall','identity_generate',
+MUTATIONS = frozenset(('network_transport_prepare','network_transport_sign','guest_create','guest_stop','guest_remove','install','commission','register','vpn_enroll','vpn_bind','vpn_retire','start','stop','restart','upgrade','uninstall','identity_generate',
                        'formation_prepare','genesis_stage','genesis_bind','network_formation_prepare','network_formation_sign'))
 FORMATION_CONTEXT = 'tmp/formation-context.json'
 FORMATION_CUSTODY = 'tmp/pre-genesis-validator'
@@ -71,7 +71,7 @@ def canonical(value):
 
 def request_digest(request):
     encoded=(json.dumps(request,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode('utf-8')
-             if request['operation'] in ('genesis_stage','network_formation_prepare') else canonical(request))
+             if request['operation'] in ('genesis_stage','network_formation_prepare','network_transport_prepare') else canonical(request))
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -151,7 +151,16 @@ def parse_request(raw):
     operation, parameters = value['operation'], value['parameters']
     require(isinstance(operation,str) and operation in READS | MUTATIONS
             and isinstance(parameters,dict), 'Unsupported operation', 'invalid_request')
-    require(operation=='genesis_stage' or operation=='network_formation_prepare' and len(raw)<=2*1024*1024 or len(raw)<=MAX_REQUEST,'Request exceeds operation limit','invalid_request')
+    require(operation=='genesis_stage' or operation in ('network_formation_prepare','network_transport_prepare') and len(raw)<=2*1024*1024 or len(raw)<=MAX_REQUEST,'Request exceeds operation limit','invalid_request')
+    if operation.startswith('network_transport_'):
+        transport_parameters(operation,parameters)
+        return value
+    if operation.startswith('guest_'):
+        from guest_lifecycle import validate_parameters
+        try: validate_parameters(operation, parameters)
+        except (ValueError, KeyError, TypeError):
+            raise Refused('invalid_request', 'Invalid bounded guest parameters') from None
+        return value
     expected = INSTALL if operation in ('install','install_preflight') else SELECT if operation in ('upgrade','upgrade_preflight') else {'confirmation'} if operation == 'uninstall' else {'genesis_sha256'} if operation in ('identity_generate','genesis_bind') else {'formation_sha256'} if operation=='formation_prepare' else {'artifacts'} if operation=='genesis_stage' else {'formation_sha256','recipe_json','registrations_json'} if operation=='network_formation_prepare' else {'review_sha256'} if operation=='network_formation_sign' else set()
     require(set(parameters) == expected, 'Unexpected operation parameters', 'invalid_request')
     if operation=='network_formation_prepare':
@@ -175,6 +184,100 @@ def parse_request(raw):
         pin=parameters[name]
         require(isinstance(pin,str) and re.fullmatch('[0-9a-f]{64}',pin),'Exact public artifact SHA-256 required','invalid_request')
     return value
+
+
+def transport_parameters(operation,p):
+    fields={'formation_sha256','genesis_review_sha256','target_provider_report_sha256','valid_from_unix','expires_at_unix','members'}
+    require(set(p)==(fields if operation=='network_transport_prepare' else {'review_sha256'} if operation=='network_transport_sign' else set()),
+            'Exact transport parameters required','invalid_request')
+    for key in set(p)&{'formation_sha256','genesis_review_sha256','target_provider_report_sha256','review_sha256'}:
+        require(isinstance(p[key],str) and re.fullmatch('[a-f0-9]{64}',p[key]),'Exact transport pin required','invalid_request')
+    if operation!='network_transport_prepare':return
+    require(all(type(p[k]) is int and 0<=p[k]<2**53 for k in ('valid_from_unix','expires_at_unix'))
+            and 0<p['expires_at_unix']-p['valid_from_unix']<=7*86400,'Bounded transport validity required','invalid_request')
+    require(isinstance(p['members'],list) and len(p['members'])==5,'Five public enrollments required','invalid_request')
+    for m in p['members']:
+        require(isinstance(m,dict) and set(m)=={'enrollment_json','configuration_json','dial_address','transport_key_id'},'Exact public member fields required','invalid_request')
+        for key,limit in (('enrollment_json',128*1024),('configuration_json',64*1024)):
+            require(isinstance(m[key],str) and 0<len(m[key].encode('utf-8'))<=limit,'Bounded public member required','invalid_request')
+        require(isinstance(m['transport_key_id'],str) and 0<len(m['transport_key_id'])<=128
+                and all(0x21<=ord(c)<=0x7e for c in m['transport_key_id']),'ASCII transport key identifier required','invalid_request')
+        value=m['dial_address']
+        require(isinstance(value,str) and len(value)<=128,'Literal isolated socket required','invalid_request')
+        try:
+            match=re.fullmatch(r'\[([0-9a-fA-F:]+)\]:([0-9]{1,5})|([0-9.]+):([0-9]{1,5})',value)
+            require(match is not None,'Literal isolated socket required','invalid_request')
+            address=ipaddress.ip_address(match[1] or match[3]);port=int(match[2] or match[4])
+            ranges=('127.0.0.0/8','10.0.0.0/8','172.16.0.0/12','192.168.0.0/16','100.64.0.0/10','::1/128','fc00::/7')
+            require(0<port<=65535 and any(address in ipaddress.ip_network(n) for n in ranges),
+                    'Literal isolated socket required','invalid_request')
+        except ValueError:raise Refused('invalid_request','Literal isolated socket required') from None
+
+
+def validate_transport_export(value,review,source):
+    files={'network/genesis.json','network/authority.json','network/authority-root.pub','network/network-manifest.json',
+           'network/transport-registry.json','network/transport-root.pub','config/node.json','config/start-authorized.json'}
+    require(isinstance(value,dict) and set(value)=={'schema','review_sha256','registry_sha256','issuer_root_sha256','fleet_readiness_verified','nodes'}
+            and value['schema']=='nodenetwork-network-transport-export-v1' and value['fleet_readiness_verified'] is False
+            and all(value[k]==review[k] for k in ('review_sha256','registry_sha256','issuer_root_sha256'))
+            and isinstance(value['nodes'],list) and len(value['nodes'])==5,'Exact reviewed public transport export required')
+    require(len(json.dumps(value,separators=(',',':'),ensure_ascii=False).encode('utf-8'))<=4*1024*1024,'Public transport export exceeds bound')
+    seen=set();shared=None
+    pins={'network/genesis.json':source['genesis_sha256'],'network/authority.json':source['authority_sha256'],
+          'network/authority-root.pub':source['authority_root_sha256'],'network/transport-registry.json':review['registry_sha256'],
+          'network/transport-root.pub':review['issuer_root_sha256']}
+    for node in value['nodes']:
+        require(isinstance(node,dict) and set(node)=={'address','artifacts'} and isinstance(node['address'],str)
+                and node['address'] in review['validator_addresses'] and node['address'] not in seen
+                and isinstance(node['artifacts'],dict) and set(node['artifacts'])==files,'Exact public member export required')
+        seen.add(node['address']);artifacts=node['artifacts']
+        for name,text in artifacts.items():
+            require(isinstance(text,str) and 0<len(text.encode('utf-8'))<=1024*1024,'Bounded public artifact required')
+            if name.endswith('.pub'):
+                try:raw=base64.b64decode(text,validate=True)
+                except (ValueError,binascii.Error):raise Refused('operation_refused','Invalid public root encoding') from None
+                require(base64.b64encode(raw).decode()==text and len(raw)==(2592 if name.endswith('transport-root.pub') else 1952),'Exact APQE public root required')
+            else:raw=text.encode('utf-8')
+            if name in pins:require(hashlib.sha256(raw).hexdigest()==pins[name],'Public transport artifact digest differs')
+        network={k:v for k,v in artifacts.items() if k.startswith('network/')}
+        require(shared is None or shared==network,'Shared signed network artifacts differ')
+        shared=network
+        start=json.loads(artifacts['config/start-authorized.json'])
+        require(isinstance(start,dict) and start.get('production_approved') is False and start.get('all_validators_ready') is False
+                and start.get('all_pairs_vpn_verified') is False and set(start.get('validator_addresses',[]))==set(review['validator_addresses']),
+                'Export must not claim fleet readiness or production admission')
+    require(seen==set(review['validator_addresses']),'Public transport export roster differs')
+
+
+def engineering_effective_selection(root, policy):
+    """Resolve only a sealed installation reached through native-reviewed adoption.
+
+    The immutable initial selection is never replaced by renderer parameters.
+    Staging a candidate does not imply that the validator has been upgraded.
+    """
+    origin=policy.get('engineering_selection')
+    if origin is None:return None
+    selected=dict(origin)
+    update=policy.get('engineering_update')
+    if update is not None:
+        require(isinstance(update,dict) and update.get('initial_sha256')==policy.get('engineering_initial_authorization_sha256')
+                and update.get('formation_sha256')==policy.get('validator_formation_sha256'), 'Update origin differs')
+        for value in (update.get('previous_selection'),update.get('selection')):
+            require(isinstance(value,dict) and set(value)==set(origin)
+                    and all(value.get(k)==origin.get(k) for k in ('network_id','chain_id','node_name')),
+                    'Update changes the initial network')
+            approved=policy.get('releases',{}).get(value['release_id'],{})
+            require(approved.get('manifest_sha256')==value['manifest_sha256']
+                    and approved.get('inventory_authenticated') is True
+                    and approved.get('networks',{}).get(value['network_id'])==value['chain_id'], 'Update inventory is unapproved')
+        from lifecycle import _sealed_receipt
+        receipt,manifest=_sealed_receipt(root)
+        matches=[value for value in (update['previous_selection'],update['selection'])
+                 if value['manifest_sha256']==receipt.get('package_sha256') and value['release_id']==manifest.get('release_id')
+                 and all(value[k]==receipt.get(k) for k in ('network_id','chain_id','node_name'))]
+        require(len(matches)==1,'Installed release has no exact native adoption lineage')
+        selected=dict(matches[0])
+    return selected
 
 
 class Controller:
@@ -248,11 +351,19 @@ class Controller:
                     and grant.get('authorization_sequence')==policy['engineering_authorization']['sequence'],'Exact engineering grant operation or receipt differs','authorization_required')
             if request['operation'] in ('install','upgrade'):
                 selected=policy.get('engineering_selection',{})
+                if request['operation']=='upgrade':
+                    current=engineering_effective_selection(self.root,policy)
+                    update=policy.get('engineering_update',{})
+                    require(update.get('previous_selection')==current,'Upgrade requires its exact not-yet-installed native adoption','authorization_required')
+                    selected=update.get('selection',{})
                 expected=INSTALL if request['operation']=='install' else SELECT
                 require(request['parameters']=={key:selected.get(key) for key in expected},'Engineering installation selection differs','authorization_required')
         if request['operation']=='vpn_enroll':
             require(enrollment_pin is not None and grant.get('enrollment_sha256')==enrollment_pin,
                     'One-time host grant does not bind this VPN enrollment','authorization_required')
+        if request['operation'] in ('vpn_bind','vpn_retire'):
+            require(enrollment_pin is not None and grant.get('binding_sha256')==enrollment_pin,
+                    'Exact native-verified VPN server binding required','authorization_required')
         # Consume before executing. Ambiguous outcomes need observation and a
         # fresh operator grant, never blind resubmission or replay.
         self.audit(request)
@@ -372,6 +483,89 @@ class Controller:
                 require(sign_request['operation']=='network_formation_sign' and result.get('sign_request_sha256')==request_digest(sign_request)
                         and sign_request['parameters']['review_sha256']==result.get('review_sha256'),'Native signing evidence differs')
             return result
+
+    def network_transport(self,request):
+        from lifecycle import _lifecycle_lock, _unit_state, _assert_no_application_processes
+        from synergy_linux import native
+        op=request['operation'];p=request['parameters']
+        directory=self.root/'tmp/network-transport'
+        prepare=self.root/'tmp/network-transport-prepare-request.json'
+        signing=self.root/'tmp/network-transport-sign-request.json'
+        formation=self.root/'tmp/network-formation'
+        with _lifecycle_lock(self.root):
+            selection,flags=self.formation_context()
+            source=json.loads(native([self.root/'bin/synergy-keytool','review-network-formation',self.formation_context_path(),selection['formation_sha256'],formation,*flags]))
+            require(source.get('schema')=='nodenetwork-network-formation-v1' and source.get('signed') is True
+                    and source.get('formation_sha256')==selection['formation_sha256']
+                    and source.get('network_id')==selection['network_id'] and source.get('chain_id')==selection['chain_id'],
+                    'Verified signed Genesis formation required')
+            if op=='network_transport_status' and not any(path.exists() or path.is_symlink() for path in (directory,prepare,signing)):
+                return {'schema':'nodenetwork-network-transport-v1','pending':False,'formation_sha256':selection['formation_sha256'],
+                        'genesis_review_sha256':source['review_sha256'],'target_provider_report_sha256':flags[-1],
+                        'network_id':selection['network_id'],'chain_id':selection['chain_id']}
+            if op in ('network_transport_prepare','network_transport_sign'):
+                state=_unit_state('synergy-node.service')
+                require((state.get('ActiveState') in ('inactive','failed') or state.get('LoadState')=='not-found')
+                        and int(state.get('MainPID',0) or 0)==0,'Stop the node before transport issuance')
+                _assert_no_application_processes(self.root,vpn_pid=_unit_state('synergy-vpn.service').get('MainPID'))
+                if op=='network_transport_prepare':
+                    require(p['formation_sha256']==selection['formation_sha256'] and p['genesis_review_sha256']==source['review_sha256']
+                            and p['target_provider_report_sha256']==flags[-1],'Exact signed Genesis and installed provider required')
+                    require(not any(path.exists() or path.is_symlink() for path in (directory,prepare,signing)),
+                            'Existing transport issuance must be reconciled; no regeneration','reconciliation_required')
+                    path=prepare
+                else:
+                    self.direct(prepare,True,2*1024*1024)
+                    require(directory.is_dir() and not directory.is_symlink(),'No prepared transport issuance')
+                    require(not signing.exists() and not signing.is_symlink(),'Signing already dispatched; read status','reconciliation_required')
+                    current=json.loads(native([self.root/'bin/synergy-keytool','review-network-transport',self.formation_context_path(),selection['formation_sha256'],formation,directory,*flags]))
+                    self.transport_receipt(current,selection,source,prepare,signing,check_sign=False)
+                    require(current.get('signed') is False and current.get('review_sha256')==p['review_sha256'],'Exact unsigned transport review changed')
+                    path=signing
+                self.authorize(request)
+                raw=json.dumps(request,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode('utf-8')
+                fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+                with os.fdopen(fd,'wb') as stream:stream.write(raw);stream.flush();os.fsync(stream.fileno())
+                sync_directory(path.parent)
+                command='prepare-network-transport' if op=='network_transport_prepare' else 'sign-network-transport'
+                args=[path,request_digest(request),directory] if op=='network_transport_prepare' else [directory,path,request_digest(request)]
+            else:
+                self.direct(prepare,True,2*1024*1024)
+                command='export-network-transport' if op=='network_transport_export' else 'review-network-transport'
+                args=[directory]
+            result=json.loads(native([self.root/'bin/synergy-keytool',command,self.formation_context_path(),selection['formation_sha256'],formation,*args,*flags],
+                                     maximum_stdout=4*1024*1024+1 if op=='network_transport_export' else 1024*1024))
+            if op=='network_transport_export':
+                # Reverify the durable review/sign requests before releasing public files.
+                checked=json.loads(native([self.root/'bin/synergy-keytool','review-network-transport',self.formation_context_path(),selection['formation_sha256'],formation,directory,*flags]))
+                self.transport_receipt(checked,selection,source,prepare,signing)
+                require(checked.get('signed') is True,'Reviewed transport signature required')
+                validate_transport_export(result,checked,source)
+                return result
+            self.transport_receipt(result,selection,source,prepare,signing)
+            return result
+
+    def transport_receipt(self,result,selection,source,prepare,signing,check_sign=True):
+        require(isinstance(result,dict) and result.get('schema')=='nodenetwork-network-transport-v1' and result.get('pending') is True
+                and type(result.get('signed')) is bool and result.get('formation_sha256')==selection['formation_sha256']
+                and result.get('genesis_review_sha256')==source['review_sha256']
+                and result.get('genesis_sha256')==source['genesis_sha256'] and result.get('authority_sha256')==source['authority_sha256']
+                and result.get('runtime_admission') is False and result.get('fleet_readiness_verified') is False,
+                'Native transport scope or admission differs')
+        prepared=parse_request(self.direct(prepare,True,2*1024*1024).read_bytes())
+        require(prepared['operation']=='network_transport_prepare' and result.get('request_sha256')==request_digest(prepared),
+                'Native transport preparation request differs')
+        addresses=result.get('validator_addresses')
+        require(isinstance(addresses,list) and len(addresses)==5 and all(isinstance(v,str) for v in addresses)
+                and len(set(addresses))==5 and set(addresses)==set(source.get('validator_addresses',[])), 'Transport roster differs from signed Genesis')
+        for field in ('review_sha256','issuer_root_sha256'):
+            require(isinstance(result.get(field),str) and re.fullmatch('[a-f0-9]{64}',result[field]),'Exact native transport pin required')
+        if check_sign:
+            require(result['signed']==(signing.exists() or signing.is_symlink()),'Incomplete transport signing requires reconciliation')
+        if result['signed']:
+            signed=parse_request(self.direct(signing,True).read_bytes())
+            require(signed['operation']=='network_transport_sign' and signed['parameters']['review_sha256']==result['review_sha256']
+                    and result.get('sign_request_sha256')==request_digest(signed),'Native transport signing request differs')
 
     def formation_preflight(self):
         require(not any(self.exists(path) for path in (FORMATION_CUSTODY,FORMATION_INTENT,
@@ -677,10 +871,21 @@ class Controller:
                                and current['publicKey']==local['wireguard_public_key']
                                and ipaddress.ip_interface(current['netbirdIp'])==ipaddress.ip_interface(overlay))
                 except (ValueError,OSError,KeyError,TypeError,subprocess.SubprocessError): pass
+        retired=False
+        retirement=self.root/'evidence/vpn-retirement.json'
+        if retirement.exists() or retirement.is_symlink():
+            from vpn import validate_retirement_receipt
+            self.public_json(retirement,True)
+            require(recorded and bound,'Retirement lacks current enrolled binding')
+            validate_retirement_receipt(retirement.read_bytes(),enrollment.read_bytes(),binding.read_bytes())
+            retired=True
         return {'schema':'nodenetwork-vpn-status-v1','service_registered':service is not None,
                 'enrollment_staged':self.vpn_stage() is not None,'enrollment_recorded':recorded,
                 'reconciliation_required':attempted and not recorded,
-                'server_bound':bound,'connected':connected,'overlay_address':overlay}
+                'server_bound':bound,'connected':connected,'overlay_address':overlay,
+                'enrollment':local if recorded else None,'server_binding':server if bound else None,
+                'enrollment_sha256':hashlib.sha256(enrollment.read_bytes()).hexdigest() if recorded else None,
+                'server_binding_sha256':hashlib.sha256(binding.read_bytes()).hexdigest() if bound else None,'retired':retired}
 
     def vpn_enroll(self,request):
         import lifecycle as life
@@ -712,6 +917,46 @@ class Controller:
                 raise Refused('vpn_reconciliation_required',
                               'VPN enrollment did not return a verified receipt. Inspect the VPN controller before issuing another credential.') from None
         return self.vpn_status()
+
+    def vpn_bind(self,request):
+        import lifecycle as life
+        from vpn import bind_server
+        with life._lifecycle_lock(self.root):
+            life._sealed_receipt(self.root)
+            policy=self.policy()
+            path=self.control/'authorization/inputs/vpn-server-binding.json'
+            server=self.public_json(path,True)
+            raw=path.read_bytes()
+            digest=hashlib.sha256(raw).hexdigest()
+            require(policy.get('authorization_files',{}).get('vpn-server-binding.json')==digest,
+                    'VPN binding differs from native-approved artifact','authorization_required')
+            require(set(server)=={'peer_id','ip','name','hostname','connected','new_peer_verified',
+                    'one_off_usage_verified','wireguard_public_key','binding','setup_key_id',
+                    'provider_account_id','one_off_usage_evidence'},'Exact native provider binding required')
+            require(server['wireguard_public_key']==self.public_json(self.root/'evidence/vpn-enrollment.json',True)['wireguard_public_key'],
+                    'Native VPN public identity differs')
+            current=self.vpn_status()
+            require(current['connected'] is True and current['server_bound'] is False,
+                    'Fresh connected unbound VPN required')
+            self.authorize(request,digest)
+            bind_server(self.root,{**server,'id':server['peer_id']})
+        return self.vpn_status()
+
+    def vpn_retire(self,request):
+        import lifecycle as life
+        from vpn import validate_retirement_receipt, _retirement_write, RETIREMENT
+        with life._lifecycle_lock(self.root):
+            life._sealed_receipt(self.root)
+            path=self.control/'authorization/inputs/vpn-retirement.json'
+            receipt=self.public_json(path,True);raw=path.read_bytes();digest=hashlib.sha256(raw).hexdigest()
+            require(self.policy().get('authorization_files',{}).get('vpn-retirement.json')==digest,
+                    'Retirement differs from native-verified provider absence','authorization_required')
+            evidence=self.root/'evidence'
+            validate_retirement_receipt(raw,(evidence/'vpn-enrollment.json').read_bytes(),
+                                         (evidence/'vpn-server-binding.json').read_bytes())
+            self.authorize(request,digest)
+            _retirement_write(evidence/RETIREMENT,receipt)
+        return {'schema':'nodenetwork-vpn-retirement-v1','retired':True,'absence_verified':True,'peer_id':receipt['peer_id']}
 
     def require_bound_validator_vpn(self):
         current=self.vpn_status()
@@ -756,10 +1001,12 @@ class Controller:
     def target(self):
         supported=platform.system()=='Linux' and platform.machine()=='x86_64'
         try: policy=self.policy(); qualified=set(policy['qualified_operations']); blocker=None
-        except (Refused,OSError,ValueError): qualified=set(); blocker='Host controller policy is not enrolled or valid'
+        except (Refused,OSError,ValueError): policy={}; qualified=set(); blocker='Host controller policy is not enrolled or valid'
         operations=[]
         for op in sorted(READS | MUTATIONS):
             reason=None if op in READS else blocker or ('Operation has not passed host qualification' if op not in qualified else None)
+            if op.startswith('guest_') and not isinstance(policy.get('managed_guest'),dict):
+                reason='Independently approved guest image, toolchain and resources required'
             if not supported and op!='target': reason='Linux x86_64 target required'
             operations.append({'operation':op,'kind':'read' if op in READS else 'mutation','available':reason is None,'blocker':reason})
         return {'controllerVersion':1,'platform':platform.system().lower(),'architecture':platform.machine(),
@@ -796,9 +1043,21 @@ class Controller:
                 life._sealed_receipt(safe_root(self.root))
                 return {'packageVerified':True,'release':manifest['release_id'],'automaticRestart':False}
         else: safe_root(self.root)
+        if op.startswith('guest_'):
+            from guest_lifecycle import GuestManager
+            with life._lifecycle_lock(self.root):
+                life._sealed_receipt(self.root)
+                guest=GuestManager(self.root,self.policy())
+                if op=='guest_preflight': return guest.preflight(p)
+                if op=='guest_status': return guest.status(p)
+                if op=='guest_create': return guest.create(p,request_digest(request),lambda:self.authorize(request))
+                if op=='guest_stop': return guest.stop(p,lambda:self.authorize(request))
+                if op=='guest_remove': return guest.remove(p,request_digest(request),lambda:self.authorize(request))
         if op=='health': return json.loads(native([self.root/'bin/synergy-node','health','--admin-socket',self.root/'run/admin.sock']))
         if op=='vpn_status': return self.vpn_status()
         if op=='vpn_enroll': return self.vpn_enroll(request)
+        if op=='vpn_bind': return self.vpn_bind(request)
+        if op=='vpn_retire': return self.vpn_retire(request)
         if op=='identity_preflight': return self.identity_preflight()[0]
         if op=='identity_status': return self.identity_status()
         if op=='authorization_status':
@@ -806,12 +1065,15 @@ class Controller:
             record=self.policy().get('engineering_authorization')
             return {'schema':'nodenetwork-engineering-authorization-status-v1','authorization':record,
                     'initial_sha256':self.policy().get('engineering_initial_authorization_sha256'),
-                    'selection':self.policy().get('engineering_selection'), 'target':self.policy().get('engineering_target'),
+                    'selection':engineering_effective_selection(self.root,self.policy()),
+                    'initial_selection':self.policy().get('engineering_selection'),
+                    'update':self.policy().get('engineering_update'), 'target':self.policy().get('engineering_target'),
                     'formation_sha256':self.policy().get('validator_formation_sha256'),
                     'genesis_pins':self.policy().get('validator_identity_network'),
                     'pending_grants':[path.stem for path in (self.control/'grants').iterdir() if self.public_json(path,True).get('expires_at',0)>time.time()]}
         if op=='identity_generate': return self.identity_generate(request)
         if op.startswith('network_formation_'): return self.network_formation(request)
+        if op.startswith('network_transport_'): return self.network_transport(request)
         if op=='formation_preflight':
             with life._lifecycle_lock(self.root): return self.formation_preflight()[0]
         if op=='formation_status': return self.formation_status()
@@ -897,7 +1159,12 @@ def control_inventory(root):
     authorization=policy.get('authorization_files',{})
     require(isinstance(authorization,dict),'Malformed authorization inventory')
     # Fixed input names only. Never grants arbitrary caller-selected paths.
-    AUTHORIZATION_FILES={'formation-context.json':4096,**{'commissioning/'+name:6*1024*1024 for name in __import__('apqe_layout').FORMATION_PUBLIC_INPUTS}}
+    AUTHORIZATION_FILES={'formation-context.json':4096,'vpn-ca.pem':128*1024,'vpn-provider.json':16384,
+        'vpn-server-binding.json':16384,'vpn-retirement.json':16384,
+        'commissioning/config/node.json':1024*1024,'commissioning/config/start-authorized.json':65536,
+        **{'commissioning/network/'+name:limit for name,limit in {
+            'genesis.json':4*1024*1024,'authority.json':1024*1024,'authority-root.pub':8192,
+            'network-manifest.json':1024*1024,'transport-registry.json':1024*1024,'transport-root.pub':8192}.items()}}
     require(set(authorization)<=set(AUTHORIZATION_FILES)-{VPN_ENROLLMENT},'Unexpected authorization input')
     for name,pin in authorization.items():
         path=c.direct(c.control/'authorization/inputs'/name,True,AUTHORIZATION_FILES[name])

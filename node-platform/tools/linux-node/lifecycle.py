@@ -96,7 +96,7 @@ Environment=XDG_CONFIG_HOME={root}/vpn
 Environment=XDG_CACHE_HOME={root}/cache
 Environment=NB_STATE_DIR={root}/vpn
 Environment=NB_DNS_STATE_FILE={root}/vpn/state.json
-ExecStart={root}/bin/netbird service run --config {root}/vpn/default.json --daemon-addr unix://{root}/run/netbird.sock --log-file {root}/logs/netbird.log
+ExecStart={root}/tools/netbird-client service run --config {root}/vpn/default.json --daemon-addr unix://{root}/run/netbird.sock --log-file {root}/logs/netbird.log
 Restart=on-failure
 RestartSec=5s
 StandardOutput=append:{root}/logs/netbird-service.log
@@ -108,7 +108,12 @@ WantedBy=multi-user.target
 
 
 def wrapper_text(root):
-    return f'#!/bin/sh\nexport HOME={root} TMPDIR={root}/tmp XDG_CONFIG_HOME={root}/vpn XDG_CACHE_HOME={root}/cache NB_STATE_DIR={root}/vpn NB_DNS_STATE_FILE={root}/vpn/state.json\nexec {root}/bin/netbird --daemon-addr unix://{root}/run/netbird.sock "$@"\n'
+    import shlex
+    code=("import sys;sys.path.insert(0,"+repr(str(root/'tools'))+");from vpn import client_exec;from pathlib import Path;"
+          "\ntry:client_exec(Path("+repr(str(root))+"),sys.argv[1:])"
+          "\nexcept Exception:sys.exit('Synergy VPN trust check refused')")
+    return (f'#!/bin/sh\nexport HOME={root} TMPDIR={root}/tmp XDG_CONFIG_HOME={root}/vpn XDG_CACHE_HOME={root}/cache NB_STATE_DIR={root}/vpn NB_DNS_STATE_FILE={root}/vpn/state.json\n'
+            +'exec /usr/bin/python3 -I -B -c '+shlex.quote(code)+' "$@"\n')
 
 
 def rendered_units(root):
@@ -661,18 +666,9 @@ def upgrade(root, package):
     token = digest(package/'package.json')
     staged = {'pending_upgrade_sha256': token} if contained else {}
     with _lifecycle_lock(root):
+        from guest_lifecycle import require_removed
+        require_removed(root)
         policy_path = root/'tmp/controller/policy.json'
-        if policy_path.exists() or policy_path.is_symlink():
-            from controller import Controller
-            from root_guard import check_registration, render
-            policy = Controller(root).policy()
-            guard_pin = policy.get('root_guard_sha256')
-            if guard_pin is not None:
-                check_registration(guard_pin)
-                guard_member = 'tools/root_guard.py'
-                require(guard_member in manifest['files'] and
-                        _hash_bytes(render(root,policy['host_account'],(package/guard_member).read_bytes())) == guard_pin,
-                        'Update changes the registered deletion guard; authenticated guard migration required')
         intent_path = root/UPGRADE_INTENT
         resumed = intent_path.exists()
         if resumed:
@@ -711,6 +707,17 @@ def upgrade(root, package):
                 require(set(candidate_units) == {Path(p).name for p in plan['paths']}, 'candidate service inventory differs')
                 intent['new_integration'] = {'root':str(root),'paths':plan['paths'],
                     'sha256':{str(UNIT_DIRECTORY/name):_hash_bytes(candidate_units[name].encode()) for name in candidate_units}}
+            if policy_path.exists() or policy_path.is_symlink():
+                from controller import Controller
+                import root_guard
+                policy=Controller(root).policy()
+                pin=policy.get('root_guard_sha256')
+                if pin is not None:
+                    member='tools/root_guard.py'
+                    require(member in manifest['files'] and member in receipt['package_files'], 'Complete guard provenance required')
+                    plan=root_guard.migration_plan(root,policy['host_account'],(package/member).read_bytes(),
+                                                  receipt['package_files'][member],pin)
+                    if plan['old_unit']!=plan['new_unit']:intent['guard_migration']=plan
             for name in set(receipt['package_files'])|set(manifest['files']): _software_path(root,name)
             _assert_no_application_processes(root) if plan is None else None
             # Persist the package-bound recovery plan before service/file changes.
@@ -722,6 +729,32 @@ def upgrade(root, package):
             require(state.get('MainPID') == '0' and state.get('ActiveState') in ('inactive','failed'), 'stop PoSy before upgrading')
         vpn_pid=owned['synergy-vpn.service'].get('MainPID') if registered else None
         _assert_no_application_processes(root,vpn_pid=vpn_pid)
+        if policy_path.exists() or policy_path.is_symlink():
+            from controller import Controller
+            import base64
+            import root_guard
+            policy=Controller(root).policy()
+            pin=policy.get('root_guard_sha256')
+            migration=intent.get('guard_migration')
+            if migration is not None:
+                old_pin=_hash_bytes(base64.b64decode(migration['old_unit'],validate=True))
+                new_pin=_hash_bytes(base64.b64decode(migration['new_unit'],validate=True))
+                require(pin in (old_pin,new_pin),'Guard policy is outside recorded upgrade')
+                member='tools/root_guard.py'
+                require(member in manifest['files'] and member in receipt['package_files'],'Complete guard provenance required')
+                root_guard.migration_plan(root,policy['host_account'],(package/member).read_bytes(),
+                                          receipt['package_files'][member],old_pin,migration)
+                def set_guard_pin(value):
+                    current=Controller(root).policy()
+                    require(current.get('root_guard_sha256') in (old_pin,new_pin),'Guard policy changed during upgrade')
+                    current['root_guard_sha256']=value
+                    _replace_bytes(root,policy_path,json.dumps(current,sort_keys=True).encode(),0o600,token)
+                root_guard.migrate(root,policy['host_account'],migration,set_guard_pin)
+            elif pin is not None:
+                root_guard.check_registration(pin)
+                member='tools/root_guard.py'
+                require(member in manifest['files'] and _hash_bytes(root_guard.render(root,policy['host_account'],(package/member).read_bytes()))==pin,
+                        'Unrecorded guard migration refused')
         new_receipt = dict(receipt,package_sha256=token,package_files=manifest['files'])
         current_receipt = read(root/'installation.json')
         require(current_receipt in (receipt,new_receipt), 'installation receipt is outside recorded upgrade')
@@ -801,6 +834,8 @@ def remove(root, confirmation):
     _reject_installation_mounts(root)
     guard = None
     with _lifecycle_lock(root):
+        from guest_lifecycle import require_removed
+        require_removed(root)
         require(not (root/UPGRADE_INTENT).exists(), 'finish recorded upgrade before uninstall')
         require_vpn_retired_for_removal(root)
         if (root/'tmp/controller/policy.json').exists():
@@ -996,6 +1031,8 @@ def replace_application(root, package, staged, authorization):
     _require_operator()
     require(authorization==str(root),'exact --replace-root authorization required')
     with _lifecycle_lock(root):
+        from guest_lifecycle import require_removed
+        require_removed(root)
         return _replace_application_locked(root, package, staged, authorization)
 
 
@@ -1056,7 +1093,7 @@ def finish_replacement(root, package, staged):
                 'interrupted replacement requires the identical validated package and stage')
         vpn_hashes=intent.get('vpn_sha256',{})
         require({'bin/netbird','tools/netbird-client','evidence/host-integrations.json'}<=set(vpn_hashes)
-                and all(re.fullmatch(r'(?:bin/netbird|tools/netbird-client|evidence/(?:host-integrations|vpn-[\w-]+)\.json|systemd/[\w.-]*vpn[\w.-]*)',name)
+                and all(re.fullmatch(r'(?:bin/netbird|tools/netbird-client|tmp/controller/authorization/inputs/vpn-(?:ca\.pem|provider\.json)|evidence/(?:host-integrations|vpn-[\w-]+)\.json|systemd/[\w.-]*vpn[\w.-]*)',name)
                         and re.fullmatch(r'[a-f0-9]{64}',value) for name,value in vpn_hashes.items()),
                 'interrupted replacement VPN preservation inventory differs')
         require(receipt.get('consensus_started') is False, 'replacement already started consensus')
@@ -1131,6 +1168,14 @@ def _replace_application_locked(root, package, staged, authorization):
     require(vpn.get('ActiveState')=='active' and vpn_pid>1,'owned VPN must remain active during application replacement')
     _assert_no_application_processes(root,vpn_pid=vpn_pid)
     preserved=['bin/netbird','tools/netbird-client','evidence/host-integrations.json']
+    # The private-CA carrier trust remains exact through application replacement.
+    # No credential contents or copies are needed to bind these public inputs.
+    from vpn import client_environment
+    client_environment(root)
+    for name in ('vpn-ca.pem','vpn-provider.json'):
+        relative='tmp/controller/authorization/inputs/'+name
+        if (root/relative).exists() or (root/relative).is_symlink():preserved.append(relative)
+
     # The running VPN owns mutable state under vpn/. Never write, delete or
     # snapshot-copy that namespace; its daemon may legitimately update bytes.
     preserved += [str(path.relative_to(root)) for path in (root/'evidence').glob('vpn-*.json')]

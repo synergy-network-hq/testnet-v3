@@ -25,6 +25,58 @@ sys.dont_write_bytecode = True
 from synergy_linux import native, read, require, safe_root, write_new
 
 
+def client_environment(root):
+    """Per-process TLS trust; never modifies the host certificate store."""
+    from controller import Controller
+    root=Path(root);c=Controller(root)
+    env=os.environ.copy()
+    inputs=root/'tmp/controller/authorization/inputs'
+    paths={name:inputs/name for name in ('vpn-ca.pem','vpn-provider.json')}
+    policy_path=c.control/'policy.json'
+    policy=c.policy() if policy_path.exists() or policy_path.is_symlink() else {}
+    pins=policy.get('authorization_files',{})
+    require(isinstance(pins,dict),'Malformed VPN trust inventory')
+    selected=any(name in pins or path.exists() or path.is_symlink() for name,path in paths.items())
+    if not selected:return env
+    auth=policy.get('engineering_authorization',{})
+    pin=lambda value:isinstance(value,str) and re.fullmatch('[a-f0-9]{64}',value) is not None
+    require(pin(policy.get('engineering_initial_authorization_sha256')) and isinstance(auth,dict)
+            and pin(auth.get('sha256')) and type(auth.get('sequence')) is int and 0<auth['sequence']<2**53,
+            'VPN private CA requires independently approved engineering scope')
+    raw={}
+    for name,path in paths.items():
+        require(pin(pins.get(name)),'Both approved VPN provider and CA required')
+        raw[name]=c.direct(path,True,128*1024 if name.endswith('.pem') else 16384).read_bytes()
+        require(hashlib.sha256(raw[name]).hexdigest()==pins[name],'Approved VPN trust artifact changed')
+    provider=json.loads(raw['vpn-provider.json'])
+    require(isinstance(provider,dict) and type(provider.get('version')) is int and provider['version']==1
+            and provider.get('profile')=='nodenetwork-debug-vpn-provider-v1'
+            and provider.get('ca_sha256')==pins['vpn-ca.pem'],'Only exact isolated engineering CA scope is supported')
+    ca=raw['vpn-ca.pem']
+    require(b'PRIVATE KEY' not in ca and ca.count(b'-----BEGIN CERTIFICATE-----')>=1,'Public CA certificate required')
+    context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.load_verify_locations(cadata=ca.decode('ascii'))
+    require(context.get_ca_certs(),'VPN trust input contains no CA certificate')
+    env.pop('SSL_CERT_DIR',None)
+    env['SSL_CERT_FILE']=str(paths['vpn-ca.pem'])
+    return env
+
+
+def client_exec(root,args):
+    """Fixed wrapper entrypoint; credentials remain file-backed native inputs."""
+    root=Path(root)
+    require(isinstance(args,list) and 0<len(args)<=64 and all(isinstance(a,str) and len(a)<=4096 for a in args)
+            and sum(map(len,args))<=16384,'Bounded VPN arguments required')
+    env=client_environment(root)
+    if args[:2]==['service','run']:
+        expected=['service','run','--config',str(root/'vpn/default.json'),'--daemon-addr',
+                  'unix://'+str(root/'run/netbird.sock'),'--log-file',str(root/'logs/netbird.log')]
+        require(args==expected,'Exact attributed daemon invocation required')
+        argv=[str(root/'bin/netbird'),*args]
+    else:argv=[str(root/'bin/netbird'),'--daemon-addr','unix://'+str(root/'run/netbird.sock'),*args]
+    os.execve(str(root/'bin/netbird'),argv,env)
+
+
 def status(root, timeout=8):
     j = json.loads(native([root / 'tools/netbird-client', 'status', '--json'], timeout=timeout))
     require(j['management']['connected'] and j['signal']['connected'], 'management or signal disconnected')

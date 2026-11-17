@@ -51,4 +51,4 @@ class NetworkFormationTests(unittest.TestCase):
             self.assertEqual(len(linux.native(['public-tool'],maximum_stdout=2*1024*1024)),1024*1024+1)
         with patch.object(linux.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout=b'x'*(2*1024*1024+1))):
             with self.assertRaisesRegex(ValueError,'bound'):linux.native(['public-tool'],maximum_stdout=2*1024*1024)
-        with self.assertRaises(ValueError):linux.native(['public-tool'],maximum_stdout=2*1024*1024+1)
+        with self.assertRaises(ValueError):linux.native(['public-tool'],maximum_stdout=4*1024*1024+2)

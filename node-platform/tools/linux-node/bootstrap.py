@@ -24,6 +24,14 @@ sys.dont_write_bytecode=True
 ROOT=Path('/opt/synergy')
 LIMIT=256*1024*1024
 ENGINE=('controller.py','synergy_linux.py','lifecycle.py','conformance.py','apqe_layout.py','vpn.py','canary_rpc_relay.py','root_guard.py')
+def engine_names(files):
+    return (*ENGINE,'guest_lifecycle.py') if 'tools/guest_lifecycle.py' in files else ENGINE
+
+def enrolled_engine(policy):
+    names=set(policy.get('engine_files',{}))
+    require(names in (set(ENGINE),set((*ENGINE,'guest_lifecycle.py'))),'Incomplete enrolled engine')
+    return tuple(sorted(names))
+
 HOST_LINKS={'sshd.conf':Path('/etc/ssh/sshd_config.d/synergy-nodenetwork.conf'),
             'sudoers':Path('/etc/sudoers.d/synergy-nodenetwork')}
 DIRECTORIES={'bin','lib','assets','config','network','systemd','tools','data','keys','logs','cache','tmp','run','vpn','snapshots','recovery','evidence','roles'}
@@ -162,7 +170,7 @@ def bootstrap(stream):
     try:
         stage.mkdir(parents=True,mode=0o700)
         manifest=extract(stream,stage,header)
-        for name in ENGINE:
+        for name in engine_names(manifest['files']):
             target=control/'controller.py' if name=='controller.py' else control/'tools'/name
             save(target,(stage/'tools'/name).read_bytes())
         (control/'grants').mkdir(mode=0o700)
@@ -219,6 +227,59 @@ def bootstrap(stream):
         raise
 
 
+def effective_engineering_selection(root,policy):
+    module=__import__('controller')
+    if hasattr(module,'engineering_effective_selection'):
+        return module.engineering_effective_selection(root,policy)
+    # The first update may upgrade the original approved controller itself.
+    # An old controller may describe only its immutable original selection.
+    require(policy.get('engineering_update') is None,'Old controller cannot authenticate an update lineage')
+    return policy.get('engineering_selection')
+
+
+def engineering_update_context(policy,previous,release_id,pin,now):
+    context=globals().get('NATIVE_AUTHENTICATED_UPDATE_CONTEXT')
+    require(isinstance(context,dict) and set(context)=={'initial_sha256','parent_sha256','formation_sha256','target','selection','release_id','manifest_sha256','expires_at'},
+            'Native update review context required')
+    require(type(context['expires_at']) is int and now<context['expires_at']<=now+300,
+            'Native update review expired')
+    require(context['initial_sha256']==policy.get('engineering_initial_authorization_sha256')
+            and context['parent_sha256']==policy.get('engineering_authorization',{}).get('sha256')
+            and context['formation_sha256']==policy.get('validator_formation_sha256')
+            and isinstance(context['formation_sha256'],str)
+            and context['target']==policy.get('engineering_target') and context['selection']==previous
+            and context['release_id']==release_id and context['manifest_sha256']==pin,
+            'Update changes the authenticated target, formation or current receipt')
+    require(pin!=previous['manifest_sha256'] and release_id!=previous['release_id'],'Update must name a distinct release')
+    return context
+
+
+def validate_guard_update(root, policy, receipt, manifest, pending):
+    """Validate a sealed candidate plan only; staging never changes services."""
+    pin=policy.get('root_guard_sha256')
+    if pin is None:return
+    from root_guard import check_registration, render
+    check_registration(pin)
+    member='tools/root_guard.py'
+    require(member in manifest['files'],'Authenticated candidate guard required')
+    source=(pending/member).read_bytes()
+    require(0<len(source)<=22000 and hashlib.sha256(source).hexdigest()==manifest['files'][member],
+            'Candidate guard changed after verification')
+    previous=receipt.get('package_files',{}).get(member)
+    require(isinstance(previous,str) and re.fullmatch('[a-f0-9]{64}',previous),
+            'Installed guard source lacks package provenance')
+    if hashlib.sha256(source).hexdigest()==previous:
+        require(hashlib.sha256(render(root,policy['host_account'],source)).hexdigest()==pin,
+                'Unchanged guard differs from registered unit')
+        return
+    # Never ask the legacy renderer to interpret a new guard source/profile.
+    # Execute the already rehashed master bytes to inspect its pure plan only.
+    candidate={'__name__':'nodenetwork_authenticated_guard_candidate'}
+    exec(compile(source,str(pending/member),'exec'),candidate)
+    require(callable(candidate.get('migration_plan')),'Candidate lacks authenticated guard migration')
+    candidate['migration_plan'](root,policy['host_account'],source,previous,pin)
+
+
 def stage_engineering_update(stream, release_id, pin):
     """Adopt a sealed candidate and its controller on a quiescent engineering host.
 
@@ -227,6 +288,7 @@ def stage_engineering_update(stream, release_id, pin):
     """
     import ctypes
     import fcntl
+    import time
     require(os.geteuid()==0 and sys.platform=='linux' and os.uname().machine=='x86_64','Linux x86_64 root target required')
     require(re.fullmatch(r'[a-zA-Z0-9._-]{1,128}',release_id) and re.fullmatch(r'[a-f0-9]{64}',pin),'Exact update release and manifest pin required')
     require(ROOT.resolve()==ROOT and stat.S_IMODE(ROOT.lstat().st_mode)==0o700 and ROOT.stat().st_uid==0,'Private canonical installation required')
@@ -240,8 +302,7 @@ def stage_engineering_update(stream, release_id, pin):
     require(policy_path.resolve()==policy_path and stat.S_IMODE(policy_path.lstat().st_mode)==0o600
             and policy_path.stat().st_uid==0,'Unsafe host policy')
     policy=json.loads(policy_path.read_bytes())
-    require(set(policy.get('engine_files',{}))==set(ENGINE),'Incomplete enrolled engine')
-    for name in ENGINE:
+    for name in enrolled_engine(policy):
         path=old/name if name=='controller.py' else old/'tools'/name
         require(path.resolve()==path and path.is_file() and path.stat().st_uid==0
                 and not path.stat().st_mode&0o022
@@ -257,6 +318,8 @@ def stage_engineering_update(stream, release_id, pin):
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         receipt,_=_sealed_receipt(root)
         network=receipt['network_id']
+        previous=effective_engineering_selection(root,policy)
+        context=engineering_update_context(policy,previous,release_id,pin,int(time.time()))
         require(receipt.get('role')=='validator' and re.fullmatch(r'nodenetwork-formation-disposable-[a-z0-9]+(?:-[a-z0-9]+)*',network),
                 'This controller staging operation is limited to disposable formation')
         control_inventory(root)
@@ -274,24 +337,21 @@ def stage_engineering_update(stream, release_id, pin):
         try:
             manifest=extract(stream,pending,{'manifest_sha256':pin,'release_id':release_id})
             require(verify_package(pending)==manifest,'Candidate verification differs')
-            guard_pin=policy.get('root_guard_sha256')
-            if guard_pin is not None:
-                from root_guard import check_registration, render
-                check_registration(guard_pin)
-                guard_source=pending/'tools/root_guard.py'
-                require('tools/root_guard.py' in manifest['files'] and
-                        hashlib.sha256(render(root,policy['host_account'],guard_source.read_bytes())).hexdigest()==guard_pin,
-                        'Update changes the registered deletion guard; authenticated guard migration required')
+            validate_guard_update(root,policy,receipt,manifest,pending)
             shutil.copytree(old,replacement)
-            for name in ENGINE:
+            for name in engine_names(manifest['files']):
                 target=replacement/name if name=='controller.py' else replacement/'tools'/name
-                target.unlink()
+                if target.exists():target.unlink()
                 save(target,(pending/'tools'/name).read_bytes())
-            policy['engine_files']={name:manifest['files']['tools/'+name] for name in ENGINE}
+            policy['engine_files']={name:manifest['files']['tools/'+name] for name in engine_names(manifest['files'])}
             releases=policy['releases']
             selected={'manifest_sha256':pin,'inventory_authenticated':True,'networks':{network:receipt['chain_id']}}
             require(release_id not in releases or releases[release_id]==selected,'Release ID already names another inventory')
             releases[release_id]=selected
+            policy['engineering_update']={'initial_sha256':context['initial_sha256'],
+                'parent_sha256':context['parent_sha256'],'formation_sha256':context['formation_sha256'],
+                'previous_selection':previous,'selection':{**previous,'release_id':release_id,'manifest_sha256':pin},
+                'request_sha256':__import__('controller').request_digest({'version':1,'operation':'update_stage','parameters':{'release_id':release_id,'manifest_sha256':pin}})}
             (replacement/'policy.json').unlink()
             save(replacement/'policy.json',json.dumps(policy,sort_keys=True).encode())
             for path in sorted(replacement.rglob('*'),key=lambda p:-len(p.parts)):
@@ -317,7 +377,7 @@ def stage_engineering_update(stream, release_id, pin):
                 shutil.rmtree(pending)
                 _sync_directory(root/'tmp')
             raise
-        return {'stagedRelease':release_id,'manifestSha256':pin,'controllerAdopted':True,'validatorUpgraded':False}
+        return {'schema':'nodenetwork-update-stage-v1','stagedRelease':release_id,'manifestSha256':pin,'controllerAdopted':True,'validatorUpgraded':False,'initial_sha256':context['initial_sha256'],'parent_sha256':context['parent_sha256']}
     finally:
         os.close(lock)
 
@@ -327,7 +387,7 @@ def stage_engineering_update(stream, release_id, pin):
 # The document is not a public policy issuer, membership proof or credential API.
 AUTHORIZATION_PROFILE='nodenetwork-isolated-formation-authorization-v1'
 AUTHORIZATION_LIMIT=12*1024*1024
-AUTHORIZATION_FILES={'formation-context.json':4096,'vpn-enrollment.json':16384,
+AUTHORIZATION_FILES={'formation-context.json':4096,'vpn-ca.pem':128*1024,'vpn-provider.json':16384,'vpn-enrollment.json':16384,'vpn-server-binding.json':16384,'vpn-retirement.json':16384,
     'commissioning/config/node.json':1024*1024,'commissioning/config/start-authorized.json':65536,
     **{'commissioning/network/'+name:limit for name,limit in {
         'genesis.json':4*1024*1024,'authority.json':1024*1024,'authority-root.pub':8192,
@@ -461,8 +521,7 @@ def stage_engineering_authorization(stream):
     require(stat.S_ISREG(st.st_mode) and st.st_nlink==1 and st.st_uid==0 and stat.S_IMODE(st.st_mode)==0o600
             and st.st_size<=1024*1024,'Unsafe enrolled policy')
     policy=json.loads(policy_path.read_bytes())
-    require(set(policy.get('engine_files',{}))==set(ENGINE),'Incomplete enrolled engine')
-    for name in ENGINE:
+    for name in enrolled_engine(policy):
         path=old/name if name=='controller.py' else old/'tools'/name
         require(path.resolve()==path and path.is_file() and path.stat().st_uid==0 and not path.stat().st_mode&0o022 and path.stat().st_nlink==1
                 and hashlib.sha256(path.read_bytes()).hexdigest()==policy['engine_files'][name],'Enrolled engine drift')
@@ -493,7 +552,7 @@ def stage_engineering_authorization(stream):
                     'Continuation differs from the authenticated initial or current receipt')
             require(doc['target']==policy.get('engineering_target') and len(doc['requests'])==1,
                     'Continuation must retain its exact target and grant one request')
-            require(all(doc[key]==policy.get('engineering_selection',{}).get(key) for key in
+            require(all(doc[key]==effective_engineering_selection(ROOT,policy).get(key) for key in
                         ('release_id','manifest_sha256','network_id','chain_id','node_name')),
                     'Continuation changes the approved master or network')
             require(globals().get('NATIVE_AUTHENTICATED_AUTHORIZATION_FORMATION_SHA256')==policy.get('validator_formation_sha256')
@@ -547,6 +606,8 @@ def stage_engineering_authorization(stream):
             require(key not in consumed or continuation and request['operation'] in ('start','stop','restart'),'Consumed non-lifecycle request cannot be granted again')
             requests.append((request,key))
             if request['operation']=='vpn_enroll':require('vpn-enrollment.json' in inputs,'Exact one-use VPN input required')
+            if request['operation']=='vpn_bind':require('vpn-server-binding.json' in inputs,'Exact native provider binding required')
+            if request['operation']=='vpn_retire':require('vpn-retirement.json' in inputs,'Exact verified provider retirement required')
         formation=inputs.get('formation-context.json')
         if formation is not None:
             value=json.loads(formation)
@@ -578,7 +639,7 @@ def stage_engineering_authorization(stream):
                 if path.exists():require(path.read_bytes()==data,'Existing authorization input differs')
                 else:save(path,data)
             policy['qualified_operations']=sorted({request['operation'] for request,_ in requests})
-            policy['engineering_selection']={key:doc[key] for key in ('release_id','manifest_sha256','network_id','chain_id','node_name')}
+            if not continuation:policy['engineering_selection']={key:doc[key] for key in ('release_id','manifest_sha256','network_id','chain_id','node_name')}
             policy['engineering_initial_authorization_sha256']=initial if continuation else pin
             policy['engineering_target']=doc['target']
             policy['engineering_authorization']={'sha256':pin,'sequence':doc['sequence'],'expires_at':doc['expires_at']}
@@ -586,6 +647,8 @@ def stage_engineering_authorization(stream):
             for request,key in requests:
                 grant={'root':str(ROOT),'operation':request['operation'],'request_sha256':key,'expires_at':doc['expires_at'],'authorization_sha256':pin,'authorization_sequence':doc['sequence']}
                 if request['operation']=='vpn_enroll':grant['enrollment_sha256']=doc['artifacts']['vpn-enrollment.json']
+                if request['operation']=='vpn_bind':grant['binding_sha256']=doc['artifacts']['vpn-server-binding.json']
+                if request['operation']=='vpn_retire':grant['binding_sha256']=doc['artifacts']['vpn-retirement.json']
                 save(replacement/'grants'/(key+'.json'),json.dumps(grant,sort_keys=True).encode())
             (replacement/'policy.json').unlink();save(replacement/'policy.json',json.dumps(policy,sort_keys=True).encode())
             for path in replacement.rglob('*'):

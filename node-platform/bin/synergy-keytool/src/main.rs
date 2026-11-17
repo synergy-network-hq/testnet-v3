@@ -8,6 +8,8 @@ mod import_consensus;
 mod inspect;
 #[cfg(unix)]
 mod network_formation;
+#[cfg(unix)]
+mod network_transport;
 mod node_identity;
 mod prepare_authority;
 mod provider;
@@ -33,6 +35,18 @@ fn run() -> Result<(), String> {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     let (arguments, engine) = selected_arguments(&arguments)?;
     match arguments {
+        #[cfg(unix)]
+        [command, context, pin, formation, request, request_pin, directory] if command=="prepare-network-transport" => {
+            println!("{}",network_transport::prepare(Path::new(context),pin,Path::new(formation),Path::new(request),request_pin,Path::new(directory),engine.ok_or("authenticated APQE provider required")?)?);
+        }
+        #[cfg(unix)]
+        [command, context, pin, formation, directory, request, request_pin] if command=="sign-network-transport" => {
+            println!("{}",network_transport::sign(Path::new(context),pin,Path::new(formation),Path::new(directory),Path::new(request),request_pin,engine.ok_or("authenticated APQE provider required")?)?);
+        }
+        #[cfg(unix)]
+        [command, context, pin, formation, directory] if command=="review-network-transport"||command=="export-network-transport" => {
+            println!("{}",network_transport::status(Path::new(context),pin,Path::new(formation),Path::new(directory),engine.ok_or("authenticated APQE provider required")?,command=="export-network-transport")?);
+        }
         #[cfg(unix)]
         [command, context, pin, request, request_pin, directory]
             if command == "prepare-network-formation" =>
@@ -480,6 +494,7 @@ fn selected_arguments(
     if !matches!(
         command,
         "generate-authority-custody"
+            | "prepare-network-transport" | "review-network-transport" | "sign-network-transport" | "export-network-transport"
             | "prepare-network-formation"
             | "review-network-formation"
             | "sign-network-formation"

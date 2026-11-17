@@ -2263,6 +2263,7 @@ dependencies = [
  "synergy-address",
  "synergy-address-engine",
  "synergy-aegis",
+ "synergy-config",
  "synergy-etdag",
  "synergy-genesis",
  "synergy-identity",

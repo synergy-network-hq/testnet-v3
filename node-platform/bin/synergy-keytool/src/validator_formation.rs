@@ -436,7 +436,7 @@ mod tests {
         let _cleanup = Cleanup(root.clone());
         let engine = crate::provider::native_test_engine();
         let context = FormationContext {
-            network_id: "stability-fixture".into(),
+            network_id: "nodenetwork-formation-disposable-fixture".into(),
             chain_id_hex: format!("{:064x}", 1266),
             formation_id: "ab".repeat(32),
         };
@@ -472,10 +472,12 @@ mod tests {
         )
         .unwrap();
 
+        let first_envelope:EncryptedEnvelope=decode(&read(&directory.join("formation.enc.json"),2*1024*1024,true).unwrap()).unwrap();
+        let mut transport_fixture_custodies=vec![(first_envelope,read(&directory.join("unlock"),64,true).unwrap())];
         let mut participants = vec![registration];
         let mut registration_paths = vec![directory.join("formation-registration.json")];
         for i in 1..5 {
-            let (participant, _) = apqe::prepare_formation(
+            let (participant, envelope) = apqe::prepare_formation(
                 &engine.lock().unwrap(),
                 AddressType::NodeClass1,
                 context.clone(),
@@ -485,6 +487,7 @@ mod tests {
             let path = root.join(format!("public-formation-{i}.json"));
             write(&path, &serde_json::to_vec(&participant).unwrap()).unwrap();
             participants.push(participant);
+            transport_fixture_custodies.push((envelope,SecretBytes::from_bytes(b"fixture-only formation unlock phrase".to_vec())));
             registration_paths.push(path);
         }
         let registration = &participants[0];
@@ -493,6 +496,8 @@ mod tests {
             let artifact_dir = root.join(if matching_ingress { "correct" } else { "wrong" });
             begin(&artifact_dir).unwrap();
             let mut recipe = crate::prepare_authority::tests::genesis_recipe();
+            recipe["network"]["network_id"]=serde_json::json!(context.network_id);
+            recipe["authority"]["network_id"]=serde_json::json!(context.network_id);
             recipe["formation_registrations"] = serde_json::json!(registration_paths);
             for (i, participant) in participants.iter().enumerate() {
                 let identity = &participant.payload.identity;
@@ -540,7 +545,7 @@ mod tests {
             }
             composed.unwrap();
             crate::network_formation::exercise_native_fixture(
-                &context_path, &context_pin, &recipe_path, &artifact_dir, engine.clone(),
+                &context_path, &context_pin, &recipe_path, &artifact_dir, engine.clone(), &transport_fixture_custodies,
             );
             let unsigned: UnsignedGenesis =
                 serde_json::from_slice(&fs::read(unsigned_path).unwrap()).unwrap();

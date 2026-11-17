@@ -35,7 +35,7 @@ class RootIdentityTests(unittest.TestCase):
                  (ROOT, dict(account, uid=True), b'code'),
                  (ROOT, dict(account, gid=0), b'code'),
                  (ROOT, dict(account, label='other'), b'code'),
-                 (ROOT, account, b''), (ROOT, account, b'x' * 18001),
+                 (ROOT, account, b''), (ROOT, account, b'x' * 22001),
                  (ROOT, account, 'not bytes')]
         for root, identity, source in cases:
             with self.subTest(root=root, identity=identity, size=len(source)), \
@@ -86,7 +86,7 @@ class RootIdentityTests(unittest.TestCase):
     def test_watch_waits_on_own_tag_then_retires_with_original_pin(self):
         with patch.object(guard.os, 'geteuid', return_value=0), \
                 patch.object(guard, 'unit_digest', return_value=PIN), \
-                patch.object(guard, 'root_identity', side_effect=[SUFFIX, SUFFIX, None]), \
+                patch.object(guard, 'root_identity', side_effect=[SUFFIX, SUFFIX, SUFFIX, None]), \
                 patch.object(guard.time, 'sleep') as sleep, patch.object(guard, 'retire') as retire:
             guard.watch(ROOT, UID, SUFFIX)
             self.assertEqual(sleep.call_args_list, [call(2), call(2)])
@@ -216,6 +216,18 @@ class RetirementTests(unittest.TestCase):
                 raise subprocess.CalledProcessError(1, args)
             self.account = False
         return ''
+
+    def test_root_deletion_stops_and_unlinks_only_attributed_guest(self):
+        name='synergy-guest-temporary-validator.service'
+        target=ROOT/'hosted-machines/temporary-validator/guest.service'
+        self.links[guard.SYSTEM/name]=target
+        self.states[name]=observed(True,str(guard.SYSTEM/name))
+        with patch.object(guard,'guest_registrations',return_value={name:target}):
+            guard.retire(ROOT,UID,SUFFIX,PIN)
+        stop=('systemctl','stop',name)
+        unlink=('unlink',guard.SYSTEM/name)
+        self.assertLess(self.events.index(stop),self.events.index(unlink))
+        self.assertEqual(self.links,{self.unrelated:Path('/usr/lib/systemd/system/unrelated.service')})
 
     def test_retires_only_attributed_runtime_and_account_and_guard_last(self):
         guard.retire(ROOT, UID, SUFFIX, PIN)

@@ -147,43 +147,62 @@ class LifecycleTests(unittest.TestCase):
             guard=self.units/'synergy-installation-guard.service'
             guard.symlink_to('/nonexistent-guard')
             self.assertIn('BindsTo=synergy-installation-guard.service',life.vpn_unit(legacy))
-    def test_upgrade_cannot_change_or_remove_the_registered_guard_source(self):
+    def test_guard_migration_requires_exact_prior_package_provenance(self):
         import root_guard
-        guard = b'current registered guard'
-        account = {'uid':999, 'gid':65534, 'label':'Synergy NodeNetwork '+'a'*32}
-        # Compute the registered unit for the real canonical path; let only
-        # attribution checks accept this test's temporary installation root.
-        with patch.object(root_guard,'root_identity',return_value='a'*32):
-            registration_pin = hashlib.sha256(root_guard.render(Path('/opt/synergy'),account,guard)).hexdigest()
-        path = self.root/'tmp/controller/policy.json'
-        save(path, {'format':'synergy-nodenetwork-host-policy-v1','root':str(self.root),
-                    'community_enrollment':False,'qualified_operations':[], 'releases':{},
-                    'root_guard_sha256':registration_pin,'host_account':account,
-                    'engine_files':{'root_guard.py':hashlib.sha256(b'different guard').hexdigest()}})
-        original = root_guard.render
-        def render_fixture(root, binding, source):
-            self.assertEqual(root,self.root)
-            return original(Path('/opt/synergy'),binding,source)
-        member = 'tools/root_guard.py'
-        for candidate in (None, b'different guard', guard):
+        account={'uid':999,'gid':65534,'label':'Synergy NodeNetwork '+'a'*32}
+        path=self.root/'tmp/controller/policy.json'
+        save(path,{'format':'synergy-nodenetwork-host-policy-v1','root':str(self.root),
+                   'community_enrollment':False,'qualified_operations':[],'releases':{},
+                   'root_guard_sha256':'a'*64,'host_account':account})
+        for candidate in (None,b'different guard',b'current registered guard'):
             with self.subTest(candidate=candidate):
                 if candidate is not None:
-                    save(self.candidate/member,candidate)
-                    self.new['files'][member]=hashlib.sha256(candidate).hexdigest()
+                    save(self.candidate/'tools/root_guard.py',candidate)
+                    self.new['files']['tools/root_guard.py']=hashlib.sha256(candidate).hexdigest()
                     save(self.candidate/'package.json',self.new)
-                with self.upgrade_context(), patch.object(root_guard,'check_registration') as check, \
-                     patch.object(root_guard,'root_identity',return_value='a'*32), \
-                     patch.object(root_guard,'render',side_effect=render_fixture):
-                    if candidate != guard:
-                        with self.assertRaisesRegex(ValueError,'authenticated guard migration required'):
-                            life.upgrade(self.root,self.candidate)
-                        self.assertFalse((self.root/life.UPGRADE_INTENT).exists())
-                        self.assertEqual(node.read(self.root/'package.json'),self.old)
-                        self.assertEqual(self.operations,[])
-                    else:
-                        self.assertFalse(life.upgrade(self.root,self.candidate)['consensus_started'])
-                        self.assertEqual(node.read(self.root/'package.json'),self.new)
-                    check.assert_called_once_with(registration_pin)
+                with self.upgrade_context(),patch.object(root_guard,'migrate') as migrate:
+                    with self.assertRaisesRegex(ValueError,'Complete guard provenance required'):
+                        life.upgrade(self.root,self.candidate)
+                    migrate.assert_not_called()
+                    self.assertFalse((self.root/life.UPGRADE_INTENT).exists())
+                    self.assertEqual(node.read(self.root/'package.json'),self.old)
+                    self.assertEqual(self.operations,[])
+    def test_authenticated_guard_plan_is_durable_before_migration_and_resumes_same_binding(self):
+        import base64
+        import root_guard
+        member='tools/root_guard.py'
+        old_source=b'old guard source';new_source=b'new guard source'
+        save(self.root/member,old_source);save(self.candidate/member,new_source)
+        self.old['files'][member]=hashlib.sha256(old_source).hexdigest()
+        self.new['files'][member]=hashlib.sha256(new_source).hexdigest()
+        save(self.root/'package.json',self.old);save(self.candidate/'package.json',self.new)
+        self.receipt.update(package_files=self.old['files'],package_sha256=node.digest(self.root/'package.json'))
+        save(self.root/'installation.json',self.receipt)
+        old_unit=b'old rendered unit';new_unit=b'new rendered unit'
+        old_pin=hashlib.sha256(old_unit).hexdigest();new_pin=hashlib.sha256(new_unit).hexdigest()
+        plan={'old_unit':base64.b64encode(old_unit).decode(),'new_unit':base64.b64encode(new_unit).decode(),'handover_unit':base64.b64encode(b'handover').decode()}
+        policy_path=self.root/'tmp/controller/policy.json'
+        account={'uid':999,'gid':65534,'label':'Synergy NodeNetwork '+'a'*32}
+        policy={'format':'synergy-nodenetwork-host-policy-v1','root':str(self.root),'community_enrollment':False,
+                'qualified_operations':[],'releases':{},'root_guard_sha256':old_pin,'host_account':account}
+        save(policy_path,policy)
+        def migration(root,binding,recorded,set_pin):
+            self.assertEqual(node.read(root/life.UPGRADE_INTENT)['guard_migration'],plan)
+            self.assertEqual(recorded,plan);self.assertEqual(binding,account)
+            set_pin(new_pin)
+        original=life._replace_bytes
+        def interrupted(root,path,data,mode,token):
+            if path==root/'bin/synergy-node':raise ValueError('interrupted software after guard')
+            return original(root,path,data,mode,token)
+        with self.upgrade_context(),patch.object(root_guard,'migration_plan',return_value=plan),patch.object(root_guard,'migrate',side_effect=migration) as migrate:
+            with patch.object(life,'_replace_bytes',side_effect=interrupted):
+                with self.assertRaisesRegex(ValueError,'interrupted software'):life.upgrade(self.root,self.candidate)
+            self.assertEqual(node.read(policy_path)['root_guard_sha256'],new_pin)
+            result=life.upgrade(self.root,self.candidate)
+            self.assertTrue(result['resumed']);self.assertEqual(migrate.call_count,2)
+            self.assertFalse((self.root/life.UPGRADE_INTENT).exists())
+            self.assertEqual(node.read(self.root/'package.json'),self.new)
+
     def test_durable_intent_resume_at_each_commit_boundary(self):
         # Fail after actual atomic file replacement, then retry the exact package.
         original=life._replace_bytes

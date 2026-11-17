@@ -554,6 +554,7 @@ pub(crate) fn exercise_native_fixture(
     recipe_path: &Path,
     parent: &Path,
     engine: crate::provider::Engine,
+    transport_custodies:&[(EncryptedEnvelope,SecretBytes)],
 ) {
     let mut recipe: Value = decode(&read(recipe_path, REQUEST_LIMIT, true).unwrap()).unwrap();
     let registrations: Vec<String> = recipe["formation_registrations"]
@@ -655,6 +656,13 @@ pub(crate) fn exercise_native_fixture(
         ),
         signed["genesis_sha256"]
     );
+    let mut enrolled=Vec::new();
+    for (raw,(envelope,unlock)) in request["parameters"]["registrations_json"].as_array().unwrap().iter().zip(transport_custodies){
+        let registration:FormationRegistration=serde_json::from_str(raw.as_str().unwrap()).unwrap();
+        let (enrollment,_)=synergy_address_engine::validator_provisioning::bind_formation(&engine.lock().unwrap(),&registration,&registration.payload.formation,envelope,std::str::from_utf8(unlock.as_bytes()).unwrap(),synergy_address_engine::validator_provisioning::NetworkBinding{chain_id_hex:registration.payload.formation.chain_id_hex.clone(),genesis_sha256:signed["genesis_sha256"].as_str().unwrap().into()}).unwrap();
+        enrolled.push(serde_json::to_string(&enrollment).unwrap());
+    }
+    crate::network_transport::exercise_native_fixture(context_path,context_pin,&directory,parent,engine.clone(),&enrolled);
     let unlock = SecretBytes::from_bytes(fs::read(directory.join("unlock")).unwrap());
     fs::write(directory.join("unlock"), [b'0'; 64]).unwrap();
     assert!(status(context_path, context_pin, &directory, engine.clone(), false).is_err());
@@ -671,6 +679,14 @@ pub(crate) fn exercise_native_fixture(
         .unwrap_err()
         .contains("Interrupted"));
 }
+
+
+/// Public, already APQE-verified source for the separately reviewed transport issuer.
+/// Never exposes authority custody or its unlock material.
+pub(super) fn signed_public(context:&Path,pin:&str,directory:&Path,engine:crate::provider::Engine)->Result<Value,String>{
+    status(context,pin,directory,engine,true)
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -698,4 +714,3 @@ mod tests {
         assert!(serde_json::from_value::<Request<Sign>>(json!({"version":1,"operation":"network_formation_sign","parameters":{"review_sha256":"a".repeat(64),"secret":"forbidden"}})).is_err());
     }
 }
-

@@ -27,3 +27,5 @@ synergy-transaction = { path = "../../crates/synergy-transaction" }
 chrono = { version = "=0.4.44", default-features = false, features = ["std"] }
 
 synergy-address-engine = { version = "=2.0.0", path = "../../../../21-Aegis-Engine/synergy-address-engine" }
+
+synergy-config = { path = "../../crates/synergy-config" }
