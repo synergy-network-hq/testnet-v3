@@ -1037,6 +1037,19 @@ class Controller:
         if op=='target': return self.target()
         require(platform.system()=='Linux' and platform.machine()=='x86_64','Linux x86_64 target required','unsupported_target')
         if op=='inventory': return self.inventory()
+        # Enrollment/grant readback is required before the first installation.
+        # Its own exact engine/policy checks run without inventing a receipt.
+        if op=='authorization_status':
+            control_inventory(self.root)
+            record=self.policy().get('engineering_authorization')
+            return {'schema':'nodenetwork-engineering-authorization-status-v1','authorization':record,
+                    'initial_sha256':self.policy().get('engineering_initial_authorization_sha256'),
+                    'selection':engineering_effective_selection(self.root,self.policy()),
+                    'initial_selection':self.policy().get('engineering_selection'),
+                    'update':self.policy().get('engineering_update'), 'target':self.policy().get('engineering_target'),
+                    'formation_sha256':self.policy().get('validator_formation_sha256'),
+                    'genesis_pins':self.policy().get('validator_identity_network'),
+                    'pending_grants':[path.stem for path in (self.control/'grants').iterdir() if self.public_json(path,True).get('expires_at',0)>time.time()]}
         if op in ('install','install_preflight','upgrade','upgrade_preflight'):
             package,manifest,approval=self.approved_package(p,bootstrap=op.startswith('install'))
             if op.startswith('install'):
@@ -1074,17 +1087,6 @@ class Controller:
         if op=='vpn_retire': return self.vpn_retire(request)
         if op=='identity_preflight': return self.identity_preflight()[0]
         if op=='identity_status': return self.identity_status()
-        if op=='authorization_status':
-            control_inventory(self.root)
-            record=self.policy().get('engineering_authorization')
-            return {'schema':'nodenetwork-engineering-authorization-status-v1','authorization':record,
-                    'initial_sha256':self.policy().get('engineering_initial_authorization_sha256'),
-                    'selection':engineering_effective_selection(self.root,self.policy()),
-                    'initial_selection':self.policy().get('engineering_selection'),
-                    'update':self.policy().get('engineering_update'), 'target':self.policy().get('engineering_target'),
-                    'formation_sha256':self.policy().get('validator_formation_sha256'),
-                    'genesis_pins':self.policy().get('validator_identity_network'),
-                    'pending_grants':[path.stem for path in (self.control/'grants').iterdir() if self.public_json(path,True).get('expires_at',0)>time.time()]}
         if op=='identity_generate': return self.identity_generate(request)
         if op.startswith('network_formation_'): return self.network_formation(request)
         if op.startswith('network_transport_'): return self.network_transport(request)

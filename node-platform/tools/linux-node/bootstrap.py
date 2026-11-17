@@ -295,11 +295,11 @@ def bare_digest(path, maximum=LIMIT):
     return digest.hexdigest()
 
 
-def bare_tree(root, manifest):
+def bare_tree(root, manifest, authorization_files=()):
     """Exact bootstrap-only namespace; never a generic installation remover."""
     stage=root/'tmp/bootstrap-master'
     limit=master_archive_limit(manifest)
-    files={'tmp/controller/policy.json','tmp/bootstrap-master/package.json'}
+    files={'tmp/controller/policy.json','tmp/bootstrap-master/package.json',*authorization_files}
     files|={'tmp/bootstrap-master/'+name for name in manifest['files']}
     files|={'tmp/controller/'+name if name=='controller.py' else 'tmp/controller/tools/'+name
             for name in engine_names(manifest['files'])}
@@ -324,7 +324,10 @@ def bare_tree(root, manifest):
             path=Path(current)/name;relative=path.relative_to(root).as_posix();metadata=path.lstat()
             require(metadata.st_uid==0 and not path.is_symlink(),'Bare namespace owner/link differs')
             if stat.S_ISDIR(metadata.st_mode):
-                require(relative in directories and stat.S_IMODE(metadata.st_mode)==0o700,
+                # Existing authorization staging creates this intermediate
+                # public-input directory with the OS umask, beneath controller700.
+                modes=(0o700,0o755) if authorization_files and relative=='tmp/controller/authorization' else (0o700,)
+                require(relative in directories and stat.S_IMODE(metadata.st_mode) in modes,
                         'Unknown or unsafe bare directory')
                 observed_dirs.add(relative)
             else:
@@ -416,6 +419,79 @@ def bare_no_application_processes(root, pins, proc=Path('/proc')):
         else:sys.modules['synergy_linux']=previous
 
 
+def bare_initial_authorization(root,policy,release_id,pin):
+    """Only cancel an exact independently pinned, wholly unused first grant set.
+
+    Policy/grant files do not authenticate their own completeness. The native
+    app supplies the original public approval bytes after its compiled pin check.
+    Expiry cannot grant new authority here: even expired grants must all remain.
+    """
+    base={'format','root','community_enrollment','qualified_operations','releases',
+          'engine_files','host_files','host_account','root_guard_sha256'}
+    if 'engineering_authorization' not in policy:
+        require(set(policy)==base and policy.get('qualified_operations')==[],
+                'Bootstrap is no longer bare or has authorization')
+        return None,{},set()
+    expected=globals().get('NATIVE_AUTHENTICATED_BARE_AUTHORIZATION_SHA256')
+    raw=globals().get('NATIVE_AUTHENTICATED_BARE_AUTHORIZATION_JSON')
+    require(isinstance(expected,str) and re.fullmatch('[a-f0-9]{64}',expected)
+            and isinstance(raw,str) and 0<len(raw.encode())<=65536
+            and hashlib.sha256(raw.encode()).hexdigest()==expected,
+            'Bootstrap is no longer bare without independent initial authorization')
+    preliminary=json.loads(raw)
+    require(isinstance(preliminary,dict) and type(preliminary.get('expires_at')) is int,
+            'Invalid original initial authorization')
+    # Reuse its strict bounded schema while deliberately permitting expiry for
+    # cancellation only. No operation or grant is executed by this path.
+    doc=authorization_document(raw,expected,preliminary['expires_at']-1)
+    additional={'engineering_selection','engineering_target','engineering_authorization',
+                'engineering_initial_authorization_sha256','authorization_files',
+                'authorization_predecessor_sha256','validator_formation_sha256'}
+    require(set(policy)==base|additional and doc['sequence']==1 and doc['genesis_pins'] is None
+            and set(doc['artifacts'])=={'formation-context.json'},
+            'Only unused initial formation authorization may be cancelled')
+    require(policy['engineering_authorization']=={'sha256':expected,'sequence':1,'expires_at':doc['expires_at']}
+            and policy['engineering_initial_authorization_sha256']==expected
+            and policy['engineering_target']==doc['target']
+            and isinstance(policy['authorization_predecessor_sha256'],str)
+            and re.fullmatch('[a-f0-9]{64}',policy['authorization_predecessor_sha256']),
+            'Initial authorization receipt differs or has continued')
+    selection={key:doc[key] for key in ('release_id','manifest_sha256','network_id','chain_id','node_name')}
+    require(policy['engineering_selection']==selection and selection['release_id']==release_id
+            and selection['manifest_sha256']==pin
+            and policy['releases'][release_id]['networks']=={doc['network_id']:doc['chain_id']},
+            'Initial authorization changes the pinned bootstrap selection')
+    require(policy['authorization_files']==doc['artifacts']
+            and policy['validator_formation_sha256']==doc['artifacts']['formation-context.json'],
+            'Initial public formation inventory differs')
+    artifact='tmp/controller/authorization/inputs/formation-context.json'
+    payload=bare_file(root/artifact,4096)
+    require(hashlib.sha256(payload).hexdigest()==doc['artifacts']['formation-context.json'],
+            'Initial public formation bytes differ')
+    formation=json.loads(payload)
+    require(isinstance(formation,dict) and set(formation)=={'network_id','chain_id_hex','formation_id'}
+            and formation['network_id']==doc['network_id'] and formation['chain_id_hex']==format(doc['chain_id'],'064x')
+            and isinstance(formation['formation_id'],str) and re.fullmatch('[a-f0-9]{64}',formation['formation_id'])
+            and formation['formation_id']!='0'*64,'Initial formation context differs')
+    operations=[];grants={};files={artifact}
+    for request in doc['requests']:
+        operation=request['operation'];key=request['request_sha256']
+        require(operation in ('install','commission','register','start','stop','restart','upgrade','uninstall',
+            'identity_generate','formation_prepare','genesis_stage','genesis_bind','network_formation_prepare',
+            'network_formation_sign','network_transport_prepare','network_transport_sign','vpn_enroll','vpn_bind','vpn_retire',
+            'guest_create','guest_stop','guest_remove') and key not in grants,'Invalid initial grant inventory')
+        relative='tmp/controller/grants/'+key+'.json';grant_raw=bare_file(root/relative,65536)
+        grant=json.loads(grant_raw)
+        require(grant=={'root':str(root),'operation':operation,'request_sha256':key,'expires_at':doc['expires_at'],
+                       'authorization_sha256':expected,'authorization_sequence':1},
+                'Original initial grant changed or was consumed')
+        grants[key]=hashlib.sha256(grant_raw).hexdigest();files.add(relative);operations.append(operation)
+    require(policy['qualified_operations']==sorted(set(operations)), 'Original initial operation set differs')
+    require({path.name for path in (root/'tmp/controller/grants').iterdir()}=={key+'.json' for key in grants},
+            'Original initial grant set is incomplete or has extras')
+    return expected,{'authorization_sha256':expected,'grants':grants,'artifacts':doc['artifacts']},files
+
+
 def bare_snapshot(release_id,pin):
     require(re.fullmatch('[a-zA-Z0-9._-]{1,128}',release_id) and re.fullmatch('[a-f0-9]{64}',pin),
             'Exact bare bootstrap release and pin required')
@@ -436,14 +512,14 @@ def bare_snapshot(release_id,pin):
         require(isinstance(name,str) and name==path.as_posix() and not path.is_absolute()
                 and '..' not in path.parts and isinstance(expected,str) and re.fullmatch('[a-f0-9]{64}',expected),
                 'Unsafe bare manifest inventory')
-    # First authenticate the full fixed namespace without importing any tools.
-    inventory=bare_tree(root,manifest)
+    # Public native-approved authorization is parsed without importing tools;
+    # its exact file set then joins the same closed bare namespace.
     policy_raw=bare_file(root/'tmp/controller/policy.json');policy=json.loads(policy_raw)
-    require(set(policy)=={'format','root','community_enrollment','qualified_operations','releases',
-                         'engine_files','host_files','host_account','root_guard_sha256'}
-            and policy['format']=='synergy-nodenetwork-host-policy-v1' and policy['root']==str(root)
-            and policy['community_enrollment'] is False and policy['qualified_operations']==[],
+    require(isinstance(policy,dict) and policy.get('format')=='synergy-nodenetwork-host-policy-v1'
+            and policy.get('root')==str(root) and policy.get('community_enrollment') is False,
             'Bootstrap is no longer bare or has authorization')
+    authorization_sha256,authorization_review,authorization_files=bare_initial_authorization(root,policy,release_id,pin)
+    inventory=bare_tree(root,manifest,authorization_files)
     require(set(policy['releases'])=={release_id},'Bare bootstrap release inventory differs')
     selected=policy['releases'][release_id]
     require(set(selected)=={'manifest_sha256','inventory_authenticated','networks'}
@@ -473,11 +549,12 @@ def bare_snapshot(release_id,pin):
     review={'root':str(root),'release_id':release_id,'manifest_sha256':pin,
             'root_identity':[metadata.st_dev,metadata.st_ino],
             'policy_sha256':hashlib.sha256(policy_raw).hexdigest(),'inventory':inventory,
-            'root_guard_sha256':policy['root_guard_sha256'],'administrative':administrative}
+            'root_guard_sha256':policy['root_guard_sha256'],'administrative':administrative,
+            'initial_authorization':authorization_review}
     digest=hashlib.sha256(json.dumps(review,sort_keys=True,separators=(',',':')).encode()).hexdigest()
     return {'schema':'nodenetwork-bare-bootstrap-rollback-preflight-v1','root':str(root),
             'release_id':release_id,'manifest_sha256':pin,'review_sha256':digest,
-            'controller_enrolled':True,'software_installed':False,
+            'controller_enrolled':True,'software_installed':False,'authorization_sha256':authorization_sha256,
             'root_guard_sha256':policy['root_guard_sha256']},guard,policy,administrative
 
 
@@ -508,7 +585,7 @@ def bare_rollback(release_id,pin,review_sha256=None):
         require(all(hashlib.sha256(Path(name).read_bytes()).hexdigest()==expected for name,expected in administrative.items()),
                 'Administrative configuration changed during retirement')
         return {'schema':'nodenetwork-bare-bootstrap-rollback-v1','release_id':release_id,
-                'manifest_sha256':pin,'review_sha256':review_sha256,'root_removed':True,
+                'manifest_sha256':pin,'review_sha256':review_sha256,'authorization_sha256':result.get('authorization_sha256'),'root_removed':True,
                 'registrations_removed':True,'administrative_configuration_preserved':True}
     finally:os.close(lock)
 
