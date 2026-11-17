@@ -10466,6 +10466,7 @@ fn prepare_socket_fixture_profile_mode_endpoints(
                 network_id: payload.network_id.clone(),
                 protocol_version: preliminary.protocol_version.clone(),
                 activation_unix: policy.epoch_start_timestamp_ms / 1000,
+                autonomous_epoch_protocol: None,
             },
             validators: payload
                 .validators

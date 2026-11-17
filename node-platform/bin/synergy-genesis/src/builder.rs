@@ -25,6 +25,9 @@ impl UnsignedGenesis {
             return Err("invalid unsigned genesis header".into());
         }
         self.network.validate()?;
+        if self.network.autonomous_epoch_protocol.is_some() && self.format_version != 2 {
+            return Err("autonomous epoch Genesis requires network-neutral format 2".into());
+        }
         validator_set::validate(&self.validators)?;
         self.etdag.validate()
     }

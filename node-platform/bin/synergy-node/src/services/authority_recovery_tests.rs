@@ -10,23 +10,29 @@ use synergy_posy::{
 #[test]
 #[ignore = "requires pinned native APQE artifacts"]
 fn native_quorum_recovery_activation_restart_and_interrupted_witness() {
-    exercise_native_recovery(false, false);
+    exercise_native_recovery(false, false, false);
 }
 
 #[test]
 #[ignore = "requires pinned native APQE artifacts"]
 fn native_transport_verifies_published_transition_without_writer() {
-    exercise_native_recovery(true, false);
+    exercise_native_recovery(true, false, false);
 }
 
 #[test]
 #[ignore = "requires pinned native APQE artifacts"]
 fn native_offline_successor_rejects_changed_governed_scope_and_boundary() {
-    exercise_native_recovery(true, true);
+    exercise_native_recovery(true, true, false);
 }
 
-fn exercise_native_recovery(read_only_transport: bool, long_boundary: bool) {
-    let ends: &[u64] = if long_boundary { &[10_000] } else { &[10, 20] };
+#[test]
+#[ignore = "requires pinned native APQE artifacts"]
+fn native_fresh_genesis_autonomous_epochs_restart_without_authority_signer() {
+    exercise_native_recovery(true, false, true);
+}
+
+fn exercise_native_recovery(read_only_transport: bool, long_boundary: bool, fresh: bool) {
+    let ends: &[u64] = if fresh { &[1000] } else if long_boundary { &[10_000] } else { &[10, 20] };
     for &end in ends {
         let (root, mut config) =
             crate::services::socket_qualification::sync_poll_native_test_configuration();
@@ -37,7 +43,7 @@ fn exercise_native_recovery(read_only_transport: bool, long_boundary: bool) {
             }
         }
         let _cleanup = Cleanup(root.clone());
-        if long_boundary {
+        if fresh { config.chain_id = 77777; } else if long_boundary {
             config.chain_id = 99999;
         }
         config.consensus.mode = synergy_config::ConsensusMode::Observe;
@@ -101,6 +107,7 @@ fn exercise_native_recovery(read_only_transport: bool, long_boundary: bool) {
                 network_id: config.network_id.clone(),
                 protocol_version: synergy_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION.into(),
                 activation_unix: policy.epoch_start_timestamp_ms / 1000,
+                autonomous_epoch_protocol: fresh.then(|| synergy_genesis::network::AUTONOMOUS_EPOCH_PROTOCOL_V1.into()),
             },
             validators: binding
                 .payload
@@ -194,6 +201,12 @@ fn exercise_native_recovery(read_only_transport: bool, long_boundary: bool) {
         )
         .unwrap();
         let previous = load(&config).unwrap().unwrap();
+        if fresh {
+            assert!(config.consensus.autonomous_epoch_activation.is_none());
+            successor::qualify_fresh_genesis_autonomous(&config, previous, &keys, &engine);
+            continue;
+        }
+
         let world = binding
             .payload
             .protected

@@ -137,11 +137,9 @@ impl StartedNode {
                     .into(),
             ));
         }
-        let autonomous = self
-            .configuration
-            .consensus
-            .autonomous_epoch_activation
-            .is_some();
+        let autonomous = self.channels.live_authority.read()
+            .map_err(|_| StartError::RuntimeViewPoisoned)?
+            .as_ref().is_some_and(|authority| authority.autonomous_epochs_enabled());
         let loaded = if autonomous {
             let previous = self
                 .channels

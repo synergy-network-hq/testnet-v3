@@ -82,7 +82,7 @@ pub(crate) fn load_autonomous(
     origin: Arc<VerifiedAuthority>,
 ) -> Result<Arc<VerifiedAuthority>, String> {
     let bytes = apqe_transport::read(&activation.path, 4 * 1024 * 1024, false)?;
-    let mut authority = attach_public_proof(
+    let authority = attach_public_proof(
         verify_pinned_bootstrap_bytes(configuration, origin, &activation.sha256, &bytes)?,
         AutonomousProofFile {
             path: activation.path.clone(),
@@ -91,6 +91,18 @@ pub(crate) fn load_autonomous(
         },
     )?;
 
+    load_fresh_autonomous(configuration, authority)
+}
+
+/// Replay only sequential native closures from an authenticated autonomous
+/// origin (fresh signed Genesis or the historical pinned activation).
+pub(crate) fn load_fresh_autonomous(
+    configuration: &NodeConfiguration,
+    mut authority: Arc<VerifiedAuthority>,
+) -> Result<Arc<VerifiedAuthority>, String> {
+    if !authority.autonomous_epochs_enabled() {
+        return Err("autonomous history lacks authenticated origin".into());
+    }
     let layout = NodeStorageLayout::new(configuration.storage.data_directory.clone())
         .map_err(|e| e.to_string())?;
     let root = layout.consensus().join("autonomous-epochs");
@@ -144,7 +156,7 @@ pub(crate) fn load_next_runtime_autonomous(
     previous: Arc<VerifiedAuthority>,
     epoch: u64,
 ) -> Result<Arc<VerifiedAuthority>, String> {
-    if previous.autonomous_closure.is_none() || previous.epoch.epoch.checked_add(1) != Some(epoch) {
+    if !previous.autonomous_epochs_enabled() || previous.epoch.epoch.checked_add(1) != Some(epoch) {
         return Err("cannot rebind to a nonsequential autonomous successor".into());
     }
     let layout = NodeStorageLayout::new(configuration.storage.data_directory.clone())
@@ -183,7 +195,7 @@ pub(crate) fn verify_next_derived_bytes(
     previous: Arc<VerifiedAuthority>,
     bytes: &[u8],
 ) -> Result<Arc<VerifiedAuthority>, String> {
-    if previous.autonomous_closure.is_none() || bytes.is_empty() || bytes.len() > 4 * 1024 * 1024 {
+    if !previous.autonomous_epochs_enabled() || bytes.is_empty() || bytes.len() > 4 * 1024 * 1024 {
         return Err(
             "derived proof lacks an autonomous predecessor or exceeds its size bound".into(),
         );
@@ -287,6 +299,9 @@ pub(crate) fn persist_native_successor(
     witness: synergy_posy::FinalitySyncWitness,
     candidate: &synergy_execution::BudgetedExecutionCandidate,
 ) -> Result<u64, String> {
+    if !current.autonomous_epochs_enabled() {
+        return Err("native successor lacks an authenticated autonomous origin".into());
+    }
     current.verify_processing_candidate(candidate)?;
     if candidate.height != finalized.height
         || candidate.block_id != finalized.block_id
@@ -560,7 +575,7 @@ fn unchanged_successor_subject(
 
 impl VerifiedAuthority {
     pub(crate) fn epoch_close_subject_at(&self, height: u64) -> Result<Option<String>, String> {
-        if self.autonomous_closure.is_none()
+        if !self.autonomous_epochs_enabled()
             || height.checked_add(2) != Some(self.epoch.epoch_end_height)
         {
             return Ok(None);
@@ -1237,6 +1252,11 @@ pub(crate) fn cli(args: impl Iterator<Item = String>) -> Result<(), String> {
     {
         return Err("signed successor cannot replace the configured autonomous origin".into());
     }
+    if matches!(command.as_str(), "activate" | "activate-observer")
+        && load_signed(&configuration)?.is_some_and(|origin| origin.genesis_autonomous)
+    {
+        return Err("signed successor cannot replace the signed Genesis autonomous origin".into());
+    }
     if lock.is_some() {
         crate::services::checkpoint::require_stopped(config, &configuration.admin_socket_path)?;
     }
@@ -1783,4 +1803,84 @@ pub(super) fn qualify_offline_successor(
         .err()
         .unwrap()
         .contains("verify authority transition QC"));
+}
+
+
+#[cfg(test)]
+pub(super) fn qualify_fresh_genesis_autonomous(
+    config: &NodeConfiguration,
+    origin: Arc<VerifiedAuthority>,
+    keys: &[synergy_address_engine::apqe::crypto_engine::EncodedKeyPair],
+    engine: &Arc<Mutex<synergy_address_engine::apqe::crypto_engine::CryptoEngine>>,
+) {
+    assert!(origin.genesis_autonomous);
+    assert!(origin.autonomous_closure.is_none()); // E1 has no fabricated prior QC.
+    assert_eq!((origin.epoch.epoch_start_height, origin.epoch.epoch_end_height), (1, 1000));
+    assert!(origin.epoch_close_subject_at(997).unwrap().is_none());
+    assert!(origin.epoch_close_subject_at(998).unwrap().is_some());
+    let mut legacy = origin.as_ref().clone();
+    legacy.genesis_autonomous = false;
+    assert!(legacy.epoch_close_subject_at(998).unwrap().is_none());
+    assert!(verify_next_derived_bytes(Arc::new(legacy), b"{}").is_err());
+    let original_bytes = fs::read(config.genesis_path.as_ref().unwrap()).unwrap();
+    let mut tampered: serde_json::Value = serde_json::from_slice(&original_bytes).unwrap();
+    tampered["unsigned"]["network"]["autonomous_epoch_protocol"] = "unknown-profile".into();
+    fs::write(config.genesis_path.as_ref().unwrap(), serde_json::to_vec(&tampered).unwrap()).unwrap();
+    assert!(load(config).is_err());
+    tampered["unsigned"]["network"].as_object_mut().unwrap().remove("autonomous_epoch_protocol");
+    fs::write(config.genesis_path.as_ref().unwrap(), serde_json::to_vec(&tampered).unwrap()).unwrap();
+    assert!(load(config).is_err()); // Dropping an approved marker breaks the signed bytes.
+    fs::write(config.genesis_path.as_ref().unwrap(), original_bytes).unwrap();
+    let layout = NodeStorageLayout::new(config.storage.data_directory.clone()).unwrap();
+    let proof_root = layout.consensus().join("autonomous-epochs");
+    let ingress = crate::services::ingress::AuthenticatedIngress::default();
+    let binding: SignedAuthorityBinding = serde_json::from_slice(origin.binding_bytes()).unwrap();
+    // Match the fixture's independently generated key array, not BTree iteration order.
+    let validators = binding.payload.validators.iter().map(|v| v.record.clone()).collect::<Vec<_>>();
+    let mut current = origin.clone();
+    for expected_epoch in [2, 3] {
+        let (subject, _) = unchanged_successor_subject(&current.epoch, &current.registry, current.protected.as_ref().unwrap()).unwrap();
+        let (proof, candidate) = signed_derived_test_proof(&current.epoch, subject,
+            validators.clone(), keys, engine, Some(&ingress));
+        let candidate = candidate.unwrap();
+        let encoded = serde_json::to_vec(&proof).unwrap();
+        let verified = verify_next_derived_bytes(current.clone(), &encoded).unwrap();
+        crate::services::apqe_rpc_service::qualify_fresh_gateway_successor(config, current.clone(), verified.clone(), &encoded);
+        assert_eq!(verified.epoch.epoch, expected_epoch);
+        assert_eq!(verified.epoch.epoch_start_height, (expected_epoch-1)*1000+1);
+        assert_eq!(verified.epoch.epoch_end_height, expected_epoch*1000);
+        assert_eq!(verified.epoch.finalized_epoch_seed_root, proof.witness.quorum_certificates[0].id().unwrap());
+        assert!(verify_next_derived_bytes(verified.clone(), &encoded).is_err());
+        let mut bad: DerivedEpochProof = serde_json::from_slice(&encoded).unwrap();
+        bad.witness.quorum_certificates[2].participants[0].signature[0] ^= 1;
+        assert!(verify_next_derived_bytes(current.clone(), &serde_json::to_vec(&bad).unwrap()).is_err());
+        let mut bad: DerivedEpochProof = serde_json::from_slice(&encoded).unwrap();
+        bad.next_validators[0].frozen_voting_weight += 1;
+        assert!(verify_next_derived_bytes(current.clone(), &serde_json::to_vec(&bad).unwrap()).is_err());
+        assert_eq!(persist_native_successor(&proof_root, &current, proof.finalized.clone(), proof.witness.clone(), &candidate).unwrap(), expected_epoch);
+        assert_eq!(persist_native_successor(&proof_root, &current, proof.finalized.clone(), proof.witness.clone(), &candidate).unwrap(), expected_epoch);
+        current = load(config).unwrap().unwrap(); // exact signed-origin + disk proof replay
+        assert_eq!(current.epoch, verified.epoch);
+        assert_eq!(current.anchor_parent, verified.anchor_parent);
+        assert!(load_next_runtime_autonomous(config, origin.clone(), expected_epoch+1).is_err());
+        let path = proof_root.join(format!("epoch-{expected_epoch:020}.json"));
+        let mut broken: DerivedEpochProof = serde_json::from_slice(&encoded).unwrap();
+        broken.authorization.next_epoch += 1;
+        fs::write(&path, serde_json::to_vec(&broken).unwrap()).unwrap();
+        assert!(load(config).is_err());
+        let broken_bytes = fs::read(&path).unwrap();
+        assert!(persist_native_successor(&proof_root, current.timeout_predecessor.as_ref().unwrap(),
+            proof.finalized.clone(), proof.witness.clone(), &candidate).is_err());
+        assert_eq!(fs::read(&path).unwrap(), broken_bytes);
+        fs::write(&path, &encoded).unwrap();
+    }
+    // Missing predecessor cannot be skipped by loading a later stored epoch.
+    let first = proof_root.join("epoch-00000000000000000002.json");
+    let saved = fs::read(&first).unwrap();
+    fs::remove_file(&first).unwrap();
+    let replayed = load(config).unwrap().unwrap();
+    assert_eq!(replayed.epoch.epoch, 1);
+    assert!(load_next_runtime_autonomous(config, replayed, 3).is_err());
+    fs::write(first, saved).unwrap();
+    assert_eq!(load(config).unwrap().unwrap().epoch.epoch, 3);
 }

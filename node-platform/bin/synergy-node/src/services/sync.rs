@@ -1661,12 +1661,7 @@ impl SyncService {
         &mut self,
         authenticated: &BTreeSet<String>,
     ) -> Result<bool, String> {
-        if self
-            .configuration
-            .consensus
-            .autonomous_epoch_activation
-            .is_some()
-        {
+        if self.authority.as_ref().is_some_and(|authority| authority.autonomous_epochs_enabled()) {
             return Ok(false);
         }
         let Some(authority) = self.authority.as_ref() else {

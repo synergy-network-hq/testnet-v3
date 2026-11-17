@@ -93,6 +93,7 @@ struct Validator {
     local: String,
     upstream: SocketAddr,
     autonomous_bootstrap_sha256: Option<String>,
+    genesis_autonomous: bool,
 }
 
 struct Gateway {
@@ -108,7 +109,7 @@ struct Gateway {
 /// high-water mark is shared; neither native verification nor I/O takes its lock.
 struct GatewayEpochTrust {
     config: Arc<NodeConfiguration>,
-    pin: String,
+    pin: Option<String>,
     current: Arc<VerifiedAuthority>,
     high_water: Arc<Mutex<VerifiedEpoch>>,
 }
@@ -265,12 +266,19 @@ fn run(path: &Path, listen: bool) -> Result<(), String> {
             } else {
                 None
             };
+            let origin = authority::load_signed(&config)?
+                .ok_or("validator relay requires a verified signed authority origin")?;
+            let genesis_autonomous = origin.autonomous_epochs_enabled();
+            if genesis_autonomous && autonomous_bootstrap_sha256.is_some() {
+                return Err("signed Genesis origin cannot also use a legacy bootstrap".into());
+            }
             for _ in 0..WORKERS {
                 workers.push(Worker::Validator(Box::new(Validator {
                     worker: local_worker(&config, &admission, validator_address)?,
                     local: validator_address.clone(),
                     upstream,
                     autonomous_bootstrap_sha256: autonomous_bootstrap_sha256.clone(),
+                    genesis_autonomous,
                 })));
             }
             Some(*gateway_vpn_ip)
@@ -324,33 +332,37 @@ fn run(path: &Path, listen: bool) -> Result<(), String> {
                 .aegis_provider
                 .as_ref()
                 .ok_or("missing pinned APQE provider")?;
-            let epoch_inputs = autonomous_bootstrap_sha256
-                .as_ref()
-                .map(|pin| -> Result<_, String> {
-                    if !canonical_digest(pin) {
-                        return Err(
-                            "gateway bootstrap pin must be a lowercase SHA-256 digest".into()
-                        );
-                    }
-                    let origin = authority::load_signed(&config)?
-                        .ok_or("gateway requires a verified signed authority origin")?;
-                    if origin.binding_bytes() != admission.authority_bytes
-                        || origin.epoch.epoch != admission.payload.epoch
-                        || !origin.processing_profile_enabled()
-                    {
-                        return Err("gateway proof origin differs from its signed admission".into());
-                    }
-                    let high_water = Arc::new(Mutex::new(VerifiedEpoch::from_authority(&origin)?));
-                    Ok((pin, origin, high_water))
-                })
-                .transpose()?;
+            let origin = authority::load_signed(&config)?
+                .ok_or("gateway requires a verified signed authority origin")?;
+            let genesis_autonomous = origin.autonomous_epochs_enabled();
+            let epoch_inputs = if genesis_autonomous || autonomous_bootstrap_sha256.is_some() {
+                if genesis_autonomous && autonomous_bootstrap_sha256.is_some() {
+                    return Err("signed Genesis origin cannot also use a legacy bootstrap".into());
+                }
+                if autonomous_bootstrap_sha256
+                    .as_ref()
+                    .is_some_and(|pin| !canonical_digest(pin))
+                {
+                    return Err("gateway bootstrap pin must be a lowercase SHA-256 digest".into());
+                }
+                if origin.binding_bytes() != admission.authority_bytes
+                    || origin.epoch.epoch != admission.payload.epoch
+                    || !origin.processing_profile_enabled()
+                {
+                    return Err("gateway proof origin differs from its signed admission".into());
+                }
+                let high_water = Arc::new(Mutex::new(VerifiedEpoch::from_authority(&origin)?));
+                Some((autonomous_bootstrap_sha256.clone(), origin, high_water))
+            } else {
+                None
+            };
             for _ in 0..WORKERS {
                 let epoch_trust = epoch_inputs
                     .as_ref()
                     .map(|(pin, origin, high_water)| -> Result<_, String> {
                         Ok(GatewayEpochTrust {
                             config: config.clone(),
-                            pin: (*pin).clone(),
+                            pin: pin.clone(),
                             current: VerifiedAuthority::owner_context(origin)?,
                             high_water: high_water.clone(),
                         })
@@ -463,6 +475,7 @@ impl Validator {
             &identity,
             admission,
             self.autonomous_bootstrap_sha256.as_deref(),
+            self.genesis_autonomous,
         )?;
         let response = if request == TELEMETRY {
             identity
@@ -567,7 +580,12 @@ impl Gateway {
             &admission.payload.network_id,
             admission.payload.epoch,
             &admission.base.payload.genesis_hash,
-            self.epoch_trust.as_ref().map(|trust| trust.pin.as_str()),
+            self.epoch_trust
+                .as_ref()
+                .and_then(|trust| trust.pin.as_deref()),
+            self.epoch_trust
+                .as_ref()
+                .is_some_and(|trust| trust.pin.is_none()),
         )?;
         let Some(trust) = self.epoch_trust.as_mut() else {
             return Ok(None);
@@ -612,7 +630,7 @@ impl Gateway {
                     self.observe_context(admission).and_then(|observed| {
                         network_profile(
                             admission,
-                            observed.as_ref().map(|context| (context, pin.as_str())),
+                            observed.as_ref().map(|context| (context, pin.as_deref())),
                         )
                     })
                 } else {
@@ -663,7 +681,7 @@ fn valid_origin(origin: &str) -> bool {
 
 fn network_profile(
     admission: &Admission,
-    derived: Option<(&VerifiedEpoch, &str)>,
+    derived: Option<(&VerifiedEpoch, Option<&str>)>,
 ) -> Result<Vec<u8>, String> {
     admission.check_current()?;
     let genesis =
@@ -677,6 +695,11 @@ fn network_profile(
             "origin_epoch": admission.payload.epoch,
             "autonomous_bootstrap_sha256": pin, "proof_method": EPOCH_TRANSITION_PROOF_V1,
         });
+        if pin.is_none() {
+            profile["derived_context"]["origin_kind"] = json!("signed-genesis-v1");
+            profile["derived_context"]["autonomous_epoch_protocol"] =
+                json!(synergy_genesis::network::AUTONOMOUS_EPOCH_PROTOCOL_V1);
+        }
     }
     serde_json::to_vec(&profile)
         .map_err(|_| "cannot serialize pinned public network profile".into())
@@ -733,6 +756,7 @@ fn verify_runtime_identity(
     bytes: &[u8],
     admission: &Admission,
     autonomous_bootstrap_sha256: Option<&str>,
+    genesis_autonomous: bool,
 ) -> Result<(), String> {
     verify_runtime_incarnation(
         bytes,
@@ -741,6 +765,7 @@ fn verify_runtime_identity(
         admission.payload.epoch,
         &admission.base.payload.genesis_hash,
         autonomous_bootstrap_sha256,
+        genesis_autonomous,
     )
 }
 
@@ -751,6 +776,7 @@ fn verify_runtime_incarnation(
     epoch: u64,
     genesis_hash: &str,
     autonomous_bootstrap_sha256: Option<&str>,
+    genesis_autonomous: bool,
 ) -> Result<(), String> {
     #[derive(Deserialize)]
     struct RuntimeReply<'a> {
@@ -767,6 +793,7 @@ fn verify_runtime_incarnation(
         epoch,
         genesis_hash,
         autonomous_bootstrap_sha256,
+        genesis_autonomous,
     )
 }
 
@@ -777,14 +804,21 @@ fn validate_runtime_incarnation(
     epoch: u64,
     genesis_hash: &str,
     autonomous_bootstrap_sha256: Option<&str>,
+    genesis_autonomous: bool,
 ) -> Result<(), String> {
     if identity.chain_id != chain_id
         || identity.network_identity != network_id
-        || match autonomous_bootstrap_sha256 {
-            Some(pin) => {
+        || match (genesis_autonomous, autonomous_bootstrap_sha256) {
+            (true, None) => {
+                identity.epoch < epoch
+                    || identity.autonomous_bootstrap_sha256.is_some()
+                    || !identity.epoch_context_root.is_some_and(canonical_digest)
+            }
+            (true, Some(_)) => true,
+            (false, Some(pin)) => {
                 identity.epoch <= epoch || identity.autonomous_bootstrap_sha256 != Some(pin)
             }
-            None => identity.epoch != epoch,
+            (false, None) => identity.epoch != epoch,
         }
         || identity.genesis_hash != genesis_hash
     {
@@ -893,7 +927,9 @@ impl GatewayEpochTrust {
                 .epoch
                 .checked_add(1)
                 .ok_or("gateway epoch overflow")?;
-            let pin = (self.current.epoch.epoch == origin_epoch).then_some(self.pin.as_str());
+            let pin = (self.current.epoch.epoch == origin_epoch)
+                .then_some(self.pin.as_deref())
+                .flatten();
             let bytes = fetch(epoch)?;
             let proof = EpochProof::parse(
                 &bytes,
@@ -934,6 +970,84 @@ impl GatewayEpochTrust {
 
 fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<&'de RawValue>, D::Error> {
     <&RawValue>::deserialize(d).map(Some)
+}
+
+/// Reuse the native consensus fixture's real signed proof, rather than creating
+/// another validator cohort merely to exercise the independent gateway owner.
+#[cfg(test)]
+pub(super) fn qualify_fresh_gateway_successor(
+    config: &NodeConfiguration,
+    origin: Arc<VerifiedAuthority>,
+    next: Arc<VerifiedAuthority>,
+    artifact: &[u8],
+) {
+    assert!(origin.autonomous_epochs_enabled());
+    let genesis = crate::commands::selected_network::verify(config).unwrap();
+    let root = next.epoch.root().unwrap();
+    let mut runtime = RuntimeIdentity {
+        chain_id: config.chain_id,
+        network_identity: &config.network_id,
+        epoch: next.epoch.epoch,
+        genesis_hash: &genesis,
+        _finalized_height: 0,
+        epoch_context_root: Some(&root),
+        autonomous_bootstrap_sha256: None,
+    };
+    validate_runtime_incarnation(
+        &runtime,
+        config.chain_id,
+        &config.network_id,
+        origin.epoch.epoch,
+        &genesis,
+        None,
+        true,
+    )
+    .unwrap();
+    let reply = serde_json::to_vec(&json!({"jsonrpc":"2.0","id":1,"result":{
+        "chain_id":config.chain_id,"network_id":config.network_id,"epoch":next.epoch.epoch,
+        "epoch_context_root":root,"kind":"derived-v1",
+        "sha256":transport::sha256(artifact),"artifact_json":std::str::from_utf8(artifact).unwrap(),
+    }}))
+    .unwrap();
+    let high_water = Arc::new(Mutex::new(VerifiedEpoch::from_authority(&origin).unwrap()));
+    let mut trust = GatewayEpochTrust {
+        config: Arc::new(config.clone()),
+        pin: None,
+        current: VerifiedAuthority::owner_context(&origin).unwrap(),
+        high_water: high_water.clone(),
+    };
+    let mut bad: serde_json::Value = serde_json::from_slice(artifact).unwrap();
+    bad["authorization"]["next_epoch"] = json!(next.epoch.epoch + 1);
+    let bad_artifact = serde_json::to_string(&bad).unwrap();
+    let mut bad_reply: serde_json::Value = serde_json::from_slice(&reply).unwrap();
+    bad_reply["result"]["artifact_json"] = json!(bad_artifact);
+    bad_reply["result"]["sha256"] = json!(transport::sha256(bad_artifact.as_bytes()));
+    assert!(trust
+        .verify_runtime(origin.epoch.epoch, &runtime, |_| Ok(serde_json::to_vec(
+            &bad_reply
+        )
+        .unwrap()))
+        .is_err());
+    assert_eq!(trust.current.epoch.epoch, origin.epoch.epoch);
+    let forged = "f".repeat(64);
+    runtime.epoch_context_root = Some(&forged);
+    assert!(trust
+        .verify_runtime(origin.epoch.epoch, &runtime, |_| Ok(reply.clone()))
+        .is_err());
+    assert_eq!(high_water.lock().unwrap().epoch, origin.epoch.epoch);
+    runtime.epoch_context_root = Some(&root);
+    let verified = trust
+        .verify_runtime(origin.epoch.epoch, &runtime, |_| {
+            panic!("verified proof must not be refetched")
+        })
+        .unwrap();
+    assert_eq!(verified.epoch, next.epoch.epoch);
+    runtime.epoch = origin.epoch.epoch;
+    assert!(trust
+        .verify_runtime(origin.epoch.epoch, &runtime, |_| panic!(
+            "stale context must not fetch"
+        ))
+        .is_err());
 }
 
 fn bind_response(
@@ -1129,6 +1243,7 @@ mod tests {
                 1,
                 &expected,
                 None,
+                false,
             )
         };
         assert!(verify(&reply).is_ok());
@@ -1157,6 +1272,7 @@ mod tests {
                 5,
                 &genesis,
                 expected_pin,
+                false,
             )
         };
         assert!(test(6, Some(pin.as_str()), Some(pin.as_str())).is_ok());
@@ -1185,6 +1301,39 @@ mod tests {
         assert!(first.publish(&cache).is_ok());
         assert!(context(7, "b").publish(&cache).is_ok());
         assert!(first.publish(&cache).is_err());
+    }
+
+    #[test]
+    fn fresh_genesis_runtime_requires_verified_origin_and_has_no_bootstrap() {
+        let genesis = "b".repeat(64);
+        let root = "c".repeat(64);
+        let mut runtime = RuntimeIdentity {
+            chain_id: 77777,
+            network_identity: "fresh-canary",
+            epoch: 1,
+            genesis_hash: &genesis,
+            _finalized_height: 0,
+            epoch_context_root: Some(&root),
+            autonomous_bootstrap_sha256: None,
+        };
+        let check = |r: &RuntimeIdentity<'_>, fresh| {
+            validate_runtime_incarnation(r, 77777, "fresh-canary", 1, &genesis, None, fresh)
+        };
+        assert!(check(&runtime, true).is_ok());
+        runtime.epoch = 3;
+        assert!(check(&runtime, true).is_ok());
+        assert!(check(&runtime, false).is_err());
+        runtime.epoch = 0;
+        assert!(check(&runtime, true).is_err());
+        runtime.epoch = 2;
+        runtime.autonomous_bootstrap_sha256 = Some(&root);
+        assert!(check(&runtime, true).is_err());
+        runtime.autonomous_bootstrap_sha256 = None;
+        runtime.epoch_context_root = None;
+        assert!(check(&runtime, true).is_err());
+        runtime.epoch_context_root = Some(&root);
+        runtime.genesis_hash = &root;
+        assert!(check(&runtime, true).is_err());
     }
 
     #[test]
@@ -1266,7 +1415,7 @@ mod tests {
         let high_water = Arc::new(Mutex::new(VerifiedEpoch::from_authority(&origin).unwrap()));
         let mut trust = GatewayEpochTrust {
             config: config.clone(),
-            pin: pin.clone(),
+            pin: Some(pin.clone()),
             current: origin,
             high_water: high_water.clone(),
         };
@@ -1306,14 +1455,19 @@ mod tests {
     #[test]
     fn proof_page_method_and_max_page_survive_native_relay_without_reencoding() {
         let request = br#"{"jsonrpc":"2.0","method":"synergy_getFinalizedProofPageV1","params":{"height":1,"kind":"world_state"},"id":1}"#;
-        assert_eq!(validate_request(request).unwrap().method,
-            synergy_rpc::methods::FINALIZED_PROOF_PAGE_V1);
+        assert_eq!(
+            validate_request(request).unwrap().method,
+            synergy_rpc::methods::FINALIZED_PROOF_PAGE_V1
+        );
         let page = json!({"version":1,"bytes_base64":"A".repeat(65536usize.div_ceil(3)*4),
             "total_bytes":1048576,"offset":0,"next_offset":65536});
         let response = serde_json::to_vec(&json!({"jsonrpc":"2.0","id":1,"result":page})).unwrap();
-        let forwarded = bind_response(&response,99999,"selected-network","pinned-genesis").unwrap();
+        let forwarded =
+            bind_response(&response, 99999, "selected-network", "pinned-genesis").unwrap();
         assert!(forwarded.len() < MAX_BODY);
-        assert!(std::str::from_utf8(&forwarded).unwrap().contains(std::str::from_utf8(&response[1..response.len()-1]).unwrap()));
+        assert!(std::str::from_utf8(&forwarded)
+            .unwrap()
+            .contains(std::str::from_utf8(&response[1..response.len() - 1]).unwrap()));
     }
     #[test]
     fn binds_null_large_numbers_and_errors_without_reencoding() {

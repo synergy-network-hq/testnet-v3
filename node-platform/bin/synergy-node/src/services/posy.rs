@@ -320,7 +320,7 @@ pub fn registration_with_authority_transition(
         },
         super::owned_service::production(
             Box::new(PosyService {
-                autonomous_boundary: consensus.autonomous_epoch_activation.as_ref().map(|_| {
+                autonomous_boundary: authority.autonomous_epochs_enabled().then(|| {
                     AutonomousBoundary {
                         proof_root: layout.consensus().join("autonomous-epochs"),
                         candidate_root: layout.blocks().join("execution-candidates"),

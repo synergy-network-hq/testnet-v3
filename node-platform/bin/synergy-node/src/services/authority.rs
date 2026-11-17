@@ -120,6 +120,7 @@ pub(crate) fn qualification_authority_with_provider(
         epoch,
         timeout_predecessor: None,
         autonomous_closure: None,
+        genesis_autonomous: false,
         anchor_parent: SimplifiedFinalityParent::Genesis {
             genesis_hash: "c".repeat(64),
             block_id: "qualification-genesis".into(),
@@ -182,6 +183,8 @@ pub struct VerifiedAuthority {
     // Only a verified, sequential transition can attach the previous epoch.
     timeout_predecessor: Option<Arc<VerifiedAuthority>>,
     autonomous_closure: Option<Arc<VerifiedAutonomousClosure>>,
+    // Derived only from authenticated signed Genesis, never deserialized authority/config.
+    genesis_autonomous: bool,
     verifier: PqvmVerifier,
     wallet_verifier: PqvmVerifier,
     identity_verifier: Option<synergy_aegis::ApqeIdentityVerifier>,
@@ -197,6 +200,9 @@ thread_local! {
     static WORKER_AUTHORITY: std::cell::RefCell<Option<(std::sync::Weak<VerifiedAuthority>, Arc<VerifiedAuthority>)>> = const { std::cell::RefCell::new(None) };
 }
 impl VerifiedAuthority {
+    pub(crate) fn autonomous_epochs_enabled(&self) -> bool {
+        self.genesis_autonomous || self.autonomous_closure.is_some()
+    }
     /// Includes verified signed predecessors as well as derived successors.
     /// This selects historical certificate authority, never a live processing
     /// namespace or spending policy.
@@ -384,6 +390,7 @@ impl Clone for VerifiedAuthority {
             anchor_parent: self.anchor_parent.clone(),
             timeout_predecessor: self.timeout_predecessor.clone(),
             autonomous_closure: self.autonomous_closure.clone(),
+            genesis_autonomous: self.genesis_autonomous,
             verifier: self.verifier.clone(),
             wallet_verifier: self.wallet_verifier.clone(),
             identity_verifier: self.identity_verifier.clone(),
@@ -776,8 +783,16 @@ fn read_bounded(path: &std::path::Path, maximum: u64, label: &str) -> Result<Vec
 
 pub fn load(configuration: &NodeConfiguration) -> Result<Option<Arc<VerifiedAuthority>>, String> {
     let origin = load_signed(configuration)?;
+    if origin.as_ref().is_some_and(|authority| authority.genesis_autonomous)
+        && configuration.consensus.autonomous_epoch_activation.is_some()
+    {
+        return Err("fresh autonomous Genesis cannot be mixed with a historical bootstrap".into());
+    }
     match configuration.consensus.autonomous_epoch_activation.as_ref() {
-        None => Ok(origin),
+        None => match origin {
+            Some(origin) if origin.genesis_autonomous => recovery::successor::load_fresh_autonomous(configuration, origin).map(Some),
+            other => Ok(other),
+        },
         Some(activation) => recovery::successor::load_autonomous(
             configuration,
             activation,
@@ -800,6 +815,22 @@ pub(super) fn load_signed(
     }
     let bytes = read_bounded(binding_path, MAX_AUTHORITY_BYTES, "PoSy authority binding")?;
     let mut authority = verify_binding_bytes(configuration, bytes)?;
+    if configuration.genesis_path.is_some() {
+        let genesis = crate::commands::selected_network::verified_genesis(configuration)?;
+        if genesis.unsigned.network.autonomous_epoch_protocol.is_some() {
+            let binding: SignedAuthorityBinding = serde_json::from_slice(authority.binding_bytes())
+                .map_err(|e| e.to_string())?;
+            let trust = read_bounded(configuration.consensus.authority_trust_key_path.as_ref()
+                .ok_or("fresh autonomous Genesis requires its pinned trust root")?,
+                MAX_TRUST_KEY_BYTES, "fresh Genesis trust key")?;
+            // Authenticate the exact authority bytes loaded above, not a second
+            // file read observed by selected-network verification.
+            synergy_genesis::verify_binding_with_verifier(&genesis, &trust, &binding, &authority.verifier)?;
+            let enabled = synergy_genesis::validate_autonomous_origin(&genesis.unsigned, &binding.payload)?;
+            Arc::make_mut(&mut authority).genesis_autonomous = enabled;
+        }
+    }
+
     let mut lineage = Vec::new();
     while let Some(path) = transition_witness_path(configuration, &authority)? {
         match std::fs::symlink_metadata(&path) {
@@ -941,6 +972,7 @@ fn verify_binding_with_explicit_key(
         epoch,
         timeout_predecessor: None,
         autonomous_closure: None,
+        genesis_autonomous: false,
         anchor_parent: binding.payload.anchor_parent,
         verifier,
         wallet_verifier: super::apqe_provider::verifier(
@@ -1209,10 +1241,8 @@ pub fn verify_and_persist_transition(
     next_binding_bytes: Vec<u8>,
     signal: &AuthorityTransitionSignal,
 ) -> Result<Arc<VerifiedAuthority>, String> {
-    if configuration
-        .consensus
-        .autonomous_epoch_activation
-        .is_some()
+    if current.autonomous_epochs_enabled()
+        || configuration.consensus.autonomous_epoch_activation.is_some()
     {
         return Err("signed successor cannot replace the autonomous trust origin".into());
     }

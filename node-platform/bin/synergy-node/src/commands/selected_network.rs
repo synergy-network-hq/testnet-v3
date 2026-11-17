@@ -42,6 +42,15 @@ pub(crate) fn verify_with_custody_binding(
     ),
     String,
 > {
+    verified_selection(configuration).map(|(genesis, binding)| (genesis.genesis_hash, binding))
+}
+
+pub(crate) fn verified_genesis(configuration: &NodeConfiguration) -> Result<SignedGenesis, String> {
+    verified_selection(configuration).map(|(genesis, _)| genesis)
+}
+
+fn verified_selection(configuration: &NodeConfiguration) -> Result<(SignedGenesis,
+    synergy_address_engine::validator_provisioning::NetworkBinding), String> {
     let genesis_path = configuration
         .genesis_path
         .as_deref()
@@ -112,7 +121,7 @@ pub(crate) fn verify_with_custody_binding(
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     Ok((
-        genesis.genesis_hash,
+        genesis.clone(),
         synergy_address_engine::validator_provisioning::NetworkBinding {
             chain_id_hex: format!("{:064x}", network.chain_id),
             genesis_sha256: digest,

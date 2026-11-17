@@ -9,6 +9,28 @@ pub mod verify;
 pub use synergy_etdag::{certificate_quorum, EtdagDigest};
 pub use synergy_state::state_root;
 
+/// Validate the explicit fresh autonomous origin. Signatures are verified by
+/// the caller before this can grant runtime authority; this helper is also used
+/// before signing so an invalid recipe cannot be published as an approved origin.
+pub fn validate_autonomous_origin(
+    genesis: &builder::UnsignedGenesis,
+    binding: &authority::AuthorityPayload,
+) -> Result<bool, String> {
+    genesis.network.validate()?;
+    if genesis.network.autonomous_epoch_protocol.is_none() {
+        return Ok(false);
+    }
+    let policy = binding.protected.as_ref().ok_or("autonomous Genesis lacks processing policy")?;
+    if genesis.format_version != 2 || binding.epoch != 1
+        || binding.epoch_start_height != 1 || binding.epoch_end_height != 1000
+        || policy.version != 2
+        || policy.cutoff_relationship != authority::ProtectedCutoffRelationship::ProcessingGroupsV1
+    {
+        return Err("autonomous Genesis requires format 2, E1 H1..1000 and native processing-v2 policy".into());
+    }
+    Ok(true)
+}
+
 /// Verify actual Genesis and initial authority against one pinned trust root.
 /// This checks artifact agreement; it does not qualify runtime liveness.
 pub fn verify_binding(
@@ -39,6 +61,7 @@ pub fn verify_binding_with_verifier(
         .as_ref()
         .ok_or("Genesis binding lacks protected policy")?;
     let genesis = &signed.unsigned;
+    validate_autonomous_origin(genesis, payload)?;
     if genesis.network.protocol_version != synergy_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION
         || binding.signer_key_id != genesis.authority_trust_key_id
         || payload.chain_id != genesis.network.chain_id

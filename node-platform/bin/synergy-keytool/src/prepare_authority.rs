@@ -515,6 +515,7 @@ fn derive_genesis(
         policy.commitment()?,
     )?;
     authority.validate()?;
+    synergy_genesis::validate_autonomous_origin(&genesis, authority)?;
     Ok((
         genesis,
         PrepareAuthorityInput {
@@ -997,6 +998,30 @@ pub(crate) mod tests {
             derived.authority.signing_bytes().unwrap(),
             previous_authority.signing_bytes().unwrap()
         );
+    }
+
+    #[test]
+    fn fresh_autonomous_recipe_requires_exact_signed_protocol_range_and_policy() {
+        let mut recipe = genesis_recipe();
+        recipe["network"]["autonomous_epoch_protocol"] =
+            serde_json::json!(synergy_genesis::network::AUTONOMOUS_EPOCH_PROTOCOL_V1);
+        recipe["authority"]["protected"]["version"] = serde_json::json!(2);
+        recipe["authority"]["protected"]["cutoff_relationship"] = serde_json::json!("processing_groups_v1");
+        let (genesis, authority) = derive_genesis(serde_json::from_value(recipe.clone()).unwrap()).unwrap();
+        assert!(synergy_genesis::validate_autonomous_origin(&genesis, &authority.authority).unwrap());
+        for (path, value) in [
+            ("/genesis_format_version", serde_json::json!(1)),
+            ("/authority/epoch_end_height", serde_json::json!(999)),
+            ("/authority/epoch", serde_json::json!(2)),
+            ("/authority/epoch_start_height", serde_json::json!(2)),
+            ("/authority/protected/version", serde_json::json!(1)),
+            ("/network/autonomous_epoch_protocol", serde_json::json!("unknown-profile")),
+        ] {
+            let mut changed = recipe.clone();
+            if path == "/genesis_format_version" { changed["genesis_format_version"] = value; }
+            else { *changed.pointer_mut(path).unwrap() = value; }
+            assert!(derive_genesis(serde_json::from_value(changed).unwrap()).is_err(), "{path}");
+        }
     }
 
     #[test]
