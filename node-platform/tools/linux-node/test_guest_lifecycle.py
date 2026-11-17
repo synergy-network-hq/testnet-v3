@@ -52,6 +52,28 @@ class GuestTests(unittest.TestCase):
    self.manager.stop(self.params,self.authorize);self.assertTrue(self.manager.remove(self.params,'b'*64,self.authorize)['removed'])
    count=len(self.calls);self.assertTrue(self.manager.remove(self.params,'b'*64,self.authorize)['removed']);self.assertEqual(count,len(self.calls))
   with self.assertRaisesRegex(ValueError,'Removed'):self.create()
+ def test_preprovisioned_ssh_identity_is_bound_to_cloudinit_and_durable_receipt(self):
+  result=self.create()
+  # This is a boundary fixture, not a real keygen/VM qualification: the pinned
+  # command adapter above writes a fixed test-only management key pair.
+  cloud=json.loads((self.manager.directory/'user-data').read_text().split('\n',1)[1])
+  self.assertEqual(cloud['ssh_keys']['ed25519_public'],result['ssh_host_public_key'])
+  self.assertEqual(cloud['users'][0]['ssh_authorized_keys'],[self.spec['operator_ssh_public_key']])
+  self.assertTrue(cloud['ssh_deletekeys']);self.assertTrue(cloud['disable_root'])
+  self.assertFalse(cloud['ssh_pwauth'])
+  receipt=json.loads((self.manager.base/'record.json').read_bytes())
+  self.assertEqual(receipt['ssh_host_public_key'],result['ssh_host_public_key'])
+  self.assertEqual(receipt['ssh_host_fingerprint'],result['ssh_host_fingerprint'])
+  # The status API is public-only and does not establish guest boot readiness.
+  self.assertFalse(result['guest_os_reachability_verified'])
+  self.assertNotIn('fixture private SSH',json.dumps(result))
+  altered='ssh-ed25519 '+base64.b64encode(b'\0\0\0\x0bssh-ed25519\0\0\0 '+b'b'*32).decode()
+  public=self.manager.directory/'ssh-host.pub';public.write_text(altered)
+  with self.assertRaisesRegex(ValueError,'identity changed'):self.manager.status(self.params)
+  public.write_text(KEY)
+  receipt['ssh_host_fingerprint']='SHA256:unapproved'
+  (self.manager.base/'record.json').write_text(json.dumps(receipt))
+  with self.assertRaisesRegex(ValueError,'identity changed'):self.manager.status(self.params)
  def test_wire_and_independent_policy_refuse_arbitrary_choices(self):
   for extra in ({'image_url':'https://evil'},{'ssh_forward_port':1234},{'command':'sh'}):
    with self.assertRaises(controller.Refused):controller.parse_request(controller.canonical({'version':1,'operation':'guest_create','parameters':{**self.params,**extra}}))

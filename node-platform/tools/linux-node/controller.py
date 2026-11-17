@@ -1265,7 +1265,18 @@ def main():
     os.environ.update(HOME=str(ROOT),TMPDIR=str(ROOT/'tmp'),XDG_CONFIG_HOME=str(ROOT/'vpn'),
                       XDG_CACHE_HOME=str(ROOT/'cache'),NB_STATE_DIR=str(ROOT/'vpn'),
                       NB_DNS_STATE_FILE=str(ROOT/'vpn/state.json'))
-    print(json.dumps(serve(sys.stdin.buffer.read(MAX_GENESIS_STAGE_REQUEST+1)),sort_keys=True))
+    # Only the separately framed guest transport switches stdout to raw SSH.
+    # All tools became importable only after the complete engine was verified.
+    import guest_lifecycle
+    prefix=guest_lifecycle.read_guest_prefix(sys.stdin.fileno())
+    if prefix==guest_lifecycle.GUEST_SSH_MAGIC:
+        try:
+            guest_lifecycle.serve_guest_ssh(ROOT,Controller().policy(),sys.stdin.fileno(),sys.stdout.fileno())
+        except (OSError,ValueError,KeyError,TypeError,subprocess.SubprocessError):
+            print('Managed guest channel refused',file=sys.stderr)
+        return
+    raw=prefix+sys.stdin.buffer.read(MAX_GENESIS_STAGE_REQUEST+1-len(prefix))
+    print(json.dumps(serve(raw),sort_keys=True))
 
 
 if __name__=='__main__':

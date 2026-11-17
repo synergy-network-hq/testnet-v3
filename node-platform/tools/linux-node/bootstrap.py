@@ -639,6 +639,34 @@ AUTHORIZATION_FILES={'formation-context.json':4096,'vpn-ca.pem':128*1024,'vpn-pr
         'network-manifest.json':1024*1024,'transport-registry.json':1024*1024,'transport-root.pub':8192}.items()}}
 
 
+def guest_target_binding(guest):
+    import base64
+    require(isinstance(guest,dict) and set(guest)=={'guest_id','create_request_sha256','ssh_host_public_key','ssh_host_fingerprint'}
+            and isinstance(guest['guest_id'],str) and re.fullmatch('[a-z][a-z0-9-]{0,31}',guest['guest_id'])
+            and isinstance(guest['create_request_sha256'],str) and re.fullmatch('[a-f0-9]{64}',guest['create_request_sha256'])
+            and isinstance(guest['ssh_host_public_key'],str) and len(guest['ssh_host_public_key'])<=128,
+            'Exact managed guest target binding required')
+    parts=guest['ssh_host_public_key'].split(' ')
+    require(len(parts)==2 and parts[0]=='ssh-ed25519','Managed guest public SSH key is not canonical')
+    raw=base64.b64decode(parts[1],validate=True)
+    require(len(raw)==51 and raw[:19]==b'\x00\x00\x00\x0bssh-ed25519\x00\x00\x00 '
+            and base64.b64encode(raw).decode()==parts[1]
+            and guest['ssh_host_fingerprint']=='SHA256:'+base64.b64encode(hashlib.sha256(raw).digest()).decode().rstrip('='),
+            'Managed guest public identity and fingerprint differ')
+    return guest
+
+
+def verify_guest_local_ssh(guest):
+    guest_target_binding(guest)
+    path=Path('/etc/ssh/ssh_host_ed25519_key.pub');metadata=path.lstat()
+    require(path.resolve()==path and stat.S_ISREG(metadata.st_mode) and metadata.st_uid==0
+            and metadata.st_nlink==1 and not metadata.st_mode&0o022 and metadata.st_size<=1024,
+            'Managed guest local public SSH key is unsafe')
+    parts=path.read_text(encoding='ascii').split()
+    require(len(parts)>=2 and ' '.join(parts[:2])==guest['ssh_host_public_key'],
+            'Managed guest local SSH identity differs from its authenticated physical-host receipt')
+
+
 def authorization_document(raw,authenticated_pin,now):
     import base64
     def unique(pairs):
@@ -655,8 +683,12 @@ def authorization_document(raw,authenticated_pin,now):
     require(isinstance(doc,dict) and set(doc)==fields and type(doc['version']) is int and doc['version']==1
             and doc['profile']==AUTHORIZATION_PROFILE,'Unsupported engineering authorization')
     target=doc['target']
-    require(isinstance(target,dict) and set(target)=={'kind','host','port','root','host_key','machine_id_sha256'}
+    base_target={'kind','host','port','root','host_key','machine_id_sha256'}
+    require(isinstance(target,dict) and set(target) in (base_target,base_target|{'guest'})
             and target['root']==str(ROOT),'Authorization target differs')
+    if 'guest' in target:
+        guest_target_binding(target['guest'])
+        require(target['kind']=='remote','Managed guests require an authenticated physical host')
     require(target['kind'] in ('local','remote'),'Unsupported authorization target')
     if target['kind']=='local':
         require(target['host'] is None and target['port'] is None and target['host_key'] is None\
@@ -804,6 +836,8 @@ def stage_engineering_authorization(stream):
                     and isinstance(policy.get('validator_formation_sha256'),str),'Continuation changes the approved formation')
         else:
             require(previous is None,'An enrolled engineering authorization requires a bound continuation')
+        if 'guest' in doc['target']:
+            verify_guest_local_ssh(doc['target']['guest'])
         if doc['target']['kind']=='local':
             machine=Path('/etc/machine-id').read_bytes()
             require(0<len(machine)<=128 and hashlib.sha256(machine).hexdigest()==doc['target']['machine_id_sha256'],'Local machine identity differs')

@@ -406,3 +406,136 @@ def require_removed(root):
     for path in SYSTEM.glob('synergy-guest-*.service'):
         if path.is_symlink():
             require(not os.readlink(path).startswith(str(base)+'/'), 'Managed guest OS registration remains')
+
+# Dedicated controller channel, not an SSH forwarding policy or destination API.
+GUEST_SSH_MAGIC = b'SYNERGY-GUEST-SSH/1 '
+GUEST_SSH_HEADER_LIMIT = 1024
+GUEST_SSH_LIFETIME = 600
+GUEST_SSH_BYTE_LIMIT = 512*1024*1024
+GUEST_SSH_BUFFER = 64*1024
+
+
+def read_guest_prefix(fd):
+    """No buffered read-ahead: raw SSH bytes must remain on the same channel."""
+    import select
+    import time
+    deadline=time.monotonic()+5
+    data=bytearray()
+    while len(data)<len(GUEST_SSH_MAGIC):
+        remaining=deadline-time.monotonic()
+        require(remaining>0 and select.select([fd],[],[],remaining)[0], 'Controller input prefix timed out')
+        chunk=os.read(fd,len(GUEST_SSH_MAGIC)-len(data))
+        if not chunk:break
+        data.extend(chunk)
+    return bytes(data)
+
+
+def read_guest_header(fd):
+    import select
+    import time
+    deadline=time.monotonic()+5
+    raw=bytearray()
+    while len(raw)+len(GUEST_SSH_MAGIC)<GUEST_SSH_HEADER_LIMIT:
+        remaining=deadline-time.monotonic()
+        require(remaining>0 and select.select([fd],[],[],remaining)[0], 'Managed guest header timed out')
+        byte=os.read(fd,1)
+        require(bool(byte),'Managed guest header incomplete')
+        if byte==b'\n':break
+        raw.extend(byte)
+    else:raise ValueError('Managed guest header exceeds bound')
+    def unique(pairs):
+        value={}
+        for key,item in pairs:
+            require(key not in value,'Duplicate managed guest field');value[key]=item
+        return value
+    value=json.loads(raw.decode('ascii'),object_pairs_hook=unique)
+    require(isinstance(value,dict) and set(value)=={'guest_id','create_request_sha256','ssh_host_fingerprint'}
+            and valid_id(value['guest_id'])
+            and isinstance(value['create_request_sha256'],str) and re.fullmatch('[a-f0-9]{64}',value['create_request_sha256'])
+            and isinstance(value['ssh_host_fingerprint'],str) and re.fullmatch('SHA256:[A-Za-z0-9+/]{43}',value['ssh_host_fingerprint'])
+            and json.dumps(value,sort_keys=True,separators=(',',':')).encode('ascii')==bytes(raw),
+            'Exact canonical managed guest binding required')
+    return value
+
+
+def guest_channel_address(manager, header):
+    """Resolve only an active, current, host-policy-owned guest, never a caller address."""
+    current=manager.status({'guest_id':header['guest_id']})
+    require(current.get('exists') is True and current.get('phase')=='created'
+            and current.get('service_state')=='active' and type(current.get('pid')) is int and current['pid']>1
+            and current.get('ssh_identity_verified') is True
+            and current.get('request_sha256')==header['create_request_sha256']
+            and current.get('ssh_host_fingerprint')==header['ssh_host_fingerprint'],
+            'Managed guest is inactive, changed or not authenticated')
+    endpoint=current.get('ssh_endpoint',{})
+    require(endpoint=={'host':'127.0.0.1','port':manager.spec['ssh_forward_port']},
+            'Managed guest endpoint differs from approved loopback binding')
+    return ('127.0.0.1',manager.spec['ssh_forward_port'])
+
+
+def pump_guest_ssh(connection, input_fd, output_fd, *, lifetime=GUEST_SSH_LIFETIME,
+                   byte_limit=GUEST_SSH_BYTE_LIMIT):
+    """Bounded single raw SSH channel; stdin half-close drains the peer reply.
+
+    No retries, reconnects, SSH parsing, credentials, listener or destination
+    selection. The peer's EOF terminates the channel after draining its output.
+    The native inner SSH layer still verifies the exact preprovisioned host key.
+    """
+    import selectors
+    import time
+    deadline=time.monotonic()+lifetime
+    to_peer=bytearray();to_client=bytearray();sent_in=0;received_out=0
+    input_open=True;peer_open=True;write_shutdown=False
+    original={fd:os.get_blocking(fd) for fd in (input_fd,output_fd)}
+    require(input_fd!=output_fd,'Distinct SSH channel input/output required')
+    connection.setblocking(False)
+    try:
+        for fd in original:os.set_blocking(fd,False)
+        with selectors.DefaultSelector() as poll:
+            while True:
+                if not input_open and not to_peer and not write_shutdown:
+                    import socket
+                    connection.shutdown(socket.SHUT_WR);write_shutdown=True
+                if not peer_open and not to_client:return
+                remaining=deadline-time.monotonic()
+                require(remaining>0,'Managed guest channel lifetime exceeded')
+                for key in list(poll.get_map().values()):poll.unregister(key.fileobj)
+                if input_open and len(to_peer)<GUEST_SSH_BUFFER and peer_open:
+                    poll.register(input_fd,selectors.EVENT_READ,'input')
+                if to_client:poll.register(output_fd,selectors.EVENT_WRITE,'output')
+                events=(selectors.EVENT_READ if peer_open and len(to_client)<GUEST_SSH_BUFFER else 0)
+                if to_peer and peer_open:events|=selectors.EVENT_WRITE
+                if events:poll.register(connection,events,'peer')
+                for key,ready in poll.select(min(remaining,1)):
+                    try:
+                        if key.data=='input':
+                            chunk=os.read(input_fd,GUEST_SSH_BUFFER-len(to_peer))
+                            if not chunk:input_open=False
+                            else:
+                                sent_in+=len(chunk);require(sent_in<=byte_limit,'Managed guest input exceeds bound')
+                                to_peer.extend(chunk)
+                        elif key.data=='output':
+                            count=os.write(output_fd,to_client);del to_client[:count]
+                        else:
+                            if ready&selectors.EVENT_READ:
+                                chunk=connection.recv(GUEST_SSH_BUFFER-len(to_client))
+                                if not chunk:peer_open=False
+                                else:
+                                    received_out+=len(chunk);require(received_out<=byte_limit,'Managed guest output exceeds bound')
+                                    to_client.extend(chunk)
+                            if ready&selectors.EVENT_WRITE and peer_open and to_peer:
+                                count=connection.send(to_peer);del to_peer[:count]
+                    except BlockingIOError:pass
+    finally:
+        connection.close()
+        for fd,blocking in original.items():
+            try:os.set_blocking(fd,blocking)
+            except OSError:pass
+
+
+def serve_guest_ssh(root, policy, input_fd, output_fd):
+    import socket
+    header=read_guest_header(input_fd)
+    address=guest_channel_address(GuestManager(root,policy),header)
+    connection=socket.create_connection(address,timeout=5)
+    pump_guest_ssh(connection,input_fd,output_fd)

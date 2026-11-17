@@ -10,7 +10,7 @@ import controller
 import bootstrap
 
 class IsolatedControllerStartupTests(unittest.TestCase):
-    def run_enrolled(self,root):
+    def run_enrolled(self,root,raw=b'{"version":1,"operation":"target","parameters":{}}'):
         program='''import importlib.util,json,sys
 from pathlib import Path
 root=Path(sys.argv[1]);p=root/'tmp/controller/controller.py'
@@ -31,7 +31,7 @@ except m.Refused as e:
  print(json.dumps({'ok':False,'error':{'code':e.code,'message':str(e)}}))
 '''
         return subprocess.run([sys.executable,'-I','-B','-c',program,str(root)],
-            input=b'{"version":1,"operation":"target","parameters":{}}',
+            input=raw,
             stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=True,timeout=15)
 
     def fixture(self,temporary):
@@ -72,6 +72,16 @@ except m.Refused as e:
             self.assertFalse(reply['result']['installed'])
             self.assertFalse(reply['result']['communityEnrollment'])
             self.assertEqual(reply['result']['root'],str(root))
+            self.assertFalse(list(root.rglob('__pycache__')))
+
+    def test_guest_channel_failure_never_emits_json_into_raw_ssh(self):
+        import guest_lifecycle
+        header={'guest_id':'fifth','create_request_sha256':'a'*64,'ssh_host_fingerprint':'SHA256:'+'A'*43}
+        raw=guest_lifecycle.GUEST_SSH_MAGIC+json.dumps(header,sort_keys=True,separators=(',',':')).encode()+b'\n'
+        with tempfile.TemporaryDirectory() as temporary:
+            root=self.fixture(temporary);result=self.run_enrolled(root,raw)
+            self.assertEqual(result.stdout,b'')
+            self.assertEqual(result.stderr,b'Managed guest channel refused\n')
             self.assertFalse(list(root.rglob('__pycache__')))
 
     def test_drift_refuses_before_malicious_tool_can_execute(self):
