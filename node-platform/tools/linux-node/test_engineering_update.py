@@ -8,7 +8,7 @@ import controller as c
 
 class EngineeringUpdateTests(unittest.TestCase):
     def fixture(self):
-        selection={'release_id':'reviewed-old','manifest_sha256':'a'*64,'network_id':'nodenetwork-formation-disposable-test','chain_id':99999,'node_name':'validator-test'}
+        selection={'release_id':'reviewed-old','manifest_sha256':'a'*64,'network_id':'synergy-posy-canary-20261117','chain_id':99999,'node_name':'validator-test'}
         policy={'engineering_selection':selection,'engineering_initial_authorization_sha256':'b'*64,
             'engineering_authorization':{'sha256':'c'*64},'validator_formation_sha256':'d'*64,
             'engineering_target':{'kind':'remote','host':'127.0.0.1','port':22280,'root':'/opt/synergy'},
@@ -27,6 +27,10 @@ class EngineeringUpdateTests(unittest.TestCase):
                 b.engineering_update_context(policy,selection,'reviewed-new','e'*64,1000)
         with patch.object(b,'NATIVE_AUTHENTICATED_UPDATE_CONTEXT',None,create=True),self.assertRaises(ValueError):
             b.engineering_update_context(policy,selection,'reviewed-new','e'*64,1000)
+        production=copy.deepcopy(policy)
+        production.pop('engineering_initial_authorization_sha256')
+        with patch.object(b,'NATIVE_AUTHENTICATED_UPDATE_CONTEXT',context,create=True),self.assertRaises(ValueError):
+            b.engineering_update_context(production,selection,'reviewed-new','e'*64,1000)
     def test_staging_does_not_advance_installed_selection_and_only_exact_sealed_upgrade_does(self):
         old,policy,context=self.fixture();new={**old,'release_id':'reviewed-new','manifest_sha256':'e'*64}
         policy['releases']['reviewed-new']={'manifest_sha256':'e'*64,'inventory_authenticated':True,'networks':{old['network_id']:99999}}
@@ -94,6 +98,12 @@ class EngineeringUpdateTests(unittest.TestCase):
                 stack.enter_context(patch.object(synergy_linux,'verify_package',side_effect=lambda path:json.loads((path/'package.json').read_bytes())))
                 stack.enter_context(patch('time.time',return_value=1000))
                 stack.enter_context(patch.object(b,'NATIVE_AUTHENTICATED_UPDATE_CONTEXT',context,create=True))
+                for key,value in [('network_id','foreign'),('chain_id',1266),('node_name','other'),('role','rpc_gateway')]:
+                    changed_receipt={**receipt,key:value}
+                    with patch.object(lifecycle,'_sealed_receipt',return_value=(changed_receipt,{'release_id':selection['release_id']})),self.assertRaises(ValueError):
+                        b.stage_engineering_update(io.BytesIO(),header['release_id'],header['manifest_sha256'])
+                    self.assertFalse((root/'tmp/update-master').exists())
+                    self.assertEqual(json.loads(policy_path.read_bytes()),policy)
                 result=b.stage_engineering_update(package,header['release_id'],header['manifest_sha256'])
                 self.assertTrue(result['controllerAdopted']);self.assertFalse(result['validatorUpgraded'])
                 changed=json.loads(policy_path.read_bytes());self.assertEqual(changed['engineering_selection'],selection)

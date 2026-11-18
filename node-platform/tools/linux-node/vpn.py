@@ -425,6 +425,120 @@ def record_retirement(root, raw, pin):
         return receipt
 
 
+
+_DIAGNOSTIC_MARKERS = {
+    'tls_untrusted': (b'certificate signed by unknown authority', b'certificate verify failed', b'unable to get local issuer'),
+    'tls_expired': (b'certificate has expired', b'certificate is not yet valid'),
+    'tls_name_mismatch': (b'certificate is valid for', b'cannot validate certificate for'),
+    'setup_key_rejected': (b'invalid setup key', b'setup key is invalid', b'setup key expired'),
+    'transport_timeout': (b'context deadline exceeded', b'i/o timeout', b'connection timed out'),
+    'connection_refused': (b'connection refused',),
+    'interface_permission': (b'operation not permitted', b'failed to create interface'),
+}
+
+
+def diagnostic_codes(raw):
+    """Fixed categories only: never emit raw daemon/client text or credentials."""
+    text = raw.lower()
+    return sorted(code for code, markers in _DIAGNOSTIC_MARKERS.items()
+                  if any(marker in text for marker in markers))
+
+
+def diagnostic_log(root):
+    result = {'available': False, 'modified_at_ms': None, 'sampled_bytes': 0, 'codes': []}
+    try:
+        directory = os.open(root/'logs', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            fd = os.open('netbird.log', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        finally:
+            os.close(directory)
+        try:
+            metadata = os.fstat(fd)
+            require(stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1
+                    and metadata.st_uid == 0, 'Unsafe VPN diagnostic log')
+            os.lseek(fd, max(0, metadata.st_size-65536), os.SEEK_SET)
+            raw = os.read(fd, 65536)
+            result.update(available=True, modified_at_ms=metadata.st_mtime_ns//1000000,
+                          sampled_bytes=len(raw), codes=diagnostic_codes(raw))
+        finally:
+            os.close(fd)
+    except (ValueError, OSError):
+        pass
+    return result
+
+
+def diagnostics(root, enrollment):
+    """Read-only observation, independent of a completed enrollment receipt.
+
+    An absent receipt does not imply the client is disconnected. Reachability
+    is tested only against exact authenticated provider-policy peers; no input
+    supplies commands, destinations, paths, setup keys or management credentials.
+    """
+    from controller import Controller
+    root = Path(root)
+    result = {'schema': 'nodenetwork-vpn-diagnostics-v1', 'observed_at_ms': int(time.time()*1000),
+              'enrollment': {key: enrollment[key] for key in
+                             ('service_registered', 'enrollment_staged', 'enrollment_recorded',
+                              'reconciliation_required', 'server_bound')},
+              'trust': {'mode': None, 'error_code': None},
+              'client': {'available': False, 'management_connected': None, 'signal_connected': None,
+                         'wireguard_public_key': None, 'overlay_address': None, 'error_code': None},
+              'peers': [], 'log': diagnostic_log(root), 'mutation_performed': False}
+    try:
+        environment = client_environment(root)
+        controller = Controller(root)
+        policy = controller.policy()
+        pins = policy.get('authorization_files', {})
+        peers = []
+        if 'vpn-provider.json' in pins:
+            raw = controller.direct(root/'tmp/controller/authorization/inputs/vpn-provider.json', True, 16384).read_bytes()
+            require(hashlib.sha256(raw).hexdigest() == pins['vpn-provider.json'], 'VPN provider changed')
+            provider = json.loads(raw)
+            peers = provider['required_peer_ips']
+            require(isinstance(peers, list) and 0 < len(peers) <= 5
+                    and len(set(peers)) == len(peers), 'Invalid approved VPN peer set')
+            for peer in peers:
+                address = ipaddress.ip_address(peer)
+                require(str(address) == peer and not (address.is_loopback or address.is_unspecified
+                        or address.is_multicast or address.is_link_local), 'Invalid approved peer')
+        result['trust']['mode'] = 'approved_private_ca' if 'SSL_CERT_FILE' in environment else 'system'
+    except (ValueError, OSError, KeyError, TypeError):
+        result['trust']['error_code'] = 'approved_trust_scope_refused'
+        return result
+    try:
+        raw = native([root/'tools/netbird-client', 'status', '--json'], timeout=8)
+        current = json.loads(raw)
+        management = current['management']['connected']
+        signal = current['signal']['connected']
+        require(type(management) is bool and type(signal) is bool, 'Invalid VPN connected state')
+        key = current.get('publicKey') or None
+        if key is not None:
+            decoded = base64.b64decode(key, validate=True)
+            require(len(decoded) == 32 and base64.b64encode(decoded).decode() == key, 'Invalid public VPN key')
+        overlay = current.get('netbirdIp') or None
+        if overlay is not None:
+            overlay = str(ipaddress.ip_interface(overlay))
+        result['client'].update(available=True, management_connected=management,
+                                signal_connected=signal, wireguard_public_key=key, overlay_address=overlay)
+    except subprocess.TimeoutExpired:
+        result['client']['error_code'] = 'client_status_timeout'
+    except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError):
+        result['client']['error_code'] = 'client_status_unavailable'
+    for peer in peers:
+        observation = {'ip': peer, 'route_via_wt0': False, 'reachable': False, 'error_code': None}
+        try:
+            route = json.loads(native(['ip', '-j', 'route', 'get', peer], timeout=3))
+            require(isinstance(route, list) and len(route) == 1 and route[0].get('dev') == 'wt0',
+                    'Peer route is not the contained VPN interface')
+            observation['route_via_wt0'] = True
+            native(['ping', '-n', '-I', 'wt0', '-c', '1', '-W', '1', peer], timeout=3)
+            observation['reachable'] = True
+        except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError):
+            observation['error_code'] = 'peer_unreachable' if observation['route_via_wt0'] else 'peer_route_unavailable'
+        result['peers'].append(observation)
+    return result
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('command', choices=['enroll', 'status', 'bind-server', 'verify-gateway-route', 'retire-peer', 'record-retirement'])

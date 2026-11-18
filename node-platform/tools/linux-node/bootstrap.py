@@ -693,8 +693,9 @@ def stage_engineering_update(stream, release_id, pin):
         network=receipt['network_id']
         previous=effective_engineering_selection(root,policy)
         context=engineering_update_context(policy,previous,release_id,pin,int(time.time()))
-        require(receipt.get('role')=='validator' and re.fullmatch(r'nodenetwork-formation-disposable-[a-z0-9]+(?:-[a-z0-9]+)*',network),
-                'This controller staging operation is limited to disposable formation')
+        require(receipt.get('role')=='validator'
+                and all(receipt.get(key)==previous[key] for key in ('network_id','chain_id','node_name')),
+                'Installed validator differs from the independently approved engineering selection')
         control_inventory(root)
         require(not any((old/'grants').iterdir())
                 and not any((old/name).exists() for name in (HOST_REMOVAL,VPN_ENROLLMENT))

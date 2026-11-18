@@ -30,7 +30,7 @@ GENESIS_FILES = {'genesis.json':4*1024*1024,'authority.json':1024*1024,'authorit
 ENGINE_MODULES = frozenset(('controller.py','synergy_linux.py','lifecycle.py','conformance.py',
                             'apqe_layout.py','vpn.py','canary_rpc_relay.py','root_guard.py','guest_lifecycle.py'))
 READS = frozenset(('treasury_preflight','treasury_status','treasury_export','commissioning_observation','network_transport_status','network_transport_export','guest_resources','guest_preflight','guest_status','target','inventory','health','install_preflight','upgrade_preflight',
-                  'recovery_preflight','uninstall_preflight','vpn_status','diagnostics','identity_preflight','identity_status',
+                  'recovery_preflight','uninstall_preflight','vpn_status','vpn_diagnostics','diagnostics','identity_preflight','identity_status',
                   'formation_preflight','formation_status','formation_export','genesis_stage_preflight','genesis_binding_preflight','authorization_status','network_formation_status','network_formation_export'))
 MUTATIONS = frozenset(('treasury_prepare','network_transport_prepare','network_transport_sign','guest_create','guest_stop','guest_remove','install','commission','register','vpn_enroll','vpn_bind','vpn_retire','start','stop','restart','upgrade','uninstall','identity_generate',
                        'formation_prepare','genesis_stage','genesis_bind','network_formation_prepare','network_formation_sign'))
@@ -945,6 +945,13 @@ class Controller:
                 'enrollment_sha256':hashlib.sha256(enrollment.read_bytes()).hexdigest() if recorded else None,
                 'server_binding_sha256':hashlib.sha256(binding.read_bytes()).hexdigest() if bound else None,'retired':retired}
 
+    def vpn_diagnostics(self):
+        import lifecycle as life
+        from vpn import diagnostics
+        with life._lifecycle_lock(self.root):
+            life._sealed_receipt(self.root)
+            return diagnostics(self.root,self.vpn_status())
+
     def vpn_enroll(self,request):
         import lifecycle as life
         from synergy_linux import write_new
@@ -1289,6 +1296,7 @@ class Controller:
                 if op=='guest_remove': return guest.remove(p,request_digest(request),lambda:self.authorize(request))
         if op=='health': return json.loads(native([self.root/'bin/synergy-node','health','--admin-socket',self.root/'run/admin.sock']))
         if op=='vpn_status': return self.vpn_status()
+        if op=='vpn_diagnostics': return self.vpn_diagnostics()
         if op=='vpn_enroll': return self.vpn_enroll(request)
         if op=='vpn_bind': return self.vpn_bind(request)
         if op=='vpn_retire': return self.vpn_retire(request)
