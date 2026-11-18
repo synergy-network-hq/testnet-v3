@@ -557,6 +557,9 @@ pub(crate) fn exercise_native_fixture(
     transport_custodies:&[(EncryptedEnvelope,SecretBytes)],
 ) {
     let mut recipe: Value = decode(&read(recipe_path, REQUEST_LIMIT, true).unwrap()).unwrap();
+    recipe["authority"]["protected"]["version"] = json!(2);
+    recipe["authority"]["protected"]["cutoff_relationship"] = json!("processing_groups_v1");
+    recipe["canary_testing_treasury"] = crate::formation_treasury::prepare_send_fixture_treasury(context_path,context_pin,parent,engine.clone(),recipe["network"]["activation_unix"].as_u64().unwrap());
     let registrations: Vec<String> = recipe["formation_registrations"]
         .as_array()
         .unwrap()
@@ -663,6 +666,7 @@ pub(crate) fn exercise_native_fixture(
         enrolled.push(serde_json::to_string(&enrollment).unwrap());
     }
     crate::network_transport::exercise_native_fixture(context_path,context_pin,&directory,parent,engine.clone(),&enrolled);
+    crate::formation_treasury::exercise_send_fixture(context_path,context_pin,&directory,parent,engine.clone());
     let unlock = SecretBytes::from_bytes(fs::read(directory.join("unlock")).unwrap());
     fs::write(directory.join("unlock"), [b'0'; 64]).unwrap();
     assert!(status(context_path, context_pin, &directory, engine.clone(), false).is_err());

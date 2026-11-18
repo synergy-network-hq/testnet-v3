@@ -38,6 +38,18 @@ fn run() -> Result<(), String> {
     let (arguments, engine) = selected_arguments(&arguments)?;
     match arguments {
         #[cfg(unix)]
+        [command, context, pin, formation, request, request_pin, treasury] if command == "prepare-formation-treasury-send" => {
+            println!("{}",formation_treasury::prepare_send(Path::new(context),pin,Path::new(formation),Path::new(request),request_pin,Path::new(treasury),engine.ok_or("authenticated APQE provider required")?)?);
+        }
+        #[cfg(unix)]
+        [command, treasury, nonce] if command == "review-formation-treasury-send" => {
+            println!("{}",formation_treasury::send_status(Path::new(treasury),nonce.parse().map_err(|_|"Exact treasury nonce required")?,engine.ok_or("authenticated APQE provider required")?)?);
+        }
+        #[cfg(unix)]
+        [command, treasury, nonce, request_pin] if command == "take-formation-treasury-send" => {
+            println!("{}",formation_treasury::take_send(Path::new(treasury),nonce.parse().map_err(|_|"Exact treasury nonce required")?,request_pin,engine.ok_or("authenticated APQE provider required")?)?);
+        }
+        #[cfg(unix)]
         [command, context, pin, request, request_pin, directory] if command == "prepare-formation-treasury" => {
             println!("{}",formation_treasury::prepare(Path::new(context),pin,Path::new(request),request_pin,Path::new(directory),engine.ok_or("authenticated APQE provider required")?)?);
         }
@@ -504,6 +516,8 @@ fn selected_arguments(
     if !matches!(
         command,
         "generate-authority-custody"
+            | "prepare-formation-treasury" | "review-formation-treasury" | "export-formation-treasury"
+            | "prepare-formation-treasury-send" | "review-formation-treasury-send" | "take-formation-treasury-send"
             | "prepare-network-transport" | "review-network-transport" | "sign-network-transport" | "export-network-transport"
             | "prepare-network-formation"
             | "review-network-formation"
