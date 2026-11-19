@@ -2094,11 +2094,188 @@ def continuation_not_applied_proof(wire,transport=False,readiness=False,commissi
                 'not_applied':True,'mutation_performed':False}
 
 
+HANDOFF_UNITS=('synergy-chain1266-role@rpc-gateway.service','synergy-canary-rpc-relay.service','synergy-vpn.service')
+HANDOFF_FILES={
+    'nginx_rpc':'/etc/nginx/sites-available/testnet-core-rpc.synergy-network.io',
+    'nginx_origin_only':'/etc/nginx/snippets/synergy-cloudflare-origin-only.conf',
+    'nginx_origin_aop':'/etc/nginx/snippets/synergy-cloudflare-aop.conf',
+    'nginx_source_map':'/etc/nginx/conf.d/synergy-cloudflare-origin-source.conf',
+    'tls_public_certificate':'/etc/nginx/ssl/synergy/cloudflare-origin-synergy-network.pem',
+    'tunnel_unit':'/etc/systemd/system/synergy-chain1266-rpc-tunnel.service',
+}
+
+
+def _handoff_public(path,limit=131072):
+    path=Path(path)
+    require(path.is_absolute() and path.resolve()==path,'Noncanonical handoff public file')
+    for parent in path.parents:
+        info=parent.lstat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid==0 and not info.st_mode&0o022,
+                'Unsafe handoff parent')
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+    try:
+        info=os.fstat(fd)
+        require(stat.S_ISREG(info.st_mode) and info.st_uid==0 and info.st_nlink==1
+                and not info.st_mode&0o022 and 0<info.st_size<=limit,'Unsafe handoff public file')
+        with os.fdopen(os.dup(fd),'rb') as stream:
+            digest=hashlib.sha256();data=bytearray()
+            for chunk in iter(lambda:stream.read(min(limit+1,1024*1024)),b''):
+                digest.update(chunk)
+                if limit<=131072:data.extend(chunk)
+                require(stream.tell()<=limit,'Handoff public file exceeds bound')
+        stable=lambda value:(value.st_dev,value.st_ino,value.st_mode,value.st_nlink,value.st_uid,
+                             value.st_gid,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
+        require(stable(os.fstat(fd))==stable(info)==stable(path.lstat()),'Handoff public file changed')
+        return digest.hexdigest(),bytes(data)
+    finally:os.close(fd)
+
+
+def _handoff_command(args,limit=65536,timeout=5):
+    import selectors
+    import time
+    process=subprocess.Popen(args,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+    selector=selectors.DefaultSelector();selector.register(process.stdout,selectors.EVENT_READ)
+    deadline=time.monotonic()+timeout;output=bytearray()
+    try:
+        while True:
+            remaining=deadline-time.monotonic()
+            require(remaining>0 and selector.select(remaining),'Handoff command timed out')
+            chunk=os.read(process.stdout.fileno(),min(65536,limit+1-len(output)))
+            if not chunk:break
+            output.extend(chunk);require(len(output)<=limit,'Handoff observation exceeds bound')
+        require(process.wait(timeout=max(0.001,deadline-time.monotonic()))==0,'Handoff command refused')
+        return bytes(output)
+    finally:
+        selector.close();process.stdout.close()
+        if process.poll() is None:process.kill();process.wait()
+
+
+def _handoff_unit(name,fragment,executable):
+    raw=_handoff_command(['/usr/bin/systemctl','show',name,
+        '--property=ActiveState,MainPID,FragmentPath,DropInPaths'],8192).decode('utf-8')
+    values=dict(line.split('=',1) for line in raw.splitlines() if '=' in line)
+    require(set(values)=={'ActiveState','MainPID','FragmentPath','DropInPaths'}
+            and values['FragmentPath']==fragment and not values['DropInPaths']
+            and values['ActiveState'] in ('active','inactive','failed')
+            and re.fullmatch('[0-9]{1,10}',values['MainPID']),'Unattributed handoff service')
+    pin,_=_handoff_public(fragment)
+    pid=values['MainPID'];active=values['ActiveState']=='active'
+    require(active==(pid!='0'),'Ambiguous handoff service state')
+    if active:
+        require(os.readlink('/proc/'+pid+'/exe')==executable,'Foreign handoff service process')
+    return pin,active,pid
+
+
+def _handoff_root_entries(root,allowed):
+    # This is bounded depth-one metadata, never private contents or a claim of
+    # recursive ownership. Retirement still requires separate attribution.
+    root=Path(root);info=root.lstat()
+    require(root.resolve()==root and stat.S_ISDIR(info.st_mode) and info.st_uid==0
+            and not info.st_mode&0o022,'Unattributed legacy root')
+    entries=[];blockers=set()
+    with os.scandir(root) as stream:
+        for entry in stream:
+            if len(entries)==64:
+                blockers.add('inventory_bound_exceeded');break
+            item=entry.stat(follow_symlinks=False)
+            kind='directory' if stat.S_ISDIR(item.st_mode) else 'file' if stat.S_ISREG(item.st_mode) else 'other'
+            entries.append([entry.name,kind,stat.S_IMODE(item.st_mode),item.st_uid,item.st_gid])
+            if entry.name not in allowed or kind=='other' or item.st_uid!=0 or item.st_mode&0o022:
+                blockers.add('foreign_resources')
+    raw=json.dumps(sorted(entries),sort_keys=True,separators=(',',':')).encode()
+    return hashlib.sha256(raw).hexdigest(),blockers
+
+
+def _gateway_handoff_snapshot():
+    files={key:_handoff_public(path)[0] for key,path in HANDOFF_FILES.items()}
+    enabled=Path('/etc/nginx/sites-enabled/testnet-core-rpc.synergy-network.io')
+    require(enabled.is_symlink() and enabled.lstat().st_uid==0
+            and enabled.resolve()==Path(HANDOFF_FILES['nginx_rpc']),'Unattributed enabled RPC frontend')
+    _,routes=_handoff_public(HANDOFF_FILES['nginx_rpc'])
+    # Hash raw bytes, but never attribute an inactive commented directive.
+    routes=b'\n'.join(line.split(b'#',1)[0] for line in routes.splitlines())
+    require(set(re.findall(rb'proxy_pass\s+([^;\s]+)\s*;',routes))=={
+        b'http://127.0.0.1:5640',b'http://127.0.0.1:5660',
+        b'http://127.0.0.1:6030/metrics',b'http://127.0.0.1:9100/metrics'},'Unexpected RPC upstream scope')
+    metrics_route=re.findall(rb'location\s*=\s*/metrics/node-rpc\s*\{([^{}]*)\}',routes)
+    require(len(metrics_route)==1
+            and re.findall(rb'(allow|deny)\s+([^;\s]+)\s*;',metrics_route[0])==[(b'allow',b'209.145.50.9'),(b'deny',b'all')]
+            and re.findall(rb'proxy_pass\s+([^;\s]+)\s*;',metrics_route[0])==[b'http://127.0.0.1:6030/metrics'],
+            'Unattributed metrics consumer route')
+    tunnel,active,pid=_handoff_unit('synergy-chain1266-rpc-tunnel.service',HANDOFF_FILES['tunnel_unit'],'/usr/bin/ssh')
+    require(tunnel==files['tunnel_unit'],'Tunnel registration changed')
+    tunnel_owned=False
+    if active:
+        with Path('/proc/'+pid+'/cmdline').open('rb') as stream:args=stream.read(16385)
+        require(len(args)<=16384,'Tunnel command exceeds bound')
+        args=args.rstrip(b'\0').split(b'\0')
+        forwards=[args[i+1] for i,arg in enumerate(args[:-1]) if arg==b'-L']
+        tunnel_owned=(set(forwards)=={b'127.0.0.1:5640:127.0.0.1:5640',b'127.0.0.1:5660:127.0.0.1:5660'}
+                      and len(forwards)==2 and args[-1]==b'root@62.146.182.207'
+                      and not any(arg.startswith((b'-R',b'-D')) for arg in args))
+    listeners=_handoff_command(['/usr/bin/ss','-H','-lntp']).decode('utf-8')
+    owns=lambda port,owner:any(re.search(r'\b127\.0\.0\.1:'+str(port)+r'\s',line)
+        and 'pid='+owner+',' in line for line in listeners.splitlines())
+    preserved={'files':files,'tunnel_active':active and tunnel_owned,
+               'rpc_listener_owned':active and owns(5640,pid),'ws_listener_owned':active and owns(5660,pid)}
+    role='/opt/synergy/chain1266/releases/chain1266-incarnation-4-rc30/bin/synergy-rpc-gateway-node'
+    role_pin,role_active,role_pid=_handoff_unit(HANDOFF_UNITS[0],'/etc/systemd/system/synergy-chain1266-role@.service',role)
+    canary_pin,canary_active,_=_handoff_unit(HANDOFF_UNITS[1],'/etc/systemd/system/'+HANDOFF_UNITS[1],'/opt/Synergy/bin/synergy-node')
+    vpn_pin,vpn_active,_=_handoff_unit(HANDOFF_UNITS[2],'/etc/systemd/system/'+HANDOFF_UNITS[2],'/opt/Synergy/bin/netbird')
+    lower,lower_blockers=_handoff_root_entries('/opt/synergy',{'chain1266'})
+    upper,upper_blockers=_handoff_root_entries('/opt/Synergy',DIRECTORIES|{'package.json','installation.json'})
+    blockers={'metrics_resolution_required','explicit_retirement_approval_required','legacy_inventory_requires_attribution'}|lower_blockers|upper_blockers
+    if not all(preserved[k] for k in ('tunnel_active','rpc_listener_owned','ws_listener_owned')):
+        blockers.add('protected_attribution_failed')
+    metrics={'unit_sha256':role_pin,'service_active':role_active,
+        'listener_owned':role_active and owns(6030,role_pid),'consumer_ip':'209.145.50.9','resolution':'unresolved'}
+    if not metrics['listener_owned']:blockers.add('legacy_attribution_failed')
+    legacy={'chain1266_executable_sha256':_handoff_public(role,256*1024*1024)[0],
+        'canary_executable_sha256':_handoff_public('/opt/Synergy/bin/synergy-node',256*1024*1024)[0],
+        'canary_unit_sha256':canary_pin,'vpn_unit_sha256':vpn_pin,
+        'canary_active':canary_active,'vpn_active':vpn_active,
+        'lower_root_entries_sha256':lower,'upper_root_entries_sha256':upper}
+    return {'preserved':preserved,'metrics':metrics,'legacy':legacy,
+            'candidate_units':list(HANDOFF_UNITS),'blockers':sorted(blockers)}
+
+
+def _handoff_machine():
+    raw=_handoff_public('/etc/machine-id',4096)[1].strip()
+    require(re.fullmatch(b'[a-f0-9]{32}',raw),'Canonical handoff machine identity required')
+    # The retained independently verified pin hashes canonical 32-hex ASCII,
+    # excluding the machine-id file's terminal newline.
+    return hashlib.sha256(raw).hexdigest()
+
+
+def gateway_handoff_plan(wire):
+    import time
+    require(os.geteuid()==0 and isinstance(wire,dict) and set(wire)=={'context','challenge'},'Exact handoff read required')
+    context=wire['context'];challenge=wire['challenge']
+    require(isinstance(context,dict) and set(context)=={'target','machine_id_sha256','expires_at'}
+            and context['target']=={'kind':'remote','host':'167.86.83.83','port':22,'root':'/opt/synergy'}
+            and type(context['target']['port']) is int
+            and isinstance(challenge,str) and re.fullmatch('[a-f0-9]{64}',challenge)
+            and type(context['expires_at']) is int and int(time.time())<context['expires_at']<=int(time.time())+120,
+            'Exact short-lived handoff context required')
+    machine=_handoff_machine()
+    require(machine==context['machine_id_sha256'],'Handoff machine differs')
+    facts=_gateway_handoff_snapshot()
+    require(_gateway_handoff_snapshot()==facts and _handoff_machine()==machine
+            and int(time.time())<context['expires_at'],'Handoff scope changed')
+    committed={'target':context['target'],'machine_id_sha256':machine,**facts}
+    pin=hashlib.sha256(json.dumps(committed,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    return {'schema':'nodenetwork-legacy-gateway-handoff-plan-v1','challenge':challenge,
+        **committed,'plan_sha256':pin,'mutation_performed':False,'removal_authorized':False,'automatic_retry':False}
+
+
 def main():
     global _UPDATE_PHASE,_UPGRADE_PROOF_PHASE
     _UPDATE_PHASE=None;_UPGRADE_PROOF_PHASE=None
     try:
-        if len(sys.argv)==2 and sys.argv[1]=='--inspect-update-commission-grant':
+        if sys.argv[1:]==['--gateway-handoff-plan']:
+            raw=sys.stdin.buffer.read(4097);require(len(raw)<=4096,'Handoff context exceeds bound')
+            operation=gateway_handoff_plan(json.loads(raw))
+        elif len(sys.argv)==2 and sys.argv[1]=='--inspect-update-commission-grant':
             raw=sys.stdin.buffer.read(65537);require(len(raw)<=65536,'Preservation proof exceeds bound')
             operation=inspect_update_commission_grant(json.loads(raw))
         elif len(sys.argv)==2 and sys.argv[1] in ('--continuation-not-applied-proof','--prove-transport-not-applied','--prove-readiness-not-applied','--commission-outcome-proof','--treasury-send-phase-proof','--treasury-send-not-applied-proof'):
@@ -2122,7 +2299,9 @@ def main():
             operation=bootstrap(sys.stdin.buffer)
         result={'version':1,'ok':True,'result':operation}
     except Exception:
-        if sys.argv[1:]==['--upgrade-not-applied-proof'] and _UPGRADE_PROOF_PHASE in UPGRADE_PROOF_PHASES:
+        if sys.argv[1:]==['--gateway-handoff-plan']:
+            result={'version':1,'ok':False,'error':{'code':'gateway_handoff_refused','message':'Legacy gateway handoff observation refused; no resources changed'}}
+        elif sys.argv[1:]==['--upgrade-not-applied-proof'] and _UPGRADE_PROOF_PHASE in UPGRADE_PROOF_PHASES:
             result={'version':1,'ok':False,'error':{'code':'upgrade_proof_'+_UPGRADE_PROOF_PHASE+'_refused','message':'Read-only upgrade proof refused'}}
         elif _UPDATE_PHASE in UPDATE_PHASES:
             result={'version':1,'ok':False,'error':{'code':'engineering_update_'+_UPDATE_PHASE+'_refused',
