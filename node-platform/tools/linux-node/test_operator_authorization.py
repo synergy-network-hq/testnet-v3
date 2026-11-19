@@ -36,6 +36,24 @@ class OperatorAuthorizationTests(unittest.TestCase):
         for bad in [raw+' ',raw.replace('99999','99998'),raw.replace('22281','22282')]:
             with self.assertRaisesRegex(ValueError,'independent native approval'):b.authorization_document(bad,pin,1000)
         with self.assertRaisesRegex(ValueError,'independent native approval'):b.authorization_document(raw,'0'*64,1000)
+    def test_vpn_stop_is_parameterless_exact_supported_mutation(self):
+        doc,_=self.document()
+        request={'version':1,'operation':'vpn_stop','parameters':{}}
+        self.assertEqual(c.parse_request(c.canonical(request)),request)
+        with self.assertRaises(ValueError):c.parse_request(c.canonical(dict(request,parameters={'unit':'foreign.service'})))
+        doc['requests']=[{'operation':'vpn_stop','request_sha256':c.request_digest(request)}]
+        raw,pin=self.encode(doc)
+        self.assertEqual(b.authorization_document(raw,pin,1000),doc)
+
+    def test_vpn_resume_is_parameterless_exact_supported_mutation(self):
+        doc,_=self.document()
+        request={'version':1,'operation':'vpn_resume','parameters':{}}
+        self.assertEqual(c.parse_request(c.canonical(request)),request)
+        with self.assertRaises(ValueError):c.parse_request(c.canonical(dict(request,parameters={'unit':'foreign.service'})))
+        doc['requests']=[{'operation':'vpn_resume','request_sha256':c.request_digest(request)}]
+        raw,pin=self.encode(doc)
+        self.assertEqual(b.authorization_document(raw,pin,1000),doc)
+
     def test_schema_paths_expiry_and_scope_are_bounded(self):
         doc,_=self.document()
         for key,value in [('expires_at',1000),('expires_at',4601),('sequence',0),('chain_id',True),
@@ -107,7 +125,10 @@ class OperatorAuthorizationTests(unittest.TestCase):
                 stack.enter_context(patch.object(lifecycle,'_assert_no_application_processes'))
                 stack.enter_context(patch.object(b,'NATIVE_AUTHENTICATED_AUTHORIZATION_SHA256',pin,create=True))
                 stack.enter_context(patch.object(b.time if hasattr(b,'time') else __import__('time'),'time',return_value=1000))
-                result=b.stage_engineering_authorization(io.BytesIO(wire))
+                previous_umask=os.umask(0o022)
+                try:result=b.stage_engineering_authorization(io.BytesIO(wire))
+                finally:os.umask(previous_umask)
+                self.assertEqual((control/'authorization').stat().st_mode&0o777,0o700)
                 self.assertTrue(result['applied']);self.assertFalse(result['reconciled'])
                 key=doc['requests'][0]['request_sha256'];grant=control/'grants'/(key+'.json')
                 self.assertTrue(grant.is_file());c.Controller(root).authorize({'version':1,'operation':'formation_prepare','parameters':{'formation_sha256':hashlib.sha256(data).hexdigest()}});self.assertFalse(grant.exists())
@@ -153,6 +174,52 @@ class OperatorAuthorizationTests(unittest.TestCase):
                 with patch.object(b,'NATIVE_AUTHENTICATED_AUTHORIZATION_SHA256',pin5),patch.object(b,'NATIVE_AUTHENTICATED_AUTHORIZATION_INITIAL_SHA256',pin,create=True),patch.object(b,'NATIVE_AUTHENTICATED_AUTHORIZATION_PARENT_SHA256',pin4,create=True),patch.object(b,'NATIVE_AUTHENTICATED_AUTHORIZATION_FORMATION_SHA256',hashlib.sha256(data).hexdigest(),create=True),patch('time.time',return_value=1002):
                     self.assertEqual(b.stage_engineering_authorization(io.BytesIO(json.dumps({'authorization':raw5,'artifacts':{}}).encode()))['sequence'],5)
                     c.Controller(root).authorize(restart)
+
+    def test_transport_continuation_routes_only_exact_public_inventory_to_guest_attribution(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary).resolve()/'synergy';control=root/'tmp/controller'
+            (control/'tools').mkdir(parents=True);(control/'grants').mkdir()
+            for path in (root,root/'tmp',control):path.chmod(0o700)
+            pins={}
+            for name in c.ENGINE_MODULES:
+                path=control/name if name=='controller.py' else control/'tools'/name
+                path.write_bytes(('engine-'+name).encode());path.chmod(0o600);pins[name]=hashlib.sha256(path.read_bytes()).hexdigest()
+            doc,data=self.document();doc['target']['root']=str(root);first_raw,first_pin=self.encode(doc)
+            policy={'format':'synergy-nodenetwork-host-policy-v1','root':str(root),'community_enrollment':False,'qualified_operations':[],
+                'engine_files':pins,'releases':{'independent-master':{'manifest_sha256':'b'*64,'inventory_authenticated':True,'networks':{doc['network_id']:doc['chain_id']}}}}
+            policy_path=control/'policy.json';policy_path.write_bytes(c.canonical(policy));policy_path.chmod(0o600)
+            real_stat,real_lstat=Path.stat,Path.lstat
+            def owned(method):
+                def inspect(path,*args,**kwargs):
+                    result=list(method(path,*args,**kwargs));result[4]=0;return os.stat_result(result)
+                return inspect
+            def exchange(_a,left,_b,right,_flags):
+                left,right=Path(os.fsdecode(left)),Path(os.fsdecode(right));swap=left.with_name('test-exchange')
+                left.rename(swap);right.rename(left);swap.rename(right);return 0
+            with ExitStack() as stack:
+                for owner,name,value in [(b,'ROOT',root),(b.os,'geteuid',lambda:0),(b.sys,'platform','linux'),(b.os,'uname',lambda:SimpleNamespace(machine='x86_64')),(Path,'stat',owned(real_stat)),(Path,'lstat',owned(real_lstat)),(ctypes,'CDLL',lambda *a,**k:SimpleNamespace(renameat2=exchange)),(lifecycle,'_unit_state',lambda _:dict(MainPID='0',ActiveState='inactive'))]:stack.enter_context(patch.object(owner,name,value))
+                stack.enter_context(patch.object(sys,'path',sys.path.copy()));stack.enter_context(patch('time.time',return_value=1000))
+                guard=stack.enter_context(patch.object(lifecycle,'_assert_no_application_processes'))
+                stack.enter_context(patch.object(b,'NATIVE_AUTHENTICATED_AUTHORIZATION_SHA256',first_pin,create=True))
+                b.stage_engineering_authorization(io.BytesIO(json.dumps(dict(authorization=first_raw,artifacts={'formation-context.json':base64.b64encode(data).decode()})).encode()))
+                c.Controller(root).authorize(dict(version=1,operation='formation_prepare',parameters={'formation_sha256':hashlib.sha256(data).hexdigest()}))
+                contents={n:b'{}' for n in b.AUTHORIZATION_FILES if n.startswith('commissioning/')}
+                genesis={n:hashlib.sha256(b'{}').hexdigest() for n in ('genesis.json','authority.json','authority-root.pub')}
+                policy=json.loads(policy_path.read_bytes());policy['validator_identity_network']=genesis;policy_path.write_bytes(c.canonical(policy))
+                doc.update(sequence=2,artifacts={n:hashlib.sha256(v).hexdigest() for n,v in contents.items()},genesis_pins=genesis,
+                    requests=[dict(operation='commission',request_sha256=c.request_digest(dict(version=1,operation='commission',parameters={})))])
+                guard.side_effect=ValueError('unattributed QEMU')
+                attributed=stack.enter_context(patch.object(b,'guest_management_quiescence'))
+                raw,pin=self.encode(doc)
+                for name,value in [('NATIVE_AUTHENTICATED_AUTHORIZATION_SHA256',pin),('NATIVE_AUTHENTICATED_AUTHORIZATION_INITIAL_SHA256',first_pin),('NATIVE_AUTHENTICATED_AUTHORIZATION_PARENT_SHA256',first_pin),('NATIVE_AUTHENTICATED_AUTHORIZATION_FORMATION_SHA256',hashlib.sha256(data).hexdigest())]:stack.enter_context(patch.object(b,name,value,create=True))
+                encoded={n:base64.b64encode(v).decode() for n,v in contents.items()}
+                before=policy_path.read_bytes();bad=copy.deepcopy(doc);bad['requests'][0]['operation']='start';bad_raw,bad_pin=self.encode(bad)
+                with patch.object(b,'NATIVE_AUTHENTICATED_AUTHORIZATION_SHA256',bad_pin):
+                    with self.assertRaisesRegex(ValueError,'unattributed QEMU'):b.stage_engineering_authorization(io.BytesIO(json.dumps(dict(authorization=bad_raw,artifacts=encoded)).encode()))
+                self.assertEqual(policy_path.read_bytes(),before);self.assertFalse(attributed.called)
+                result=b.stage_engineering_authorization(io.BytesIO(json.dumps(dict(authorization=raw,artifacts=encoded)).encode()))
+                self.assertTrue(result['applied']);attributed.assert_called_once()
+                for name,content in contents.items():self.assertEqual((control/'authorization/inputs'/name).read_bytes(),content)
 
     def test_no_native_approval_never_creates_root(self):
         with tempfile.TemporaryDirectory() as temporary:

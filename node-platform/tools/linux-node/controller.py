@@ -28,11 +28,11 @@ MAX_REQUEST = 16384
 MAX_GENESIS_STAGE_REQUEST = 12*1024*1024
 GENESIS_FILES = {'genesis.json':4*1024*1024,'authority.json':1024*1024,'authority-root.pub':8192}
 ENGINE_MODULES = frozenset(('controller.py','synergy_linux.py','lifecycle.py','conformance.py',
-                            'apqe_layout.py','vpn.py','canary_rpc_relay.py','root_guard.py','guest_lifecycle.py'))
-READS = frozenset(('treasury_preflight','treasury_status','treasury_export','commissioning_observation','network_transport_status','network_transport_export','guest_resources','guest_preflight','guest_status','target','inventory','health','install_preflight','upgrade_preflight',
-                  'recovery_preflight','uninstall_preflight','vpn_status','vpn_diagnostics','diagnostics','identity_preflight','identity_status',
+                            'apqe_layout.py','vpn.py','canary_rpc_relay.py','root_guard.py','guest_lifecycle.py','vpn_authorization.py','treasury_send.py'))
+READS = frozenset(('treasury_send_preflight','treasury_send_status','treasury_preflight','treasury_status','treasury_export','commissioning_observation','network_transport_status','network_transport_export','guest_resources','guest_preflight','guest_status','guest_boot_diagnostics','target','inventory','health','install_preflight','upgrade_preflight',
+                  'recovery_preflight','uninstall_preflight','vpn_status','vpn_unused_preflight','vpn_stop_status','boot_policy_status','vpn_resume_status','vpn_diagnostics','diagnostics','identity_preflight','identity_status',
                   'formation_preflight','formation_status','formation_export','genesis_stage_preflight','genesis_binding_preflight','authorization_status','network_formation_status','network_formation_export'))
-MUTATIONS = frozenset(('treasury_prepare','network_transport_prepare','network_transport_sign','guest_create','guest_stop','guest_remove','install','commission','register','vpn_enroll','vpn_bind','vpn_retire','start','stop','restart','upgrade','uninstall','identity_generate',
+MUTATIONS = frozenset(('treasury_send_prepare','treasury_send_submit','treasury_prepare','network_transport_prepare','network_transport_sign','guest_create','guest_stop','guest_resume','guest_remove','install','commission','register','vpn_enroll','vpn_bind','vpn_retire','vpn_cancel_unused','vpn_stop','vpn_resume','boot_policy','start','stop','restart','upgrade','uninstall','identity_generate',
                        'formation_prepare','genesis_stage','genesis_bind','network_formation_prepare','network_formation_sign'))
 FORMATION_CONTEXT = 'tmp/formation-context.json'
 FORMATION_CUSTODY = 'tmp/pre-genesis-validator'
@@ -71,7 +71,7 @@ def canonical(value):
 
 def request_digest(request):
     encoded=(json.dumps(request,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode('utf-8')
-             if request['operation'] in ('genesis_stage','network_formation_prepare','network_transport_prepare') else canonical(request))
+             if request['operation'] in ('genesis_stage','network_formation_prepare','network_transport_prepare','treasury_send_prepare') else canonical(request))
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -151,7 +151,29 @@ def parse_request(raw):
     operation, parameters = value['operation'], value['parameters']
     require(isinstance(operation,str) and operation in READS | MUTATIONS
             and isinstance(parameters,dict), 'Unsupported operation', 'invalid_request')
-    require(operation=='genesis_stage' or operation in ('network_formation_prepare','network_transport_prepare') and len(raw)<=2*1024*1024 or len(raw)<=MAX_REQUEST,'Request exceeds operation limit','invalid_request')
+    require(operation=='genesis_stage' or operation in ('network_formation_prepare','network_transport_prepare','treasury_send_prepare') and len(raw)<=2*1024*1024 or len(raw)<=MAX_REQUEST,'Request exceeds operation limit','invalid_request')
+    if operation=='commissioning_observation' and parameters:
+        require(set(parameters)=={'online_addresses'} and isinstance(parameters['online_addresses'],list)
+                and len(parameters['online_addresses'])<=5
+                and all(isinstance(a,str) and 1<=len(a)<=128 for a in parameters['online_addresses'])
+                and parameters['online_addresses']==sorted(set(parameters['online_addresses'])),
+                'Exact online commissioning subset required','invalid_request')
+        return value
+    if operation=='boot_policy':
+        require(set(parameters)=={'service','enabled'} and parameters['service'] in ('node','vpn')
+                and type(parameters['enabled']) is bool,'Exact service boot policy required','invalid_request')
+        return value
+    if operation in ('vpn_enroll','vpn_cancel_unused'):
+        require(set(parameters) in ((set(),{'attempt_sha256'}) if operation=='vpn_enroll' else ({'attempt_sha256'},))
+                and ('attempt_sha256' not in parameters or isinstance(parameters['attempt_sha256'],str)
+                     and re.fullmatch('[a-f0-9]{64}',parameters['attempt_sha256'])),
+                'Exact native VPN attempt parameters required','invalid_request')
+        return value
+    if operation.startswith('treasury_send_'):
+        from treasury_send import validate
+        try:validate(operation,parameters)
+        except (ValueError,KeyError,TypeError):raise Refused('invalid_request','Invalid exact treasury send request')
+        return value
     if operation.startswith('treasury_'):
         require(set(parameters)==({'formation_sha256','effective_at_unix'} if operation=='treasury_prepare' else set()),'Exact treasury parameters required','invalid_request')
         if operation=='treasury_prepare':
@@ -371,7 +393,7 @@ class Controller:
         if request['operation']=='vpn_enroll':
             require(enrollment_pin is not None and grant.get('enrollment_sha256')==enrollment_pin,
                     'One-time host grant does not bind this VPN enrollment','authorization_required')
-        if request['operation'] in ('vpn_bind','vpn_retire'):
+        if request['operation'] in ('vpn_bind','vpn_retire','vpn_cancel_unused'):
             require(enrollment_pin is not None and grant.get('binding_sha256')==enrollment_pin,
                     'Exact native-verified VPN server binding required','authorization_required')
         # Consume before executing. Ambiguous outcomes need observation and a
@@ -379,6 +401,28 @@ class Controller:
         self.audit(request)
         grant_path.unlink()
         return key
+
+    def authorize_guest_resume(self,request,pin):
+        from synergy_linux import digest
+        from guest_lifecycle import GuestManager,validate_parameters
+        require(request['operation']=='guest_resume','Only an exact guest resume may reconcile authorization')
+        validate_parameters('guest_resume',request['parameters'])
+        key=request_digest(request);grant=self.control/'grants'/(key+'.json')
+        record=GuestManager(self.root,self.policy()).receipt();pending=record.get('resume',{})
+        require(pending.get('request_sha256')==key and pending.get('grant_sha256')==pin and pending.get('phase')=='prepared'
+                and record['request_sha256']==request['parameters']['create_request_sha256'] and pending['sequence']==request['parameters']['resume_sequence'],'Guest authorization intent differs')
+        if grant.exists() or grant.is_symlink():require(digest(self.direct(grant,True))==pin,'Original guest grant changed')
+        audit=self.control/'audit.jsonl';matches=[]
+        if audit.exists():
+            audit=self.direct(audit,True);require(audit.stat().st_size<=1024*1024,'Guest audit exceeds bound')
+            rows=audit.read_bytes().splitlines();require(len(rows)<=4096,'Guest audit exceeds bound')
+            matches=[json.loads(row) for row in rows if json.loads(row).get('request_sha256')==key]
+        require(len(matches)<=1,'Ambiguous guest authorization audit')
+        if not matches:return self.authorize(request)
+        require(set(matches[0])=={'request_sha256','operation','time'} and matches[0]['operation']=='guest_resume'
+                and type(matches[0]['time']) is int and 0<=matches[0]['time']<=int(time.time()),'Guest audit differs')
+        if grant.exists() or grant.is_symlink():
+            require(digest(self.direct(grant,True))==pin,'Original guest grant changed');grant.unlink()
 
     def vpn_stage(self):
         path=self.control/VPN_ENROLLMENT
@@ -913,6 +957,9 @@ class Controller:
         if attempted:
             require(self.public_json(attempt,True)=={'format':'nodenetwork-vpn-attempt-v1'},
                     'Invalid VPN enrollment attempt record')
+        if attempted:
+            from vpn import attempt_state
+            attempted=attempt_state(self.root)['retry_after_sha256'] is None
         bound=False
         connected=False
         overlay=None
@@ -945,17 +992,450 @@ class Controller:
                 'enrollment_sha256':hashlib.sha256(enrollment.read_bytes()).hexdigest() if recorded else None,
                 'server_binding_sha256':hashlib.sha256(binding.read_bytes()).hexdigest() if bound else None,'retired':retired}
 
+    def vpn_provider_binding(self,scope=None):
+        policy=self.policy();origin=policy.get('engineering_selection',{});target=policy.get('engineering_target',{})
+        require(target.get('kind') in ('local','remote') and target.get('root')==str(self.root),'Original VPN target unavailable')
+        identity={'kind':target['kind'],'host':target.get('host').lower() if target.get('host') else None,
+                  'port':target.get('port',22) if target['kind']=='remote' else None,'root':target['root']}
+        if 'guest' in target:identity['guest']=target['guest']
+        result={'target_sha256':hashlib.sha256(canonical(identity)).hexdigest(),
+                'manifest_sha256':origin.get('manifest_sha256'),'formation_sha256':policy.get('validator_formation_sha256'),
+                'network_id':origin.get('network_id'),'chain_id':origin.get('chain_id')}
+        if scope is not None:result['attempt_sha256']=scope
+        return result
+
+    def vpn_unused_preflight(self):
+        import lifecycle as life
+        with life._lifecycle_lock(self.root):return self._vpn_unused_preflight()
+
+    def unregistered_vpn_identity(self,allow_existing=False):
+        from vpn import unregistered_default_profile,attempt_state
+        identity=unregistered_default_profile(self.root)
+        if identity is None:return None
+        require(allow_existing and attempt_state(self.root)['attempt_sha256'] is not None,
+                'Existing VPN profile lacks an original fresh-attempt fence')
+        # The published first-enrollment path checked an empty VPN directory,
+        # consumed this exact request, then fenced before starting the daemon.
+        original={'version':1,'operation':'vpn_enroll','parameters':{}}
+        key=request_digest(original);audit=self.direct(self.control/'audit.jsonl',True)
+        require(0<audit.stat().st_size<=1024*1024,'Original VPN audit exceeds bound')
+        rows=audit.read_bytes().splitlines();require(len(rows)<=4096,'Original VPN audit exceeds bound')
+        matching=[json.loads(row) for row in rows]
+        require(any(row=={'operation':'vpn_enroll','request_sha256':key,'time':row.get('time')}
+                    and type(row.get('time')) is int and 0<=row['time']<=int(time.time()) for row in matching if isinstance(row,dict))
+                and not (self.control/'grants'/(key+'.json')).exists()
+                and not (self.control/'grants'/(key+'.json')).is_symlink(),
+                'Original fresh VPN enrollment is not durably consumed')
+        return identity
+
+    def _vpn_unused_preflight(self):
+        import lifecycle as life
+        from vpn import attempt_state
+        life._sealed_receipt(self.root)
+        state=attempt_state(self.root)
+        quiescent=(self.vpn_stage() is None and not any(self.exists(p) for p in
+                ('evidence/vpn-enrollment.json','evidence/vpn-server-binding.json','run/enrollment.key'))
+                and not (self.root/'vpn').is_symlink())
+        if quiescent:
+            try:self.unregistered_vpn_identity(allow_existing=state['attempt_sha256'] is not None)
+            except (ValueError,OSError):quiescent=False
+        units=life._attributed_units(self.root,life._integration_plan(self.root))
+        quiescent=quiescent and 'synergy-vpn.service' in units and all(value.get('MainPID')=='0'
+                and value.get('ActiveState') in ('inactive','failed') for value in units.values())
+        if quiescent:
+            try:life._assert_no_application_processes(self.root)
+            except (ValueError,OSError,subprocess.SubprocessError):quiescent=False
+        return {'schema':'nodenetwork-vpn-unused-preflight-v1','quiescent':quiescent,
+                'attempt_sha256':state['attempt_sha256'],'scope_sha256':state['scope_sha256'],
+                'retry_after_sha256':state['retry_after_sha256'],
+                'pending_cancellation_sha256':(self.public_json(self.root/'evidence/vpn-cancel-unused-intent.json',True)['receipt_sha256']
+                    if self.exists('evidence/vpn-cancel-unused-intent.json') else None),
+                'attempt_scopes':[event['cancellation_sha256'] for event in state['events'] if event['kind']=='attempt'],
+                'binding':self.vpn_provider_binding(state['scope_sha256'])}
+
+    def vpn_cancel_unused(self,request):
+        import lifecycle as life
+        from vpn import attempt_state,append_attempt_event,validate_unused_cancellation,CANCELLATION,public_hash
+        with life._lifecycle_lock(self.root):
+            current=self._vpn_unused_preflight()
+            require(current['quiescent'] is True and current['attempt_sha256'] is not None
+                    and request['parameters']=={'attempt_sha256':current['attempt_sha256']},
+                    'Unused cancellation requires exact quiescent attempted target')
+            policy=self.policy();path=self.control/'authorization/inputs'/CANCELLATION
+            receipt=self.public_json(path,True);raw=path.read_bytes();digest=hashlib.sha256(raw).hexdigest()
+            require(policy.get('authorization_files',{}).get(CANCELLATION)==digest,'Cancellation differs from native approval')
+            validate_unused_cancellation(receipt)
+            provider_path=self.control/'authorization/inputs/vpn-provider.json'
+            provider=self.public_json(provider_path,True)
+            require(hashlib.sha256(provider_path.read_bytes()).hexdigest()==policy.get('authorization_files',{}).get('vpn-provider.json')
+                    and receipt['account_id']==provider.get('account_id')
+                    and receipt['provider_sha256']==hashlib.sha256(canonical(provider)).hexdigest()
+                    and receipt['binding']==current['binding'] and receipt['attempt_sha256']==current['attempt_sha256']
+                    and receipt['name']=='nn-'+hashlib.sha256(canonical(current['binding'])).hexdigest()[:60],
+                    'Original unused cancellation attribution differs')
+            event={'kind':'cancel','receipt':receipt}
+            state=attempt_state(self.root);intent_path=self.root/'evidence/vpn-cancel-unused-intent.json'
+            key=request_digest(request);receipt_sha=public_hash(receipt)
+            if state['retry_after_sha256'] is not None:
+                require(state['events'][-1]==event,'Prior unused cancellation differs')
+            else:
+                pending=None
+                if intent_path.exists() or intent_path.is_symlink():
+                    pending=self.public_json(intent_path,True)
+                    require(set(pending)=={'format','request_sha256','receipt_sha256','attempt_sha256','grant'}
+                            and pending['format']=='nodenetwork-vpn-cancel-intent-v1'
+                            and pending['request_sha256']==key and pending['receipt_sha256']==receipt_sha
+                            and pending['attempt_sha256']==current['attempt_sha256'], 'Pending unused cancellation differs')
+                grant_path=self.control/'grants'/(key+'.json')
+                if pending is None:
+                    grant=self.public_json(grant_path,True)
+                    pending={'format':'nodenetwork-vpn-cancel-intent-v1','request_sha256':key,
+                             'receipt_sha256':receipt_sha,'attempt_sha256':current['attempt_sha256'],'grant':grant}
+                    from vpn import _retirement_write
+                    _retirement_write(intent_path,pending)
+                grant=pending['grant']
+                require(grant.get('operation')=='vpn_cancel_unused' and grant.get('request_sha256')==key
+                        and grant.get('binding_sha256')==digest,'Original cancellation grant differs')
+                audit=self.control/'audit.jsonl';audited=False
+                if audit.exists() or audit.is_symlink():
+                    records=[json.loads(line) for line in self.direct(audit,True).read_bytes().splitlines()]
+                    matches=[row for row in records if row.get('request_sha256')==key]
+                    require(len(matches)<=1 and all(row.get('operation')=='vpn_cancel_unused' for row in matches),
+                            'Ambiguous original cancellation audit')
+                    audited=bool(matches)
+                if not audited:
+                    require(self.public_json(grant_path,True)==grant,'Original unconsumed cancellation grant differs')
+                    self.authorize(request,digest)
+                elif grant_path.exists() or grant_path.is_symlink():
+                    require(self.public_json(grant_path,True)==grant,'Remaining cancellation grant differs')
+                    grant_path.unlink();life._sync_directory(grant_path.parent)
+                state=append_attempt_event(self.root,event)
+            if intent_path.exists() or intent_path.is_symlink():
+                pending=self.public_json(intent_path,True)
+                require(pending.get('request_sha256')==key and pending.get('receipt_sha256')==receipt_sha,
+                        'Completed cancellation intent differs')
+                intent_path.unlink();life._sync_directory(intent_path.parent)
+            return {'schema':'nodenetwork-vpn-unused-cancellation-v1','cancelled':True,
+                    'retry_requires_new_confirmation':True,'attempt_sha256':current['attempt_sha256'],
+                    'cancellation_sha256':public_hash(event)}
+
+    def _boot_policy_scope(self, enabling=False):
+        import lifecycle as life
+        from conformance import installed
+        from apqe_layout import startup_readiness_authorized
+        from root_guard import check_registration
+        receipt,_=life._sealed_receipt(self.root)
+        check_registration(self.policy().get('root_guard_sha256'))
+        for name in (HOST_REMOVAL,):
+            require(not (self.control/name).exists() and not (self.control/name).is_symlink(),'Host retirement must reconcile before boot policy')
+        for name in (life.UPGRADE_INTENT,life.REPLACEMENT_INTENT,life.AUTHORITY_RECOVERY_INTENT,life.AUTONOMOUS_EPOCH_INTENT,
+                     'evidence/vpn-cancel-unused-intent.json','run/enrollment.key','tmp/controller/authorization/inputs/vpn-retirement.json'):
+            require(not (self.root/name).exists() and not (self.root/name).is_symlink(),'Pending lifecycle mutation must reconcile before boot policy')
+        observed=life.service_boot_state(self.root)
+        if enabling:
+            require(self.policy().get('engineering_target',{}).get('guest') is None,
+                    'Guest validator boot enable is not approved')
+            require(receipt.get('role')=='validator' and (self.root/'data').is_dir() and not (self.root/'data').is_symlink(),
+                    'Commission the active validator before enabling boot policy')
+            installed(self.root,host=True)
+            identity=life.verify_identity(self.root)
+            startup=life.read(self.root/'config/start-authorized.json')
+            authority=life.read(self.root/'network/authority.json')['payload']
+            require(startup.get('network_id')==receipt['network_id'] and startup.get('chain_id')==receipt['chain_id']
+                    and startup_readiness_authorized(self.root,startup,identity['address']),
+                    'Exact commissioned startup approval required')
+            life._authorized_validator_ids(startup,authority,identity['address'])
+            self.require_bound_validator_vpn()
+        return observed
+
+    def boot_policy(self,request):
+        import lifecycle as life
+        p=request['parameters']
+        with life._lifecycle_lock(self.root):
+            self._boot_policy_scope(p['enabled'])
+            require((self.root/'data').is_dir() and not (self.root/'data').is_symlink(),
+                    'Boot policy requires a commissioned installation')
+            self.authorize(request)
+            life.set_service_boot_policy(self.root,p['service'],p['enabled'])
+            return {'schema':'nodenetwork-boot-policy-v1','service':p['service'],
+                    'enabled':p['enabled'],'runtime_changed':False}
+
+    def boot_policy_status(self):
+        import lifecycle as life
+        with life._lifecycle_lock(self.root):
+            observed=self._boot_policy_scope()
+            result={'schema':'nodenetwork-boot-policy-status-v1','node_enabled':observed['node'],
+                    'vpn_enabled':observed['vpn'],'applied':False,'request_sha256':None,'runtime_changed':False}
+            audit=self.control/'audit.jsonl'
+            if not audit.exists() and not audit.is_symlink():return result
+            rows=self.direct(audit,True,1024*1024).read_bytes().splitlines()
+            require(len(rows)<=4096,'Boot policy audit exceeds bound')
+            requests={request_digest(r):r for r in ({'version':1,'operation':'boot_policy','parameters':{'service':service,'enabled':enabled}}
+                      for service in ('node','vpn') for enabled in (False,True))}
+            latest=None
+            for raw in rows:
+                row=json.loads(raw)
+                require(isinstance(row,dict) and set(row)=={'request_sha256','operation','time'}
+                        and isinstance(row['request_sha256'],str) and re.fullmatch('[a-f0-9]{64}',row['request_sha256'])
+                        and row['operation'] in MUTATIONS and type(row['time']) is int and 0<=row['time']<=int(time.time()),
+                        'Malformed boot policy audit')
+                if row['operation']=='boot_policy':
+                    require(row['request_sha256'] in requests,'Unknown boot policy audit request')
+                    latest=row['request_sha256']
+            if latest is not None:
+                grant=self.control/'grants'/(latest+'.json');p=requests[latest]['parameters']
+                if not grant.exists() and not grant.is_symlink() and observed[p['service']]==p['enabled']:
+                    result.update(applied=True,request_sha256=latest)
+            return result
+
+    def vpn_stop_status(self):
+        """Reconcile observed postconditions of an audited, consumed stop only."""
+        import lifecycle as life
+        request={'version':1,'operation':'vpn_stop','parameters':{}}
+        key=request_digest(request)
+        result={'schema':'nodenetwork-vpn-stop-status-v1','stopped':False,
+                'request_sha256':None,'attempt_preserved':True,'provider_action':False}
+        with life._lifecycle_lock(self.root):
+            life._sealed_receipt(self.root)
+            units=life._attributed_units(self.root)
+            if not all(units.get(name,{}).get('MainPID')=='0' and
+                       units.get(name,{}).get('ActiveState') in ('inactive','failed')
+                       for name in ('synergy-node.service','synergy-vpn.service')):return result
+            life._assert_no_application_processes(self.root)
+            audit=self.control/'audit.jsonl'
+            grant=self.control/'grants'/(key+'.json')
+            # An audit precedes unlink; a still-present grant is NOT consumed.
+            if grant.exists() or grant.is_symlink() or not audit.exists():return result
+            audit=self.direct(audit,True)
+            require(0<audit.stat().st_size<=1024*1024,'Stop audit exceeds bound')
+            lines=audit.read_bytes().splitlines()
+            require(len(lines)<=4096,'Stop audit exceeds bound')
+            matched=False
+            for line in lines:
+                row=json.loads(line)
+                require(isinstance(row,dict) and set(row)=={'request_sha256','operation','time'}
+                        and isinstance(row['request_sha256'],str) and re.fullmatch('[a-f0-9]{64}',row['request_sha256'])
+                        and isinstance(row['operation'],str) and row['operation'] in MUTATIONS
+                        and type(row['time']) is int and 0<=row['time']<=int(time.time()),'Malformed stop audit')
+                if row['operation']=='vpn_stop' or row['request_sha256']==key:
+                    require(row['operation']=='vpn_stop' and row['request_sha256']==key,'Stop audit request differs')
+                    matched=True
+            if matched:result.update(stopped=True,request_sha256=key)
+            return result
+
+    def vpn_stop(self,request):
+        """Stop only the attributed VPN; never change attempts or provider state."""
+        import lifecycle as life
+        with life._lifecycle_lock(self.root):
+            life._sealed_receipt(self.root)
+            units=life._attributed_units(self.root)
+            node=units.get('synergy-node.service',{})
+            require(node.get('MainPID')=='0' and node.get('ActiveState') in ('inactive','failed'),
+                    'Stop the validator before stopping its VPN')
+            service=units.get('synergy-vpn.service',{})
+            pid=service.get('MainPID')
+            require(isinstance(pid,str) and pid.isdecimal() and service.get('ActiveState') in
+                    ('active','activating','deactivating','inactive','failed'), 'Owned VPN state unavailable')
+            # Exempt only the exact attributed NetBird daemon, not another node process.
+            life._assert_no_application_processes(self.root,vpn_pid=int(pid) if pid!='0' else None)
+            self.authorize(request)
+            life.mutate_owned_service(self.root,'stop','synergy-vpn.service')
+            stopped=life._attributed_units(self.root).get('synergy-vpn.service',{})
+            require(stopped.get('MainPID')=='0' and stopped.get('ActiveState') in ('inactive','failed'),
+                    'VPN stop outcome uncertain; inspect diagnostics before another action')
+            life._assert_no_application_processes(self.root)
+            return {'schema':'nodenetwork-vpn-stop-v1','stopped':True,
+                    'attempt_preserved':True,'provider_action':False}
+
+    def _vpn_resume_scope(self):
+        import lifecycle as life
+        from vpn import attempt_state,client_environment,retirement_binding,_profile_json,profile_identity
+        life._sealed_receipt(self.root)
+        units=life._attributed_units(self.root)
+        node=units.get('synergy-node.service',{})
+        require(node.get('MainPID')=='0' and node.get('ActiveState') in ('inactive','failed'),
+                'Stop the validator before resuming its VPN')
+        service=units.get('synergy-vpn.service',{});pid=service.get('MainPID')
+        require(isinstance(pid,str) and pid.isdecimal() and service.get('ActiveState') in ('active','inactive','failed'),
+                'Owned VPN state unavailable')
+        life._assert_no_application_processes(self.root,vpn_pid=int(pid) if pid!='0' else None)
+        current=self.vpn_status()
+        require(current['service_registered'] and current['enrollment_recorded'] and current['server_bound']
+                and not current['enrollment_staged'] and not current['reconciliation_required'] and not current['retired'],
+                'Resume requires an existing non-retired independently bound VPN peer')
+        state=attempt_state(self.root)
+        require(state['attempt_sha256'] is not None and state['retry_after_sha256'] is None,
+                'Original VPN attempt must be fully enrolled')
+        for name in ('evidence/vpn-cancel-unused-intent.json','run/enrollment.key','tmp/controller/authorization/inputs/vpn-retirement.json'):
+            path=self.root/name
+            require(not path.exists() and not path.is_symlink(),'Pending VPN mutation must reconcile before resume')
+        enrollment=self.direct(self.root/'evidence/vpn-enrollment.json',True).read_bytes()
+        binding=self.direct(self.root/'evidence/vpn-server-binding.json',True).read_bytes()
+        retirement_binding(enrollment,binding)
+        provider_path=self.control/'authorization/inputs/vpn-provider.json'
+        provider_raw=self.direct(provider_path,True,16384).read_bytes()
+        require(hashlib.sha256(provider_raw).hexdigest()==self.policy().get('authorization_files',{}).get('vpn-provider.json'),
+                'Approved VPN provider changed')
+        provider=json.loads(provider_raw);local=json.loads(enrollment)
+        from vpn import management_origin
+        expected=self.vpn_provider_binding(state['scope_sha256'])
+        require(local.get('hostname')=='nn-'+hashlib.sha256(canonical(expected)).hexdigest()[:60]
+                and management_origin(local['management_url'])==provider.get('management_origin'),
+                'Enrolled VPN origin or provider differs')
+        client_environment(self.root)  # Durable pinned carrier trust; no issuance-expiry check.
+        config=_profile_json(self.direct(self.root/'vpn/default.json',True,16384))
+        identity=profile_identity(config)
+        url=config.get('ManagementURL')
+        require(isinstance(url,dict) and url.get('Scheme')=='https' and isinstance(url.get('Host'),str)
+                and all(url.get(field) in (None,'',False) for field in ('Opaque','User','Path','RawPath','RawQuery','Fragment'))
+                and management_origin('https://'+url['Host'])==provider.get('management_origin'),
+                'Contained VPN management origin differs from approved provider')
+        return service,current,(enrollment,binding,identity,state)
+
+    def _vpn_resume_observed(self,original):
+        from vpn import status,_same_profile_identity,attempt_state
+        enrollment,binding,identity,state=original
+        require(self.direct(self.root/'evidence/vpn-enrollment.json',True).read_bytes()==enrollment
+                and self.direct(self.root/'evidence/vpn-server-binding.json',True).read_bytes()==binding,
+                'Original VPN binding changed during resume')
+        require(attempt_state(self.root)==state,'Original VPN attempt changed during resume')
+        _same_profile_identity(self.root,identity)
+        local=json.loads(enrollment);live=status(self.root,timeout=4)
+        require(live['publicKey']==local['wireguard_public_key']
+                and ipaddress.ip_interface(live['netbirdIp'])==ipaddress.ip_interface(local['overlay_address']),
+                'Resumed VPN identity or overlay differs')
+
+    def vpn_resume(self,request):
+        import lifecycle as life
+        with life._lifecycle_lock(self.root):
+            service,current,original=self._vpn_resume_scope()
+            require((service['MainPID']=='0' and service['ActiveState'] in ('inactive','failed'))
+                    or (service['ActiveState']=='active' and int(service['MainPID'])>0 and current['connected']),
+                    'Active unresponsive VPN must be inspected; resume never restarts it','vpn_resume_not_started')
+            self.authorize(request)
+            if service['MainPID']=='0':life.mutate_owned_service(self.root,'start','synergy-vpn.service')
+            for attempt in range(4):
+                try:
+                    self._vpn_resume_observed(original)
+                    after=life._attributed_units(self.root).get('synergy-vpn.service',{})
+                    require(after.get('ActiveState')=='active' and isinstance(after.get('MainPID'),str)
+                            and after['MainPID'].isdecimal() and int(after['MainPID'])>0,'Resumed VPN service is not active')
+                    break
+                except (ValueError,OSError,KeyError,TypeError,subprocess.SubprocessError):
+                    if attempt==3:raise Refused('vpn_reconciliation_required','VPN resume outcome uncertain; read exact resume status before another action') from None
+                    time.sleep(1)
+            return {'schema':'nodenetwork-vpn-resume-v1','resumed':True,'validator_started':False,'enrollment_preserved':True}
+
+    def vpn_resume_status(self):
+        import lifecycle as life
+        request={'version':1,'operation':'vpn_resume','parameters':{}};key=request_digest(request)
+        result={'schema':'nodenetwork-vpn-resume-status-v1','resumed':False,'request_sha256':None,
+                'validator_started':False,'enrollment_preserved':True}
+        with life._lifecycle_lock(self.root):
+            service,current,original=self._vpn_resume_scope()
+            grant=self.control/'grants'/(key+'.json');audit=self.control/'audit.jsonl'
+            if grant.exists() or grant.is_symlink() or not audit.exists():return result
+            raw=self.direct(audit,True).read_bytes()
+            require(0<len(raw)<=1024*1024 and len(raw.splitlines())<=4096,'Resume audit exceeds bound')
+            rows=[json.loads(line) for line in raw.splitlines()]
+            require(all(isinstance(row,dict) and set(row)=={'request_sha256','operation','time'}
+                        and isinstance(row['request_sha256'],str) and re.fullmatch('[a-f0-9]{64}',row['request_sha256'])
+                        and row['operation'] in MUTATIONS and type(row['time']) is int and 0<=row['time']<=int(time.time()) for row in rows),
+                    'Malformed resume audit')
+            if not any(row['request_sha256']==key and row['operation']=='vpn_resume' for row in rows):return result
+            require(all(row['operation']=='vpn_resume' for row in rows if row['request_sha256']==key),'Resume audit request differs')
+            if service['ActiveState']!='active' or service['MainPID']=='0' or not current['connected']:return result
+            self._vpn_resume_observed(original)
+            result.update(resumed=True,request_sha256=key)
+            return result
+
     def vpn_diagnostics(self):
         import lifecycle as life
         from vpn import diagnostics
         with life._lifecycle_lock(self.root):
             life._sealed_receipt(self.root)
-            return diagnostics(self.root,self.vpn_status())
+            current=self.vpn_status()
+            sample=[]
+            result=diagnostics(self.root,current,observe_live=sample.append)
+            result['roster']=self.vpn_roster_diagnostics(current,sample[0] if sample else None)
+            return result
+
+    def vpn_roster_diagnostics(self,current,live):
+        """Public diagnostic only; approval pins authorize destinations, not readiness."""
+        import lifecycle as life
+        from synergy_linux import native
+        result={'available':False,'error_code':'scope_unavailable',
+                'source':'approved_signed_transport','peer_status_sample':'before_probes','local_address':None,'peers':[]}
+        try:
+            receipt,_=life._sealed_receipt(self.root)
+            pins=self.policy()['validator_commissioning_files']
+            from apqe_layout import FORMATION_PUBLIC_INPUTS
+            require(set(pins)==FORMATION_PUBLIC_INPUTS,'Exact approved transport inputs required')
+            def approved(name):
+                path=(self.root/name if self.exists('data') else
+                      self.control/'authorization/inputs/commissioning'/name)
+                raw=self.direct(path,True,1024*1024).read_bytes()
+                require(hashlib.sha256(raw).hexdigest()==pins[name],'Approved transport changed')
+                return json.loads(raw)
+            config=approved('config/node.json')
+            require(all(config[k]==receipt[k] for k in ('network_id','chain_id','node_name')),'Network differs')
+            entries=approved('network/transport-registry.json')['payload']['validators']
+            require(isinstance(entries,list) and len(entries)==5,'Exact signed roster required')
+            ips={}
+            for entry in entries:
+                address=entry['node_address'];host,port=entry['dial_address'].rsplit(':',1)
+                ip=ipaddress.ip_address(host.strip('[]'))
+                require(isinstance(address,str) and 0<len(address)<=128 and address not in ips
+                        and entry['revoked'] is False and port.isdigit() and 0<int(port)<65536
+                        and not (ip.is_unspecified or ip.is_loopback or ip.is_multicast or ip.is_link_local),
+                        'Invalid signed roster endpoint')
+                ips[address]=str(ip)
+            require(len(set(ips.values()))==5 and current['server_bound'] is True,'Bound roster required')
+            own=str(ipaddress.ip_address(current['server_binding']['ip']))
+            local=[a for a,ip in ips.items() if ip==own]
+            require(len(local)==1,'Local endpoint differs')
+            result['local_address']=local[0]
+        except (ValueError,OSError,KeyError,TypeError,AttributeError):return result
+        try:
+            details=live['peers']['details']
+            require(live['publicKey']==current['server_binding']['wireguard_public_key']
+                    and str(ipaddress.ip_interface(live['netbirdIp']).ip)==own,'Local identity differs')
+            require(isinstance(details,list) and len(details)<=1024,'Bounded peer inventory required')
+            normalized=[(str(ipaddress.ip_interface(peer['netbirdIp']).ip),peer) for peer in details]
+        except (ValueError,OSError,KeyError,TypeError,subprocess.SubprocessError):
+            result['error_code']='status_unavailable';return result
+        result.update(available=True,error_code=None)
+        for address,ip in sorted(ips.items()):
+            if address==local[0]:continue
+            matches=[peer for peer_ip,peer in normalized if peer_ip==ip]
+            row={'address':address,'ip':ip,'match_count':len(matches),'matches':[],
+                 'route_via_wt0':False,'reachable':False,'error_code':None}
+            for peer in matches[:5]:
+                key=peer.get('publicKey');valid=False
+                if isinstance(key,str) and len(key)==44:
+                    try:valid=len(base64.b64decode(key,validate=True))==32 and base64.b64encode(base64.b64decode(key)).decode()==key
+                    except (ValueError,binascii.Error):pass
+                state=peer.get('status')
+                row['matches'].append({'wireguard_public_key':key if valid else None,
+                    'public_key_format_valid':valid,'status':state if state in ('Connected','Connecting','Disconnected','Idle') else 'unknown'})
+            if not matches:row['error_code']='peer_missing'
+            elif len(matches)!=1:row['error_code']='peer_duplicate'
+            elif matches[0].get('status')!='Connected':row['error_code']='peer_not_connected'
+            try:
+                route=json.loads(native(['ip','-j','route','get',ip,'from',own],timeout=3))
+                require(isinstance(route,list) and len(route)==1 and route[0].get('dev')=='wt0','Route differs')
+                row['route_via_wt0']=True
+                native(['ping','-n','-I','wt0','-c','1','-W','1',ip],timeout=3)
+                row['reachable']=True
+            except (ValueError,OSError,KeyError,TypeError,subprocess.SubprocessError):
+                if row['error_code'] is None:row['error_code']='peer_unreachable' if row['route_via_wt0'] else 'peer_route_unavailable'
+            result['peers'].append(row)
+        return result
 
     def vpn_enroll(self,request):
         import lifecycle as life
         from synergy_linux import write_new
-        from vpn import enroll
+        from vpn import enroll,attempt_state,append_attempt_event
         with life._lifecycle_lock(self.root):
             receipt,_=life._sealed_receipt(self.root)
             require(receipt['role']=='validator','VPN workflow requires an installed validator role')
@@ -963,9 +1443,12 @@ class Controller:
             require(current['service_registered'] and not current['enrollment_recorded'],
                     'Register the contained VPN service before fresh enrollment')
             attempt=self.root/VPN_ATTEMPT
-            require(not attempt.exists() and not attempt.is_symlink(),
+            state=attempt_state(self.root)
+            require(request['parameters']==({'attempt_sha256':state['retry_after_sha256']}
+                    if state['retry_after_sha256'] is not None else {}),'VPN attempt request differs')
+            require(state['attempt_sha256'] is None or state['retry_after_sha256'] is not None,
                     'Prior VPN enrollment needs control-plane reconciliation','vpn_reconciliation_required')
-            require(not list((self.root/'vpn').iterdir()),'Existing VPN state requires reviewed reconciliation')
+            preserved=self.unregistered_vpn_identity(allow_existing=state['retry_after_sha256'] is not None)
             path=self.vpn_stage()
             require(path is not None,'No approved one-use VPN enrollment is staged','authorization_required')
             with path.open('rb') as stream: data=stream.read(MAX_VPN_ENROLLMENT+1)
@@ -973,11 +1456,14 @@ class Controller:
             self.authorize(request,hashlib.sha256(data).hexdigest())
             # Persist the fence before dispatch: the provider can consume the
             # key without returning a receipt or writing any local VPN state.
-            write_new(attempt,{'format':'nodenetwork-vpn-attempt-v1'})
+            if state['retry_after_sha256'] is not None:
+                append_attempt_event(self.root,{'kind':'attempt','cancellation_sha256':state['retry_after_sha256'],
+                                               'enrollment_sha256':hashlib.sha256(data).hexdigest()})
+            else:write_new(attempt,{'format':'nodenetwork-vpn-attempt-v1'})
             life._sync_directory(attempt.parent)
             path.unlink()
             life._sync_directory(path.parent)
-            try: enroll(self.root,data)
+            try: enroll(self.root,data,preserved_identity=preserved)
             except (ValueError,OSError,KeyError,TypeError,subprocess.SubprocessError):
                 raise Refused('vpn_reconciliation_required',
                               'VPN enrollment did not return a verified receipt. Inspect the VPN controller before issuing another credential.') from None
@@ -985,7 +1471,7 @@ class Controller:
 
     def vpn_bind(self,request):
         import lifecycle as life
-        from vpn import bind_server
+        from vpn import bind_server, recover_enrollment, client_environment
         with life._lifecycle_lock(self.root):
             life._sealed_receipt(self.root)
             policy=self.policy()
@@ -998,12 +1484,35 @@ class Controller:
             require(set(server)=={'peer_id','ip','name','hostname','connected','new_peer_verified',
                     'one_off_usage_verified','wireguard_public_key','binding','setup_key_id',
                     'provider_account_id','one_off_usage_evidence'},'Exact native provider binding required')
-            require(server['wireguard_public_key']==self.public_json(self.root/'evidence/vpn-enrollment.json',True)['wireguard_public_key'],
-                    'Native VPN public identity differs')
             current=self.vpn_status()
-            require(current['connected'] is True and current['server_bound'] is False,
-                    'Fresh connected unbound VPN required')
-            self.authorize(request,digest)
+            recovering=(current.get('enrollment_recorded') is False and current.get('reconciliation_required') is True
+                        and current.get('enrollment_staged') is False and current.get('service_registered') is True)
+            if recovering:
+                require(not (self.root/'evidence/vpn-server-binding.json').exists()
+                        and not (self.root/'evidence/vpn-server-binding.json').is_symlink(),
+                        'Orphan VPN binding must reconcile before recovery')
+                # No secret, setup-key dispatch or service action occurs here.
+                # Native provider verification is independently bound to the
+                # original installation, not its currently adopted software.
+                client_environment(self.root)
+                provider_path=self.control/'authorization/inputs/vpn-provider.json'
+                provider=self.public_json(provider_path,True)
+                require(hashlib.sha256(provider_path.read_bytes()).hexdigest()==policy.get('authorization_files',{}).get('vpn-provider.json'),
+                        'Original VPN provider artifact differs')
+                from vpn import attempt_state
+                expected=self.vpn_provider_binding(attempt_state(self.root)['scope_sha256'])
+                require(server['binding']==expected and server['name']=='nn-'+hashlib.sha256(canonical(expected)).hexdigest()[:60]
+                        and server['provider_account_id']==provider.get('account_id'), 'Original VPN recovery scope differs')
+                units=life._attributed_units(self.root,life._integration_plan(self.root))
+                require(units.get('synergy-vpn.service',{}).get('ActiveState')=='active', 'Attributed VPN daemon is not active')
+                self.authorize(request,digest)
+                recover_enrollment(self.root,server,provider)
+            else:
+                require(server['wireguard_public_key']==self.public_json(self.root/'evidence/vpn-enrollment.json',True)['wireguard_public_key'],
+                        'Native VPN public identity differs')
+                require(current['connected'] is True and current['server_bound'] is False,
+                        'Fresh connected unbound VPN required')
+                self.authorize(request,digest)
             bind_server(self.root,{**server,'id':server['peer_id']})
         return self.vpn_status()
 
@@ -1055,16 +1564,20 @@ class Controller:
                         'Original commissioning draft was not unapproved')
                 readiness=self.policy().get('authorization_files',{}).get('commissioning-readiness.json')
                 require(isinstance(readiness,str) and re.fullmatch('[a-f0-9]{64}',readiness),'Installed readiness provenance absent')
-                expected={**draft,'all_validators_ready':True,'all_pairs_vpn_verified':True,'commissioning_readiness_sha256':readiness}
+                from apqe_layout import readiness_startup_policy
+                artifact=self.public_json(self.control/'authorization/inputs/commissioning-readiness.json',True)
+                require(hashlib.sha256(self.direct(self.control/'authorization/inputs/commissioning-readiness.json',True).read_bytes()).hexdigest()==readiness,
+                        'Installed readiness artifact changed')
+                expected=readiness_startup_policy(draft,artifact,readiness)
                 require(actual==expected,'Installed commissioning policy changed after readiness')
         return contents
 
-    def commissioning_observation(self, *, locked=False):
+    def commissioning_observation(self, *, locked=False, online_addresses=None):
         import tempfile
         import lifecycle as life
         from synergy_linux import native,write_new,digest
         from vpn import status
-        from apqe_layout import formation_stage_contents,FORMATION_PUBLIC_INPUTS,PUBLIC
+        from apqe_layout import formation_stage_contents,FORMATION_PUBLIC_INPUTS,PUBLIC,signed_voting_weights,require_online_quorum
         import contextlib
         with contextlib.nullcontext() if locked else life._lifecycle_lock(self.root):
             receipt,_=life._sealed_receipt(self.root)
@@ -1121,6 +1634,14 @@ class Controller:
             entries=registry['validators'];require(isinstance(entries,list) and len(entries)==5,'Five signed transport members required')
             roster=sorted(entry['node_address'] for entry in entries)
             require(len(set(roster))==5 and address in roster and not any(entry['revoked'] for entry in entries),'Signed transport roster differs')
+            authority=json.loads(contents['network/authority.json'][0])['payload']
+            weights=signed_voting_weights(authority,roster)
+            online=roster if online_addresses is None else online_addresses
+            require(isinstance(online,list) and online==sorted(set(online)) and set(online)<=set(roster),
+                    'Exact online commissioning subset differs from signed roster')
+            if online:
+                require(address in online,'Local validator must belong to observed online subset')
+                require_online_quorum(roster,weights,online)
             ips={}
             for entry in entries:
                 host,port=entry['dial_address'].rsplit(':',1)
@@ -1143,19 +1664,9 @@ class Controller:
             from vpn_authorization import network_scope
             network_scope(provider,{'network_id':receipt['network_id'],'chain_id':receipt['chain_id'],
                                     'formation_sha256':policy.get('validator_formation_sha256')})
-            details=live['peers']['details'];require(isinstance(details,list) and len(details)<=1024,'Bounded native VPN peer inventory required')
-            peers={}
-            for other in roster:
-                if other==address:continue
-                matches=[peer for peer in details if str(ipaddress.ip_interface(peer['netbirdIp']).ip)==ips[other]]
-                require(len(matches)==1 and matches[0]['status']=='Connected','Exact connected VPN peer identity required')
-                # Route/device and source are fixed; no renderer destination.
-                routes=json.loads(native(['ip','-j','route','get',ips[other],'from',ip],timeout=4))
-                require(isinstance(routes,list) and len(routes)==1 and routes[0].get('dev')=='wt0','Peer route must use wt0')
-                native(['ping','-n','-I','wt0','-c','1','-W','2',ips[other]],timeout=4)
-                peers[other]={'ip':ips[other],'wireguard_public_key':matches[0]['publicKey'],'interface':'wt0','reachable':True}
+            peers=self.commissioning_vpn_peers(live,ips,online,address)
             selection,_=self.formation_context()
-            return {'schema':'nodenetwork-commissioning-observation-v1','observed_at_unix':int(time.time()),
+            result={'schema':'nodenetwork-commissioning-observation-v1','observed_at_unix':int(time.time()),
                 'target':policy['engineering_target'],'manifest_sha256':receipt['package_sha256'],
                 'provider_report_sha256':config['aegis_provider']['authenticated_report_sha256'],
                 'vpn_provider_sha256':provider_pin,'network_id':receipt['network_id'],'chain_id':str(receipt['chain_id']),
@@ -1165,6 +1676,50 @@ class Controller:
                 'vpn_binding':{'account_id':provider['account_id'],'peer_id':own['peer_id'],'ip':ip,
                     'wireguard_public_key':own['wireguard_public_key'],'enrollment_sha256':vpn['enrollment_sha256'],
                     'server_binding_sha256':vpn['server_binding_sha256']},'peers':peers}
+            if online_addresses is not None:
+                result.update(schema='nodenetwork-commissioning-observation-v2',online_addresses=online,
+                              frozen_voting_weights=weights,observation_kind='prestart_vpn' if online else 'metadata_only')
+            return result
+
+    def commissioning_vpn_peers(self,live,ips,online,address):
+        from synergy_linux import native
+        from vpn import status
+        def key(value):
+            require(isinstance(value,str) and len(value)==44,'Canonical VPN public identity required')
+            raw=base64.b64decode(value,validate=True)
+            require(len(raw)==32 and base64.b64encode(raw).decode()==value,'Canonical VPN public identity required')
+            return value
+        def inventory(sample):
+            details=sample['peers']['details']
+            require(isinstance(details,list) and len(details)<=1024,'Bounded native VPN peer inventory required')
+            return [(str(ipaddress.ip_interface(peer['netbirdIp']).ip),peer) for peer in details]
+        if not online:return {}
+        key(live['publicKey'])
+        before=inventory(live);expected={}
+        for other in online:
+            if other==address:continue
+            matches=[peer for ip,peer in before if ip==ips[other]]
+            require(len(matches)==1,'Exact connected VPN peer identity required')
+            expected[other]=key(matches[0]['publicKey'])
+        for other in expected:
+            routes=json.loads(native(['ip','-j','route','get',ips[other],'from',ips[address]],timeout=4))
+            require(isinstance(routes,list) and len(routes)==1 and routes[0].get('dev')=='wt0','Peer route must use wt0')
+            # A cold lazy connection may consume the first packet. One finite
+            # three-packet probe still requires an actual response, never retry.
+            native(['ping','-n','-I','wt0','-c','3','-W','2',ips[other]],timeout=9)
+        final=status(self.root)
+        require(final['management']['connected'] is True and final['signal']['connected'] is True
+                and final['publicKey']==live['publicKey']
+                and str(ipaddress.ip_interface(final['netbirdIp']).ip)==ips[address],
+                'Live VPN identity differs from signed endpoint')
+        after=inventory(final);peers={}
+        for other,expected_key in expected.items():
+            matches=[peer for ip,peer in after if ip==ips[other]]
+            require(len(matches)==1 and matches[0]['status']=='Connected'
+                    and key(matches[0]['publicKey'])==expected_key,'Exact connected VPN peer identity required')
+            peers[other]={'ip':ips[other],'wireguard_public_key':matches[0]['publicKey'],
+                          'interface':'wt0','reachable':True}
+        return peers
 
     def commissioning_readiness(self, *, locked=False):
         from apqe_layout import READINESS_FILE,validate_commissioning_readiness
@@ -1174,7 +1729,7 @@ class Controller:
                 'Readiness requires independent native approval','authorization_required')
         value=json.loads(raw)
         require(raw==canonical(value),'Canonical reviewed readiness bytes required')
-        validate_commissioning_readiness(value,self.commissioning_observation(locked=locked),int(time.time()))
+        validate_commissioning_readiness(value,self.commissioning_observation(locked=locked,online_addresses=value.get('online_addresses') if value.get('schema')=='nodenetwork-commissioning-readiness-v2' else None),int(time.time()))
         return pin
 
     def diagnostics(self):
@@ -1215,6 +1770,8 @@ class Controller:
         operations=[]
         for op in sorted(READS | MUTATIONS):
             reason=None if op in READS else blocker or ('Operation has not passed host qualification' if op not in qualified else None)
+            if op=='boot_policy' and (not (self.root/'data').is_dir() or (self.root/'data').is_symlink()):
+                reason='Commission the active validator before boot policy changes'
             if op.startswith('guest_') and op!='guest_resources' and not isinstance(policy.get('managed_guest'),dict):
                 reason='Independently approved guest image, toolchain and resources required'
             if not supported and op!='target': reason='Linux x86_64 target required'
@@ -1244,7 +1801,9 @@ class Controller:
         if op=='target': return self.target()
         require(platform.system()=='Linux' and platform.machine()=='x86_64','Linux x86_64 target required','unsupported_target')
         if op=='inventory': return self.inventory()
-        if op=='commissioning_observation':return self.commissioning_observation()
+        if op=='boot_policy_status':return self.boot_policy_status()
+        if op=='boot_policy':return self.boot_policy(request)
+        if op=='commissioning_observation':return self.commissioning_observation(online_addresses=p.get('online_addresses'))
         # Enrollment/grant readback is required before the first installation.
         # Its own exact engine/policy checks run without inventing a receipt.
         if op=='authorization_status':
@@ -1271,6 +1830,13 @@ class Controller:
                 if op=='install_preflight': return {'packageVerified':True,'release':manifest['release_id'],'root':str(self.root),'networkSelectionApproved':True,'genesisAuthorityVerified':False,'activationAuthorized':False}
             elif op=='upgrade_preflight':
                 life._sealed_receipt(safe_root(self.root))
+                from guest_lifecycle import require_upgrade_compatible
+                from conformance import installed
+                require_upgrade_compatible(self.root,manifest)
+                installed(self.root,host=life._integration_plan(self.root) is not None,
+                          stage=life._installation_stage(self.root),
+                          schema=self.public_json(package/'assets/node-config.schema.json'),
+                          allow_legacy_integrations=True,pending_upgrade_sha256=p['manifest_sha256'])
                 return {'packageVerified':True,'release':manifest['release_id'],'automaticRestart':False}
         else: safe_root(self.root)
         if op=='guest_resources':
@@ -1290,12 +1856,39 @@ class Controller:
                 life._sealed_receipt(self.root)
                 guest=GuestManager(self.root,self.policy())
                 if op=='guest_preflight': return guest.preflight(p)
-                if op=='guest_status': return guest.status(p)
+                def guest_status():
+                    observed=guest.status({'guest_id':p['guest_id']});stop=guest.receipt().get('stop',{}) if observed['exists'] else {}
+                    expected=request_digest({'version':1,'operation':'guest_stop','parameters':{'guest_id':p['guest_id']}})
+                    observed.update({'stop_verified':False,'stop_request_sha256':None,'stopped_resume_request_sha256':None})
+                    if stop.get('request_sha256')==expected and observed.get('pid')==0 and observed.get('service_state') in ('inactive','failed'):
+                        grant=self.control/'grants'/(expected+'.json');audit=self.control/'audit.jsonl'
+                        if not grant.exists() and not grant.is_symlink() and audit.exists():
+                            audit=self.direct(audit,True);require(audit.stat().st_size<=1024*1024,'Guest stop audit exceeds bound')
+                            rows=audit.read_bytes().splitlines();require(len(rows)<=4096,'Guest stop audit exceeds bound')
+                            found=[json.loads(row) for row in rows if json.loads(row).get('request_sha256')==expected]
+                            require(all(set(row)=={'operation','request_sha256','time'} and row['operation']=='guest_stop' and type(row['time']) is int and 0<=row['time']<=int(time.time()) for row in found),'Guest stop audit differs')
+                            if found:observed.update({'stop_verified':True,'stop_request_sha256':expected,'stopped_resume_request_sha256':stop.get('resume_request_sha256')})
+                    return observed
+                if op=='guest_status': return guest_status()
+                if op=='guest_boot_diagnostics': return guest.boot_diagnostics(p)
+                if op=='guest_resume':
+                    from synergy_linux import digest
+                    key=request_digest(request);prior=guest.receipt().get('resume',{})
+                    grant=self.control/'grants'/(key+'.json')
+                    pin=prior.get('grant_sha256') if prior.get('request_sha256')==key else digest(self.direct(grant,True))
+                    return guest.resume(p,key,pin,lambda:self.authorize_guest_resume(request,pin))
                 if op=='guest_create': return guest.create(p,request_digest(request),lambda:self.authorize(request))
-                if op=='guest_stop': return guest.stop(p,lambda:self.authorize(request))
+                if op=='guest_stop':
+                    guest.stop(p,lambda:self.authorize(request),request_digest(request));return guest_status()
                 if op=='guest_remove': return guest.remove(p,request_digest(request),lambda:self.authorize(request))
         if op=='health': return json.loads(native([self.root/'bin/synergy-node','health','--admin-socket',self.root/'run/admin.sock']))
         if op=='vpn_status': return self.vpn_status()
+        if op=='vpn_unused_preflight': return self.vpn_unused_preflight()
+        if op=='vpn_cancel_unused': return self.vpn_cancel_unused(request)
+        if op=='vpn_stop_status': return self.vpn_stop_status()
+        if op=='vpn_stop': return self.vpn_stop(request)
+        if op=='vpn_resume': return self.vpn_resume(request)
+        if op=='vpn_resume_status': return self.vpn_resume_status()
         if op=='vpn_diagnostics': return self.vpn_diagnostics()
         if op=='vpn_enroll': return self.vpn_enroll(request)
         if op=='vpn_bind': return self.vpn_bind(request)
@@ -1303,6 +1896,9 @@ class Controller:
         if op=='identity_preflight': return self.identity_preflight()[0]
         if op=='identity_status': return self.identity_status()
         if op=='identity_generate': return self.identity_generate(request)
+        if op.startswith('treasury_send_'):
+            from treasury_send import run
+            return run(self,request)
         if op.startswith('treasury_'): return self.treasury(request)
         if op.startswith('network_formation_'): return self.network_formation(request)
         if op.startswith('network_transport_'): return self.network_transport(request)
@@ -1393,7 +1989,7 @@ def control_inventory(root):
     require(isinstance(authorization,dict),'Malformed authorization inventory')
     # Fixed input names only. Never grants arbitrary caller-selected paths.
     AUTHORIZATION_FILES={'commissioning-readiness.json':128*1024,'managed-guest.json':16384,'formation-context.json':4096,'vpn-ca.pem':128*1024,'vpn-provider.json':16384,
-        'vpn-server-binding.json':16384,'vpn-retirement.json':16384,
+        'vpn-server-binding.json':16384,'vpn-retirement.json':16384,'vpn-unused-cancellation.json':16384,
         'commissioning/config/node.json':1024*1024,'commissioning/config/start-authorized.json':65536,
         **{'commissioning/network/'+name:limit for name,limit in {
             'genesis.json':4*1024*1024,'authority.json':1024*1024,'authority-root.pub':8192,

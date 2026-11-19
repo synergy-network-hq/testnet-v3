@@ -87,6 +87,7 @@ class ObservationTests(unittest.TestCase):
         self.registry={'payload':{'validators':[{'node_address':a,'revoked':False,'dial_address':ip+':5622','enrollment_sha256':enrollment if a=='synv10' else pin(a)} for a,ip in self.value['registry_peer_ips'].items()]}}
         self.config={'network_id':'fresh','chain_id':99999,'node_name':'node0','aegis_provider':{'authenticated_report_sha256':pin('provider')}}
         self.contents={name:(b'{}',pin(name)) for name in layout.INPUTS}
+        self.contents['network/authority.json']=(json.dumps({'payload':{'validators':[{'record':{'validator_id':a,'frozen_voting_weight':100,'status':'active'}} for a in self.value['validator_addresses']]}}).encode(),pin('authority'))
         self.contents.update({'config/node.json':(json.dumps(self.config).encode(),pin('config')),
             'keys/apqe/validator.pub.json':(b'{"node_address":"synv10"}',pin('identity')),
             'network/transport-registry.json':(json.dumps(self.registry).encode(),pin('registry')),
@@ -95,22 +96,23 @@ class ObservationTests(unittest.TestCase):
             'authorization_files':{'vpn-provider.json':layout.digest(self.root/'tmp/controller/authorization/inputs/vpn-provider.json')},'engineering_target':self.value['target']}
         self.vpn={'connected':True,'server_bound':True,'server_binding':self.value['vpn_binding'],
             'enrollment_sha256':pin('enroll'),'server_binding_sha256':pin('binding')}
-        self.live={'publicKey':self.value['vpn_binding']['wireguard_public_key'],'netbirdIp':'100.97.0.1/16',
+        self.live={'management':{'connected':True},'signal':{'connected':True},'publicKey':self.value['vpn_binding']['wireguard_public_key'],'netbirdIp':'100.97.0.1/16',
             'peers':{'details':[{'netbirdIp':v['ip']+'/16','publicKey':v['wireguard_public_key'],'status':'Connected'} for v in self.value['peers'].values()]}}
     def tearDown(self):self.temp.cleanup()
-    def run_observation(self,route='wt0',commissioned=False,valid_custody=True):
+    def run_observation(self,route='wt0',commissioned=False,valid_custody=True,online=None):
         if commissioned:(self.root/'data').mkdir(exist_ok=True)
         def verifier(root,stage,package,**kw):
             self.assertEqual((stage/'config/node.json').read_bytes(),self.contents['config/node.json'][0])
             self.assertEqual(kw,{'require_readiness':commissioned})
             return {}
+        self.probes=[]
         def native(args,**kwargs):
             if str(args[0]).endswith('synergy-keytool'):
                 self.assertEqual(args[1],'verify-validator-custody');directory=args[4]
                 self.assertEqual((directory/'bundle/enrollment-request.json').read_bytes(),self.contents['keys/apqe/enrollment.json'][0])
                 return json.dumps({'possession_verified':valid_custody,'address':'synv10','genesis_sha256':args[3],'chain_id_hex':args[2]}).encode()
             if args[0]=='ip':return json.dumps([{'dev':route}]).encode()
-            self.assertEqual(args[:7],['ping','-n','-I','wt0','-c','1','-W']);return b''
+            self.assertEqual(args[:-1],['ping','-n','-I','wt0','-c','3','-W','2']);self.probes.append(args[-1]);return b''
         with patch.object(lifecycle,'_sealed_receipt',return_value=({'role':'validator','package_sha256':pin('master'),**{k:self.config[k] for k in ('network_id','chain_id','node_name')}},{})),\
              patch.object(lifecycle,'_unit_state',return_value={'MainPID':'0','ActiveState':'inactive'}),\
              patch.object(lifecycle,'_validate_commissioning_native',side_effect=verifier),\
@@ -119,7 +121,7 @@ class ObservationTests(unittest.TestCase):
              patch.object(self.c,'formation_context',return_value=({'formation_sha256':pin('formation')},[])),\
              patch.object(layout,'formation_stage_contents',return_value=self.contents),patch.object(self.c,'commissioned_observation_contents',return_value=self.contents),patch('vpn.status',return_value=self.live),\
              patch('synergy_linux.native',side_effect=native):
-            value=self.c.commissioning_observation()
+            value=self.c.commissioning_observation(online_addresses=online)
             if commissioned:binding.assert_not_called()
             else:binding.assert_called_once_with(locked=True)
             return value
@@ -136,6 +138,12 @@ class ObservationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'Controlled Canary network'):self.run_observation()
             self.provider['network_binding'][field]=original
 
+    def test_revoked_signed_member_refuses_before_any_probe(self):
+        self.registry['payload']['validators'][1]['revoked']=True
+        self.contents['network/transport-registry.json']=(json.dumps(self.registry).encode(),pin('registry'))
+        with self.assertRaisesRegex(ValueError,'Signed transport roster'):self.run_observation()
+        self.assertEqual(self.probes,[])
+
     def test_actual_native_staging_bytes_and_twenty_edge_contribution(self):
         value=self.run_observation();self.assertEqual(value['peers'],self.value['peers']);self.assertEqual(value['chain_id'],'99999')
         self.assertFalse(list((self.root/'tmp').glob('commission-observe-*')))
@@ -150,7 +158,9 @@ class ObservationTests(unittest.TestCase):
             self.run_observation(commissioned=True,valid_custody=False)
         self.assertFalse(list((self.root/'tmp').glob('commission-observe-*')))
     def test_installed_observation_content_binds_exact_draft_and_rejects_drift(self):
-        pins={};readiness=pin('readiness');self.policy['authorization_files'][layout.READINESS_FILE]=readiness
+        artifact=controller.canonical(observations())
+        save(self.c.control/'authorization/inputs'/layout.READINESS_FILE,artifact)
+        pins={};readiness=hashlib.sha256(artifact).hexdigest();self.policy['authorization_files'][layout.READINESS_FILE]=readiness
         for name,(raw,_) in self.contents.items():
             if name=='config/start-authorized.json':raw=controller.canonical({'all_validators_ready':False,'all_pairs_vpn_verified':False})
             if name in layout.FORMATION_PUBLIC_INPUTS:
@@ -184,8 +194,8 @@ class ReadinessAuthorizationTests(unittest.TestCase):
 
     def test_locked_revalidation_precedes_stage_and_grant(self):
         with tempfile.TemporaryDirectory() as directory:
-            root=Path(directory)/'synergy';root.mkdir();(root/'tmp/pre-genesis-validator').mkdir(parents=True)
-            for name in ('keys','config','network'):(root/name).mkdir()
+            root=Path(directory).resolve()/'synergy';root.mkdir();(root/'tmp/pre-genesis-validator').mkdir(parents=True)
+            for name in ('keys','config','network'):(root/name).mkdir(mode=0o700)
             authorize=unittest.mock.Mock()
             with patch.object(lifecycle,'_sealed_receipt',return_value=({},{})), \
                  patch.object(controller.Controller,'commissioning_readiness',side_effect=ValueError('expired')) as readiness, \
@@ -254,6 +264,87 @@ class ReadinessRefreshTests(unittest.TestCase):
         changed=self.c.control/'authorization/inputs/commissioning/config/node.json'
         save(changed,b'changed')
         with self.assertRaisesRegex(ValueError,'commissioning input changed'):self.refresh()
+
+    def test_first_readiness_after_real_consumed_upgrade_needs_no_retired_transport_grant(self):
+        # Transport approved the immutable eight public inputs and commission{}.
+        self.path.unlink();del self.policy['authorization_files'][layout.READINESS_FILE]
+        self.grant.unlink() # General continuation retired that expired transport grant.
+        previous=copy.deepcopy(self.selection)
+        selected={**previous,'release_id':'new-master','manifest_sha256':pin('new-master')}
+        self.policy['engineering_authorization']={'sha256':pin('upgrade approval'),'sequence':14,'expires_at':1800}
+        self.policy['qualified_operations']=['upgrade']
+        self.policy['engineering_update']={'previous_selection':previous,'selection':selected}
+        request={'version':1,'operation':'upgrade','parameters':{k:selected[k] for k in controller.SELECT}}
+        key=controller.request_digest(request);upgrade=self.c.control/'grants'/(key+'.json')
+        save(upgrade,{'root':str(self.root),'operation':'upgrade','request_sha256':key,'expires_at':1800,
+            'authorization_sha256':pin('upgrade approval'),'authorization_sequence':14})
+        with patch.object(self.c,'policy',return_value=self.policy),patch.object(controller,'engineering_effective_selection',return_value=previous),patch.object(controller.time,'time',return_value=1500):
+            self.c.authorize(request)
+        self.assertFalse(upgrade.exists())
+        consumed={json.loads(line)['request_sha256'] for line in (self.c.control/'audit.jsonl').read_bytes().splitlines()}
+        self.assertEqual(consumed,{key});self.assertNotIn(self.key,consumed)
+        self.policy['engineering_initial_authorization_sha256']=pin('initial')
+        self.policy['validator_formation_sha256']=pin('formation')
+        self.policy['engineering_update'].update(initial_sha256=pin('initial'),formation_sha256=pin('formation'))
+        self.policy['releases']={value['release_id']:{'manifest_sha256':value['manifest_sha256'],
+            'inventory_authenticated':True,'networks':{value['network_id']:value['chain_id']}} for value in (previous,selected)}
+        self.doc.update(selected)
+        before={p.relative_to(self.root):p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        with patch.object(lifecycle,'_sealed_receipt',return_value=({**selected,'package_sha256':selected['manifest_sha256']},{'release_id':selected['release_id']})):
+            self.assertTrue(self.refresh(consumed=consumed))
+        self.assertEqual(before,{p.relative_to(self.root):p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
+        self.assertFalse(self.grant.exists());self.assertFalse(self.path.exists())
+        self.selection.update(selected);del self.policy['engineering_update']
+        with self.assertRaisesRegex(ValueError,'Consumed'):self.refresh(consumed=consumed|{self.key})
+
+    def test_first_readiness_missing_grant_still_refuses_partial_or_foreign_approval(self):
+        self.grant.unlink()
+        # Existing readiness may never lose its unused exact grant.
+        with self.assertRaises(OSError):self.refresh()
+        self.path.unlink()
+        with self.assertRaisesRegex(ValueError,'incomplete'):self.refresh()
+        del self.policy['authorization_files'][layout.READINESS_FILE]
+        self.assertTrue(self.refresh())
+        save(self.path,self.old)
+        with self.assertRaisesRegex(ValueError,'incomplete'):self.refresh()
+        self.path.unlink()
+        save(self.grant,{'root':str(self.root),'operation':'commission','request_sha256':self.key,'expires_at':1300,
+            'authorization_sha256':pin('older parent'),'authorization_sequence':0})
+        with self.assertRaisesRegex(ValueError,'Original commissioning grant'):self.refresh()
+        self.grant.unlink()
+        doc=copy.deepcopy(self.doc);doc['requests'].append({'operation':'start','request_sha256':pin('start')})
+        with self.assertRaisesRegex(ValueError,'Consumed or foreign'):self.refresh(doc=doc)
+        for relative in ('data','tmp/commissioning','evidence/upgrade-intent.json'):
+            path=self.root/relative;save(path,b'partial')
+            with self.assertRaisesRegex(ValueError,'published or uncertain'):self.refresh()
+            path.unlink()
+        source=self.c.control/'authorization/inputs/commissioning/config/node.json'
+        save(source,b'changed')
+        with self.assertRaisesRegex(ValueError,'commissioning input changed'):self.refresh()
+
+    def test_existing_native_treasury_is_preserved_but_unknown_linked_or_replayed_refresh_refuses(self):
+        import test_commission_treasury as treasury_fixture
+        fixture=treasury_fixture.CommissionTreasuryTests()
+        selection={'network_id':'fresh','chain_id':'99999','formation_sha256':'a'*64}
+        request={'version':1,'operation':'treasury_prepare','parameters':{'formation_sha256':'a'*64,'effective_at_unix':100}}
+        result={'schema':'nodenetwork-formation-treasury-v1','pending':True,'possession_verified':True,
+                'request_sha256':controller.request_digest(request),'effective_at_unix':100,**selection}
+        directory=self.root/'keys/formation-treasury';directory.mkdir(mode=0o700)
+        save(self.root/'tmp/treasury-prepare-request.json',controller.canonical(request))
+        save(directory/'request.json',controller.canonical(request))
+        for name in ('treasury-public.json','treasury.enc.json','unlock'):save(directory/name,b'opaque test fixture, not keys')
+        before={p.relative_to(self.root):p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        with fixture.verified(selection,result):
+            self.assertTrue(self.refresh())
+            self.assertEqual(before,{p.relative_to(self.root):p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
+            unknown=self.root/'keys/unknown';save(unknown,b'unknown')
+            with self.assertRaises(ValueError):self.refresh()
+            unknown.unlink()
+            unlock=directory/'unlock';raw=unlock.read_bytes();unlock.unlink();unlock.symlink_to(directory/'treasury.enc.json')
+            with self.assertRaises(ValueError):self.refresh()
+            unlock.unlink();save(unlock,raw)
+            with self.assertRaisesRegex(ValueError,'Consumed'):self.refresh(consumed={self.key})
+            self.assertEqual(before,{p.relative_to(self.root):p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
 
     def test_atomic_exchange_reconciliation_does_not_regenerate_grant(self):
         # Existing exchange protocol applies equally to a refreshed review: exact

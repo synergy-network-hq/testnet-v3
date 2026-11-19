@@ -61,6 +61,25 @@ pub fn is_disposable_formation_network(network_id: &str) -> bool {
             })
 }
 
+// This namespace identifies the controlled engineering Canary only. It grants
+// no authority: the explicit APQE provider, signed Genesis and root gates below
+// remain mandatory, and the production namespace is not accepted.
+fn is_controlled_canary_network(network_id: &str, chain_id: u64) -> bool {
+    chain_id == 99999
+        && network_id.len() <= 128
+        && network_id
+            .strip_prefix("synergy-posy-canary-")
+            .is_some_and(|suffix| {
+                !suffix.is_empty()
+                    && suffix.split('-').all(|segment| {
+                        !segment.is_empty()
+                            && segment
+                                .bytes()
+                                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+                    })
+            })
+}
+
 impl NodeConfiguration {
     /// A signature-authenticated TCP socket is not a PQ confidentiality channel.
     /// No configuration flag can waive this missing protocol implementation.
@@ -124,6 +143,7 @@ impl NodeConfiguration {
                 || self.consensus.authority_binding.is_none()
                 || self.consensus.authority_trust_key_path.is_none()
                 || !(is_disposable_formation_network(&self.network_id)
+                    || is_controlled_canary_network(&self.network_id, self.chain_id)
                     || (self.network_id.starts_with("posy-")
                         && self.network_id.contains("-canary-")))
             {

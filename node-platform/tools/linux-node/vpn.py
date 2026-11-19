@@ -81,6 +81,97 @@ def client_exec(root,args):
     os.execve(str(root/'bin/netbird'),argv,env)
 
 
+def _profile_json(path):
+    """Read private daemon state internally; never return it through IPC/logs."""
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    try:
+        meta=os.fstat(fd)
+        require(stat.S_ISREG(meta.st_mode) and meta.st_nlink==1 and meta.st_uid==os.geteuid()
+                and stat.S_IMODE(meta.st_mode)==0o600 and 0<meta.st_size<=16384,'Unsafe local VPN profile')
+        raw=os.read(fd,16385)
+        require(len(raw)==meta.st_size,'Local VPN profile changed during read')
+    finally:os.close(fd)
+    def unique(pairs):
+        result={}
+        for key,value in pairs:
+            require(key not in result,'Duplicate local VPN profile field')
+            result[key]=value
+        return result
+    return json.loads(raw,object_pairs_hook=unique)
+
+
+def profile_identity(config):
+    """Exact approved provider encodings; opaque private values never leave memory."""
+    private=config['PrivateKey'];ssh=config['SSHKey']
+    require(isinstance(private,str) and len(private)==44,'Invalid local VPN identity format')
+    try:key=base64.b64decode(private,validate=True)
+    except ValueError:raise ValueError('Invalid local VPN identity format') from None
+    require(len(key)==32 and any(key) and base64.b64encode(key).decode()==private
+            and isinstance(ssh,str) and len(ssh)==119
+            and ssh.startswith('-----BEGIN PRIVATE KEY-----\n')
+            and ssh.endswith('-----END PRIVATE KEY-----\n'),'Invalid local VPN identity format')
+    try:ssh_blob=base64.b64decode(''.join(ssh.splitlines()[1:-1]),validate=True)
+    except ValueError:raise ValueError('Invalid local VPN identity format') from None
+    # Approved NetBird v0.77.1 profilemanager generates ED25519 and calls
+    # client/ssh.EncodePrivateKeyToPEM: x509.MarshalPKCS8PrivateKey, PEM PRIVATE KEY.
+    # RFC 8410's Ed25519 PrivateKeyInfo is a fixed 16-byte DER envelope + seed.
+    # This checks only that exact provider encoding, not private-key cryptography
+    # or peer membership. NetBird remains the key parser/user; identity is retained
+    # only in memory for the existing same-profile comparison after explicit up.
+    require(len(ssh_blob)==48 and ssh_blob[:16]==bytes.fromhex('302e020100300506032b657004220420')
+            and any(ssh_blob[16:])
+            and ssh=='-----BEGIN PRIVATE KEY-----\n'+base64.b64encode(ssh_blob).decode()+'\n-----END PRIVATE KEY-----\n',
+            'Invalid local VPN identity format')
+    return private,ssh
+
+
+def unregistered_default_profile(root):
+    """Only the daemon-created, never-coordinator default profile is reusable.
+
+    This is structural/provenance validation, NOT a peer-membership proof. Private
+    identity strings remain in process memory solely to detect a client key change.
+    NetBird itself validates/uses the keys; no alternative crypto implementation.
+    """
+    directory=Path(root)/'vpn';meta=directory.lstat()
+    require(stat.S_ISDIR(meta.st_mode),'Unsafe local VPN directory')
+    names={p.name for p in directory.iterdir()}
+    if not names:return None
+    require(meta.st_uid==os.geteuid() and stat.S_IMODE(meta.st_mode)==0o700,'Unsafe local VPN directory')
+    require(names=={'default.json','active_profile.json'},'Unknown local VPN state requires reconciliation')
+    require(_profile_json(directory/'active_profile.json')=={'name':'default','username':''},'Foreign VPN profile selector')
+    config=_profile_json(directory/'default.json')
+    false_fields=('BlockInbound','BlockLANAccess','DisableAutoConnect','DisableClientRoutes','DisableDNS',
+                  'DisableFirewall','DisableIPv6','DisableIPv6Discovery','DisableServerRoutes',
+                  'RosenpassEnabled','RosenpassPermissive','ServerSSHAllowed')
+    null_fields=('DNSLabels','DisableSSHAuth','EnableSSHLocalPortForwarding','EnableSSHRemotePortForwarding',
+                 'EnableSSHRoot','EnableSSHSFTP','NATExternalIPs','NetworkMonitor','SSHJWTCacheTTL','SyncMessageVersion')
+    blank_fields=('ClientCertKeyPath','ClientCertPath','CustomDNSAddress','Name','PreSharedKey')
+    exact={'ManagementURL','AdminURL','PrivateKey','SSHKey','WgIface','WgPort','MTU','IFaceBlackList',
+           'DNSRouteInterval','DisableNotifications',*false_fields,*null_fields,*blank_fields}
+    require(isinstance(config,dict) and set(config)==exact,'Unsupported unregistered VPN profile schema')
+    require(all(config[k] is False for k in false_fields) and all(config[k] is None for k in null_fields)
+            and all(config[k]=='' for k in blank_fields) and config['DisableNotifications'] is True,
+            'Local VPN profile is not an untouched unregistered default')
+    require(config['WgIface']=='wt0' and type(config['WgPort']) is int and config['WgPort']==51820
+            and type(config['MTU']) is int and config['MTU']==1280
+            and type(config['DNSRouteInterval']) is int and config['DNSRouteInterval']==60000000000
+            and config['IFaceBlackList']==['wt0','wt','utun','tun0','zt','ZeroTier','wg','ts','Tailscale','tailscale','docker','veth','br-','lo'],
+            'Local VPN default networking differs')
+    for field,host in [('ManagementURL','api.netbird.io:443'),('AdminURL','app.netbird.io:443')]:
+        url=config[field]
+        expected={'Scheme':'https','Opaque':'','User':None,'Host':host,'Path':'','RawPath':'','OmitHost':False,
+                  'ForceQuery':False,'RawQuery':'','Fragment':''}
+        require(url==expected or url==dict(expected,RawFragment=''),'Foreign VPN management or admin origin')
+    return profile_identity(config)
+
+
+
+def _same_profile_identity(root,identity):
+    config=_profile_json(Path(root)/'vpn/default.json')
+    require(isinstance(config,dict) and (config.get('PrivateKey'),config.get('SSHKey'))==identity,
+            'Native VPN identity changed; preserve attempt for reconciliation')
+
+
 def status(root, timeout=8):
     j = json.loads(native([root / 'tools/netbird-client', 'status', '--json'], timeout=timeout))
     require(j['management']['connected'] and j['signal']['connected'], 'management or signal disconnected')
@@ -145,10 +236,11 @@ def verify_gateway_route(root):
         return result
 
 
-def enroll(root, secret_input):
+def enroll(root, secret_input, preserved_identity=None):
     require(os.geteuid() == 0 and sys.platform.startswith('linux'), 'Linux root required')
     require(not (root / 'evidence/vpn-enrollment.json').exists(), 'VPN enrollment already recorded')
-    require(not list((root / 'vpn').iterdir()), 'fresh machine-specific VPN identity required')
+    require(unregistered_default_profile(root)==preserved_identity,
+            'Fresh or exactly preserved machine-specific VPN identity required')
     request = json.loads(secret_input)
     common = {'setup_key', 'management_url', 'hostname'}
     require(isinstance(request, dict) and set(request) in
@@ -180,6 +272,7 @@ def enroll(root, secret_input):
     finally:
         secret.unlink(missing_ok=True)
         key = None
+    if preserved_identity is not None:_same_profile_identity(root,preserved_identity)
     native(['ip', 'link', 'show', 'wt0'])
     deadline = time.monotonic() + 60
     j = None
@@ -192,6 +285,7 @@ def enroll(root, secret_input):
         except (ValueError, OSError, subprocess.SubprocessError):
             time.sleep(1)
     else: raise ValueError('bounded native VPN/peer connectivity gate failed')
+    if preserved_identity is not None:_same_profile_identity(root,preserved_identity)
     result = {'wireguard_public_key': j['publicKey'], 'overlay_address': j['netbirdIp'],
               'hostname': request['hostname'], 'management_url': request['management_url'],
               'verified_peer_ips': peers, 'peer_id': None, 'server_binding_verified': False,
@@ -200,6 +294,104 @@ def enroll(root, secret_input):
         result['required_gateway_tcp'] = gateway
         result['gateway_tcp_verified'] = False
     write_new(root / 'evidence/vpn-enrollment.json', result)
+    return result
+
+
+ATTEMPTS = 'evidence/vpn-attempts.json'
+CANCELLATION = 'vpn-unused-cancellation.json'
+
+
+def public_hash(value):
+    return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',', ':')).encode()).hexdigest()
+
+
+def attempt_state(root, proposed_events=None):
+    """Bounded alternating cancellations/retries; original fence never changes."""
+    original=root/'evidence/vpn-enrollment-attempt.json'
+    if not original.exists() and not original.is_symlink():
+        require(not (root/ATTEMPTS).exists() and not (root/ATTEMPTS).is_symlink(),'Orphan VPN attempt history')
+        return {'attempt_sha256':None,'scope_sha256':None,'retry_after_sha256':None,'events':[]}
+    require(read(original)=={'format':'nodenetwork-vpn-attempt-v1'},'Original VPN attempt differs')
+    current=hashlib.sha256(original.read_bytes()).hexdigest();scope=None;retry=None
+    path=root/ATTEMPTS;events=[]
+    if proposed_events is not None or path.exists() or path.is_symlink():
+        record=({'format':'nodenetwork-vpn-attempts-v1','events':proposed_events}
+                if proposed_events is not None else read(path,256*1024))
+        require(set(record)=={'format','events'} and record['format']=='nodenetwork-vpn-attempts-v1'
+                and isinstance(record['events'],list) and len(record['events'])<=128,'Invalid VPN attempt history')
+        events=record['events']
+        for event in events:
+            require(isinstance(event,dict),'Invalid VPN attempt event')
+            if event.get('kind')=='cancel':
+                require(set(event)=={'kind','receipt'} and retry is None and isinstance(event['receipt'],dict)
+                        and event['receipt'].get('attempt_sha256')==current,'Stale VPN cancellation history')
+                validate_unused_cancellation(event['receipt'])
+                retry=public_hash(event)
+            else:
+                require(set(event)=={'kind','cancellation_sha256','enrollment_sha256'} and event.get('kind')=='attempt'
+                        and retry is not None and event['cancellation_sha256']==retry
+                        and re.fullmatch('[a-f0-9]{64}',event.get('enrollment_sha256','')),'Invalid VPN retry history')
+                scope=retry;current=public_hash(event);retry=None
+    return {'attempt_sha256':current,'scope_sha256':scope,'retry_after_sha256':retry,'events':events}
+
+
+def append_attempt_event(root,event):
+    state=attempt_state(root);events=[*state['events'],event]
+    require(len(events)<=128,'VPN attempt history exhausted')
+    attempt_state(root,events)  # Validate the entire proposed transition before writing.
+    record={'format':'nodenetwork-vpn-attempts-v1','events':events}
+    raw=json.dumps(record,sort_keys=True,indent=2).encode()+b'\n'
+    require(len(raw)<=256*1024,'VPN attempt history exceeds bound')
+    from lifecycle import _replace_bytes
+    _replace_bytes(root,root/ATTEMPTS,raw,0o600,hashlib.sha256(raw).hexdigest())
+    return attempt_state(root)
+
+
+def validate_unused_cancellation(value):
+    fields={'format','binding','provider_sha256','account_id','setup_key_id','name','intent_sha256',
+            'attempt_sha256','unused_verified','setup_key_absent','peer_absence_verified'}
+    require(isinstance(value,dict) and set(value)==fields and value['format']=='nodenetwork-vpn-unused-cancellation-v1'
+            and all(value[k] is True for k in ('unused_verified','setup_key_absent','peer_absence_verified')),
+            'Exact unused VPN cancellation proof required')
+    require(all(isinstance(value[k],str) and re.fullmatch('[a-f0-9]{64}',value[k])
+                for k in ('provider_sha256','intent_sha256','attempt_sha256'))
+            and all(isinstance(value[k],str) and re.fullmatch('[A-Za-z0-9_-]{1,100}',value[k])
+                    for k in ('account_id','setup_key_id','name')),'Invalid unused VPN cancellation attribution')
+
+
+def recover_enrollment(root, server_peer, provider):
+    """Recover identity evidence, never replay enrollment or claim peer probes.
+
+    The controller has authenticated the original attempt, native grant, origin
+    and provider artifact. Re-observe the daemon before publishing any receipt.
+    """
+    current = status(root)
+    require(current.get('management', {}).get('connected') is True
+            and current.get('signal', {}).get('connected') is True,
+            'Native VPN recovery daemon is not connected')
+    public = current.get('publicKey')
+    try:
+        decoded = base64.b64decode(public, validate=True)
+        address = ipaddress.ip_interface(current['netbirdIp'])
+    except (ValueError, TypeError, KeyError):
+        raise ValueError('Native VPN recovery identity unavailable') from None
+    require(len(decoded) == 32 and base64.b64encode(decoded).decode() == public
+            and public == server_peer['wireguard_public_key']
+            and address.ip == ipaddress.ip_address(server_peer['ip']),
+            'Native VPN recovery identity differs from verified provider observation')
+    require(server_peer['connected'] is True and server_peer['new_peer_verified'] is True
+            and server_peer['one_off_usage_verified'] is True
+            and server_peer['provider_account_id'] == provider['account_id'],
+            'Independent exact provider recovery evidence required')
+    result = {'wireguard_public_key': public, 'overlay_address': str(address),
+              'hostname': server_peer['name'], 'management_url': provider['management_origin'],
+              'verified_peer_ips': [], 'peer_id': None, 'server_binding_verified': False,
+              'native_enrollment_verified': True, 'consensus_started': False}
+    path = root / 'evidence/vpn-enrollment.json'
+    if path.exists() or path.is_symlink():
+        require(read(path) == result, 'Recovered native enrollment differs')
+    else:
+        _retirement_write(path, result)
     return result
 
 
@@ -217,13 +409,18 @@ def bind_server(root, server_peer):
     require(ipaddress.ip_interface(local['overlay_address']).ip == ipaddress.ip_address(server_peer['ip']),
             'management peer address differs')
     require(server_peer['id'] and server_peer['connected'] is True, 'server peer not connected')
-    write_new(root / 'evidence/vpn-server-binding.json', {'peer_id': server_peer['id'],
+    result = {'peer_id': server_peer['id'],
               'wireguard_public_key': local['wireguard_public_key'], 'ip': server_peer['ip'],
               'hostname': server_peer['hostname'], 'peer_name': server_peer['name'],
               'server_binding_verified': True,
               'binding_method': 'fresh peer ID + one-off enrollment evidence + unique peer name + native IP',
               'one_off_usage_evidence': server_peer.get('one_off_usage_evidence', 'management key counter'),
-              'management_public_key_exposed': False})
+              'management_public_key_exposed': False}
+    path = root / 'evidence/vpn-server-binding.json'
+    if path.exists() or path.is_symlink():
+        require(read(path) == result, 'Existing VPN server binding differs')
+    else:
+        _retirement_write(path, result)
     return {'peer_id': server_peer['id'], 'server_binding_verified': True}
 
 
@@ -427,6 +624,7 @@ def record_retirement(root, raw, pin):
 
 
 _DIAGNOSTIC_MARKERS = {
+    'launcher_import_failure': (b'modulenotfounderror:', b'importerror:'),
     'tls_untrusted': (b'certificate signed by unknown authority', b'certificate verify failed', b'unable to get local issuer'),
     'tls_expired': (b'certificate has expired', b'certificate is not yet valid'),
     'tls_name_mismatch': (b'certificate is valid for', b'cannot validate certificate for'),
@@ -448,26 +646,33 @@ def diagnostic_log(root):
     result = {'available': False, 'modified_at_ms': None, 'sampled_bytes': 0, 'codes': []}
     try:
         directory = os.open(root/'logs', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            fd = os.open('netbird.log', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-        finally:
-            os.close(directory)
-        try:
-            metadata = os.fstat(fd)
-            require(stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1
-                    and metadata.st_uid == 0, 'Unsafe VPN diagnostic log')
-            os.lseek(fd, max(0, metadata.st_size-65536), os.SEEK_SET)
-            raw = os.read(fd, 65536)
-            result.update(available=True, modified_at_ms=metadata.st_mtime_ns//1000000,
-                          sampled_bytes=len(raw), codes=diagnostic_codes(raw))
-        finally:
-            os.close(fd)
-    except (ValueError, OSError):
-        pass
+    except OSError:
+        return result
+    try:
+        # Fixed names only: launcher failures precede the daemon's own log.
+        for name in ('netbird.log','netbird-service.log'):
+            try:
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+                try:
+                    metadata = os.fstat(fd)
+                    require(stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1
+                            and metadata.st_uid == 0, 'Unsafe VPN diagnostic log')
+                    os.lseek(fd, max(0, metadata.st_size-32768), os.SEEK_SET)
+                    raw = os.read(fd, 32768)
+                    result['available'] = True
+                    result['modified_at_ms'] = max(result['modified_at_ms'] or 0, metadata.st_mtime_ns//1000000)
+                    result['sampled_bytes'] += len(raw)
+                    result['codes'] = sorted(set(result['codes']) | set(diagnostic_codes(raw)))
+                finally:
+                    os.close(fd)
+            except (ValueError, OSError):
+                pass
+    finally:
+        os.close(directory)
     return result
 
 
-def diagnostics(root, enrollment):
+def diagnostics(root, enrollment, *, observe_live=None):
     """Read-only observation, independent of a completed enrollment receipt.
 
     An absent receipt does not imply the client is disconnected. Reachability
@@ -524,6 +729,8 @@ def diagnostics(root, enrollment):
         result['client']['error_code'] = 'client_status_timeout'
     except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError):
         result['client']['error_code'] = 'client_status_unavailable'
+    if observe_live is not None:
+        observe_live(current if result['client']['available'] else None)
     for peer in peers:
         observation = {'ip': peer, 'route_via_wt0': False, 'reachable': False, 'error_code': None}
         try:

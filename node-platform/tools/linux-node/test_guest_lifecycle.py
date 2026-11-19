@@ -46,6 +46,47 @@ class GuestTests(unittest.TestCase):
   if a[:2]==['/usr/bin/systemctl','stop']:self.active=False
   return b''
  def create(self):return self.manager.create(self.params,'a'*64,self.authorize)
+ def test_software_upgrade_preserves_only_stopped_exact_guest_resources(self):
+  self.create()
+  pins={'hosted-machines/images/os.qcow2':self.spec['image_sha256'],
+        'lib/guest-tools/bios.bin':self.spec['bios_sha256'],
+        **{'lib/guest-tools/bin/'+n:v for n,v in self.spec['tools'].items()},**self.spec['runtime_files']}
+  manifest={'files':pins,'managed_guest_resources':{'version':1,'manifest_sha256':'f'*64,'archive_limit_bytes':512*1024**2,'files':pins}}
+  before={p.name:p.read_bytes() for p in self.manager.directory.iterdir() if p.is_file()}
+  with patch.object(controller.Controller,'policy',return_value={'managed_guest':self.spec}),patch.object(g,'operator_public_key',return_value=g.public_ssh(KEY.encode())[0]),patch.object(g.GuestManager,'command',side_effect=self.command):
+   with self.assertRaisesRegex(ValueError,'Stop managed guest'):g.require_upgrade_compatible(self.root,manifest)
+   self.manager.stop(self.params,self.authorize)
+   g.require_upgrade_compatible(self.root,manifest)
+   changed=json.loads(json.dumps(manifest));changed['files']['lib/guest-tools/bios.bin']='e'*64;changed['managed_guest_resources']['files']['lib/guest-tools/bios.bin']='e'*64
+   with self.assertRaisesRegex(ValueError,'differs'):g.require_upgrade_compatible(self.root,changed)
+   (self.manager.directory/'foreign').write_text('unknown')
+   with self.assertRaises(ValueError):g.require_upgrade_compatible(self.root,manifest)
+   (self.manager.directory/'foreign').unlink()
+  self.assertEqual(before,{p.name:p.read_bytes() for p in self.manager.directory.iterdir() if p.is_file()})
+ def test_conformance_excludes_only_exact_attributed_guest_unit(self):
+  import conformance
+  self.legacy();self.manager.stop(self.params,self.authorize)
+  names={self.manager.unit_name}
+  # This is the actual failing external-service boundary: before ownership
+  # attribution, even the legitimate stopped legacy unit is rejected.
+  with self.assertRaisesRegex(ValueError,'obsolete or undeclared'):
+   conformance.verify_external_services(self.root,names)
+  with patch.object(controller.Controller,'policy',return_value={'managed_guest':self.spec}),patch.object(g.GuestManager,'command',side_effect=self.command):
+   self.assertEqual(conformance.without_owned_guest_registration(self.root,names),set())
+   conformance.verify_external_services(self.root,conformance.without_owned_guest_registration(self.root,names))
+   foreign=names|{'synergy-guest-foreign.service'}
+   with self.assertRaisesRegex(ValueError,'obsolete or undeclared'):
+    conformance.verify_external_services(self.root,conformance.without_owned_guest_registration(self.root,foreign))
+   for damage in ('unit','registration','unknown'):
+    original=self.manager.target.read_bytes()
+    if damage=='unit':self.manager.target.write_bytes(b'tampered')
+    elif damage=='registration':self.manager.registration.unlink();self.manager.registration.symlink_to(self.root/'foreign.service')
+    else:(self.manager.directory/'unknown').write_text('foreign')
+    with self.subTest(damage=damage),self.assertRaises((ValueError,OSError)):
+     conformance.without_owned_guest_registration(self.root,names)
+    if damage=='unit':self.manager.target.write_bytes(original)
+    elif damage=='registration':self.manager.registration.unlink();self.manager.registration.symlink_to(self.manager.target)
+    else:(self.manager.directory/'unknown').unlink()
  def test_create_stop_remove_repeated_without_regeneration(self):
   r=self.create();self.assertTrue(r['ssh_identity_verified']);self.assertFalse(r['validator_installed']);self.assertFalse(r['guest_os_reachability_verified']);self.assertNotIn('private',json.dumps(r))
   count=len(self.calls);self.create();self.assertEqual(count,len(self.calls));self.assertEqual(1,self.authorized)
@@ -152,5 +193,127 @@ class GuestTests(unittest.TestCase):
   self.file('hosted-machines/untracked',b'keep')
   with patch.object(g.GuestManager,'command',side_effect=self.command):
    with self.assertRaisesRegex(ValueError,'Unattributed'):g.approved_inventory(self.root,{'managed_guest':self.spec})
+
+ def legacy(self):
+  self.create();receipt=self.manager.receipt();receipt.pop('runtime_version');g.atomic(self.manager.base/'record.json',receipt)
+  self.manager.target.write_bytes(self.manager.unit(1));self.manager.target.chmod(0o600)
+ def resume(self,sequence=1,key='b'*64):return self.manager.resume({'guest_id':self.spec['guest_id'],'resume_sequence':sequence,'create_request_sha256':'a'*64},key,'c'*64,self.authorize)
+ def test_legacy_attribution_stop_resume_preserves_all_creation_material(self):
+  self.legacy();self.assertEqual(self.manager.status(self.params)['runtime_version'],1)
+  saved={name:(self.manager.directory/name).read_bytes() for name in ('disk.qcow2','seed.iso','ssh-host','ssh-host.pub','user-data','meta-data')}
+  self.manager.stop(self.params,self.authorize);result=self.resume()
+  self.assertTrue(result['resume_verified']);self.assertEqual(result['runtime_version'],2)
+  self.assertEqual(result['request_sha256'],'a'*64);self.assertEqual(result['resume_request_sha256'],'b'*64)
+  self.assertEqual(self.manager.target.read_bytes(),self.manager.unit(2))
+  self.assertIn('stdio',self.manager.argv(2));self.assertNotIn('stdio',self.manager.argv(1))
+  self.assertEqual(saved,{name:(self.manager.directory/name).read_bytes() for name in saved})
+  count=sum(a[:2]==['/usr/bin/systemctl','start'] for a in self.calls);self.resume();self.assertEqual(sum(a[:2]==['/usr/bin/systemctl','start'] for a in self.calls),count)
+  with self.assertRaisesRegex(ValueError,'stop'):self.resume(2,'d'*64)
+  self.manager.stop(self.params,self.authorize);self.resume(2,'d'*64)
+ def test_resume_interrupted_migration_reconciles_without_keygen_or_blind_start(self):
+  self.legacy();self.manager.stop(self.params,self.authorize)
+  original=self.command
+  def fail(a,timeout=120):
+   if list(map(str,a))[:2]==['/usr/bin/systemctl','daemon-reload']:raise ValueError('reload interrupted')
+   return original(a,timeout)
+  with patch.object(self.manager,'command',side_effect=fail):
+   with self.assertRaisesRegex(ValueError,'interrupted'):self.resume()
+  self.assertEqual(self.manager.receipt()['resume']['phase'],'prepared')
+  self.assertFalse(self.active);self.assertTrue(self.resume()['resume_verified'])
+  self.manager.stop(self.params,self.authorize)
+  def lost(a,timeout=120):
+   value=original(a,timeout)
+   if list(map(str,a))[:2]==['/usr/bin/systemctl','start']:raise ValueError('lost reply')
+   return value
+  with patch.object(self.manager,'command',side_effect=lost):
+   with self.assertRaisesRegex(ValueError,'lost reply'):self.resume(2,'d'*64)
+  count=sum(a[:2]==['/usr/bin/systemctl','start'] for a in self.calls);self.assertTrue(self.resume(2,'d'*64)['resume_verified']);self.assertEqual(sum(a[:2]==['/usr/bin/systemctl','start'] for a in self.calls),count)
+ def test_resume_uncertain_before_start_never_replays_and_foreign_state_refuses(self):
+  self.legacy();self.manager.stop(self.params,self.authorize)
+  original=self.command
+  def before(a,timeout=120):
+   if list(map(str,a))[:2]==['/usr/bin/systemctl','start']:raise ValueError('dispatch lost')
+   return original(a,timeout)
+  with patch.object(self.manager,'command',side_effect=before):
+   with self.assertRaisesRegex(ValueError,'dispatch lost'):self.resume()
+  count=sum(a[:2]==['/usr/bin/systemctl','start'] for a in self.calls);self.assertFalse(self.resume()['resume_verified']);self.assertEqual(sum(a[:2]==['/usr/bin/systemctl','start'] for a in self.calls),count)
+  with self.assertRaisesRegex(ValueError,'stop'):self.resume(2,'d'*64)
+  self.manager.target.write_bytes(b'foreign unit')
+  with self.assertRaisesRegex(ValueError,'service bytes'):self.manager.stop(self.params,self.authorize)
+ def test_boot_diagnostic_categories_only_and_unknown_members_refused(self):
+  self.create();log=self.manager.directory/'qemu.log';log.write_bytes(b'secret-private-value'+b'x'*70000+b'Linux version 6\ncloud-init\nKernel panic')
+  result=self.manager.boot_diagnostics(self.params)
+  self.assertEqual(result['sampled_bytes'],65536);self.assertTrue(result['categories']['kernel_started']);self.assertTrue(result['categories']['kernel_panic'])
+  self.assertNotIn('secret',json.dumps(result));self.assertFalse(result['mutation_performed'])
+  self.file('hosted-machines/temporary-validator/unknown',b'preserve')
+  with self.assertRaisesRegex(ValueError,'Unexpected'):self.manager.boot_diagnostics(self.params)
+
+ def test_enrolled_legacy_guest_exclusion_never_hides_other_process_or_drift(self):
+  import bootstrap
+  from types import SimpleNamespace
+  self.legacy()
+  proc=Path(self.temp.name)/'proc';proc.mkdir()
+  for name in ('123','124'):(proc/name).mkdir()
+  seen=[]
+  def guard(root,vpn_pid=None,proc=None):seen.extend(p.name for p in proc.iterdir())
+  bootstrap.guest_management_quiescence(self.root,{'managed_guest':self.spec},guard,proc=proc)
+  self.assertEqual(seen,['124'])
+  def foreign(root,vpn_pid=None,proc=None):raise ValueError('foreign application')
+  with self.assertRaisesRegex(ValueError,'foreign application'):bootstrap.guest_management_quiescence(self.root,{'managed_guest':self.spec},foreign,proc=proc)
+  self.manager.target.write_bytes(b'foreign')
+  with self.assertRaisesRegex(ValueError,'service bytes'):bootstrap.guest_management_quiescence(self.root,{'managed_guest':self.spec},guard,proc=proc)
+ def test_resume_audit_grant_interruption_exact_original_only(self):
+  self.legacy();self.manager.stop(self.params,self.authorize)
+  c=controller.Controller(self.root);c.control.mkdir(mode=0o700);(c.control/'grants').mkdir(mode=0o700)
+  request={'version':1,'operation':'guest_resume','parameters':{'guest_id':self.spec['guest_id'],'resume_sequence':1,'create_request_sha256':'a'*64}}
+  key=controller.request_digest(request);grant=c.control/'grants'/(key+'.json');grant.write_bytes(b'{"original":"public grant"}');grant.chmod(0o600);pin=g.digest(grant)
+  def interrupted():raise ValueError('before authorization')
+  with self.assertRaisesRegex(ValueError,'before authorization'):self.manager.resume(request['parameters'],key,pin,interrupted)
+  audit=c.control/'audit.jsonl';audit.write_text(json.dumps({'operation':'guest_resume','request_sha256':key,'time':1})+'\n');audit.chmod(0o600)
+  with patch.object(c,'policy',return_value={'managed_guest':self.spec}),patch.object(c,'authorize',side_effect=AssertionError('must not authorize twice')):
+   c.authorize_guest_resume(request,pin);self.assertFalse(grant.exists())
+   c.authorize_guest_resume(request,pin) # crash after unlink: same immutable audit reconciles.
+   grant.write_bytes(b'changed grant');grant.chmod(0o600)
+   with self.assertRaisesRegex(ValueError,'grant changed'):c.authorize_guest_resume(request,pin)
+   grant.unlink();audit.write_text(json.dumps({'operation':'guest_stop','request_sha256':key,'time':1})+'\n')
+   with self.assertRaisesRegex(ValueError,'audit differs'):c.authorize_guest_resume(request,pin)
+ def test_wrong_creation_and_unknown_runtime_never_consume_resume(self):
+  self.legacy();self.manager.stop(self.params,self.authorize);count=self.authorized
+  with self.assertRaisesRegex(ValueError,'different creation'):self.manager.resume({'guest_id':self.spec['guest_id'],'resume_sequence':1,'create_request_sha256':'f'*64},'b'*64,'c'*64,self.authorize)
+  self.assertEqual(self.authorized,count)
+  record=self.manager.receipt();record['runtime_version']=3;g.atomic(self.manager.base/'record.json',record)
+  with self.assertRaisesRegex(ValueError,'Unknown guest runtime'):self.manager.status(self.params)
+
+ def test_partial_unit_migration_recovers_exact_prefix_and_rejects_foreign_bytes(self):
+  self.legacy();self.manager.stop(self.params,self.authorize)
+  def interrupted():raise ValueError('authorization interrupted')
+  params={'guest_id':self.spec['guest_id'],'resume_sequence':1,'create_request_sha256':'a'*64}
+  with self.assertRaises(ValueError):self.manager.resume(params,'b'*64,'c'*64,interrupted)
+  temp=self.file('hosted-machines/temporary-validator/.guest.service.tmp',self.manager.unit(2)[:71])
+  self.assertTrue(self.resume()['resume_verified']);self.assertFalse(temp.exists())
+  self.manager.stop(self.params,self.authorize)
+  with self.assertRaises(ValueError):self.manager.resume({**params,'resume_sequence':2},'d'*64,'c'*64,interrupted)
+  self.file('hosted-machines/temporary-validator/.guest.service.tmp',b'foreign unit')
+  with self.assertRaisesRegex(ValueError,'Unattributed guest unit temporary'):self.manager.status(self.params)
+
+ def test_exact_sealed_legacy_master_can_adopt_controller_then_stop_and_resume(self):
+  import os,importlib.util,hashlib,bootstrap,sys
+  selected=os.environ.get('SYNERGY_TEST_LEGACY_GUEST_MASTER')
+  if not selected:self.skipTest('Exact retained legacy public master not selected')
+  source=Path(selected);manifest=json.loads((source/'package.json').read_bytes());member=source/'tools/guest_lifecycle.py'
+  self.assertEqual(hashlib.sha256(member.read_bytes()).hexdigest(),manifest['files']['tools/guest_lifecycle.py'])
+  spec=importlib.util.spec_from_file_location('qualified_legacy_guest',member);old=importlib.util.module_from_spec(spec);spec.loader.exec_module(old)
+  self.legacy();legacy=old.GuestManager(self.root,{'managed_guest':self.spec})
+  self.assertEqual(legacy.unit(),self.manager.unit(1))
+  proc=Path(self.temp.name)/'proc';proc.mkdir();(proc/'123').mkdir();(proc/'124').mkdir();seen=[]
+  with patch.dict(sys.modules,{'guest_lifecycle':old}),patch.object(old,'SYSTEM',self.system),patch.object(old.GuestManager,'verify_guard'),patch.object(old.GuestManager,'verify_process'):
+   bootstrap.guest_management_quiescence(self.root,{'managed_guest':self.spec},lambda root,vpn_pid=None,proc=None:seen.extend(p.name for p in proc.iterdir()),proc=proc)
+  self.assertEqual(seen,['124']) # Authenticated candidate controller adoption can pass old owned QEMU.
+  self.assertEqual(self.manager.status(self.params)['runtime_version'],1) # New controller still attributes old runtime.
+  self.manager.stop(self.params,self.authorize)
+  import conformance
+  with patch.object(controller.Controller,'policy',return_value={'managed_guest':self.spec}),patch.object(g.GuestManager,'command',side_effect=self.command):
+   conformance.verify_external_services(self.root,conformance.without_owned_guest_registration(self.root,{self.manager.unit_name}))
+  self.assertTrue(self.resume()['resume_verified'])
 
 if __name__=='__main__':unittest.main()

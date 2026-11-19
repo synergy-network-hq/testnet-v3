@@ -217,6 +217,60 @@ def mutate_owned_service(root, action, unit, allow_absent=False):
     native(['systemctl', action, unit])
 
 
+def service_boot_state(root):
+    """Observe only the two attributed units and their fixed persistent wants links."""
+    root=Path(root);owned=_attributed_units(root)
+    result={}
+    for service,unit in zip(('node','vpn'),UNITS):
+        require(unit in owned,'Boot policy requires both registered owned services')
+        expected=UNIT_DIRECTORY/'multi-user.target.wants'/unit
+        if expected.parent.exists() or expected.parent.is_symlink():
+            metadata=expected.parent.lstat()
+            require(stat.S_ISDIR(metadata.st_mode) and metadata.st_uid==os.geteuid()
+                    and not metadata.st_mode & 0o022 and not expected.parent.is_symlink(),
+                    'Unsafe service boot registration directory')
+        for directory in UNIT_DIRECTORY.iterdir():
+            if directory.name.endswith(('.wants','.requires')):
+                candidate=directory/unit
+                if candidate.exists() or candidate.is_symlink():
+                    require(candidate==expected,'Unexpected owned service boot registration')
+        present=expected.exists() or expected.is_symlink()
+        if present:
+            require(expected.is_symlink() and expected.lstat().st_uid==os.geteuid()
+                    and os.readlink(expected) in (str(root/'systemd'/unit),str(UNIT_DIRECTORY/unit)),
+                    'Foreign service boot registration')
+        state=subprocess.run(['systemctl','is-enabled',unit],stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL,check=False,timeout=8)
+        raw=state.stdout
+        require((state.returncode,raw) in ((0,b'enabled\n'),(1,b'disabled\n'),(1,b'linked\n')),
+                'Unsupported service boot state')
+        enabled=raw==b'enabled\n'
+        require(enabled==present,'Service boot state and attributed registration disagree')
+        result[service]=enabled
+    return result
+
+
+def set_service_boot_policy(root, service, enabled):
+    require(service in ('node','vpn') and type(enabled) is bool,'Exact service boot policy required')
+    before=service_boot_state(root)
+    if before[service]!=enabled:
+        unit=UNITS[0 if service=='node' else 1]
+        link=UNIT_DIRECTORY/'multi-user.target.wants'/unit
+        # systemctl disable also removes the manually registered main unit link.
+        # Change only the fixed attributed boot link; retain that registration.
+        if enabled:
+            if not link.parent.exists():
+                link.parent.mkdir(mode=0o755);_sync_directory(UNIT_DIRECTORY)
+            link.symlink_to(Path(root)/'systemd'/unit)
+        else:link.unlink()
+        _sync_directory(link.parent)
+        native(['systemctl','daemon-reload'],timeout=8)
+    after=service_boot_state(root)
+    require(after[service]==enabled and after['vpn' if service=='node' else 'node']==before['vpn' if service=='node' else 'node'],
+            'Service boot policy outcome uncertain; reconcile observed boot state')
+    return after
+
+
 def _sealed_receipt(root):
     require(root.is_absolute() and root.is_dir() and not root.is_symlink(), 'canonical installation root required')
     for path in [root, *root.parents]:
@@ -376,8 +430,8 @@ def _start_check_locked(root):
     policy = read(root/'config/start-authorized.json')
     identity = verify_identity(root)
     require(policy['network_id'] == receipt['network_id'] and policy['chain_id'] == receipt['chain_id'], 'wrong startup incarnation')
-    require(policy.get('all_validators_ready', policy.get('all_five_ready')) is True
-            and policy.get('all_pairs_vpn_verified') is True, 'complete signed-authority installation and VPN readiness required')
+    from apqe_layout import startup_readiness_authorized
+    require(startup_readiness_authorized(root,policy,identity['address']), 'complete signed-authority quorum installation and online VPN readiness required')
     config = read(root/'config/node.json')
     verify_authority_recovery_pin(root,config,receipt,policy)
     verify_autonomous_epoch_pin(root,config,receipt,policy)
@@ -695,8 +749,8 @@ def upgrade(root, package):
     token = digest(package/'package.json')
     staged = {'pending_upgrade_sha256': token} if contained else {}
     with _lifecycle_lock(root):
-        from guest_lifecycle import require_removed
-        require_removed(root)
+        from guest_lifecycle import require_upgrade_compatible
+        require_upgrade_compatible(root, manifest)
         policy_path = root/'tmp/controller/policy.json'
         intent_path = root/UPGRADE_INTENT
         resumed = intent_path.exists()
@@ -844,8 +898,14 @@ def require_vpn_retired_for_removal(root):
     present = lambda path: path.exists() or path.is_symlink()
     if not present(enrollment_path):
         vpn_state = root/'vpn'
-        require_vpn(not present(root/VPN_ATTEMPT) and not present(binding_path)
-                    and not vpn_state.is_symlink() and not (vpn_state.exists() and any(vpn_state.iterdir())),
+        from vpn import attempt_state
+        state=attempt_state(root)
+        canceled=state['attempt_sha256'] is not None and state['retry_after_sha256'] is not None
+        empty=not vpn_state.exists() or not vpn_state.is_symlink() and not any(vpn_state.iterdir())
+        if canceled and not empty:
+            Controller(root).unregistered_vpn_identity(allow_existing=True)
+        require_vpn((not present(root/VPN_ATTEMPT) or canceled) and not present(binding_path)
+                    and not vpn_state.is_symlink() and (empty or canceled),
                     'VPN enrollment may have succeeded; reconcile with the coordinator before removal',
                     'vpn_reconciliation_required')
         return
@@ -931,9 +991,10 @@ def _validate_commissioning_native(root, staged, package, *, require_readiness=T
             'staged native APQE public preflight did not authenticate validator authority')
     authority=read(staged/'network/authority.json')['payload']
     policy=read(staged/'config/start-authorized.json')
-    require(policy.get('network_id')==manifest['network_id'] and policy.get('chain_id')==manifest['chain_id']
-            and policy.get('all_validators_ready') is require_readiness
-            and policy.get('all_pairs_vpn_verified') is require_readiness,
+    from apqe_layout import startup_readiness_authorized
+    ready=(startup_readiness_authorized(root,policy,read(staged/'keys/apqe/validator.pub.json')['node_address'],authority_source=staged)
+           if require_readiness else policy.get('all_validators_ready') is False and policy.get('all_pairs_vpn_verified') is False)
+    require(policy.get('network_id')==manifest['network_id'] and policy.get('chain_id')==manifest['chain_id'] and ready,
             'explicit provisioning/VPN readiness policy required')
     from apqe_layout import PUBLIC
     require(policy.get('public_file_sha256')=={name:digest(staged/'network'/name) for name in PUBLIC},
@@ -981,12 +1042,18 @@ def commission(root, staged, *, formation_public_pins=None, formation_public_sou
         return _commission_locked(root,staged,formation_public_pins,formation_public_source,readiness_sha256,authorize)
 
 
+def _commission_fresh_keys(root):
+    from conformance import approved_treasury_members, _require_fresh_keys
+    _require_fresh_keys(root,approved_treasury_members(root))
+
+
 def _commission_locked(root, staged, formation_public_pins, formation_public_source=None, readiness_sha256=None, authorize=None):
     require(staged==root/'tmp/commissioning','commissioning must be staged inside the installation root')
     receipt,manifest=_sealed_receipt(root)
-    require(not (root/'data').exists() and not list((root/'keys').iterdir())
+    require(not (root/'data').exists()
             and not list((root/'config').iterdir()) and not list((root/'network').iterdir()),
             'commission requires fresh uninitialized application root')
+    _commission_fresh_keys(root)
     formation=root/'tmp/pre-genesis-validator'
     formed=formation.exists() or formation.is_symlink()
     require(formed==(formation_public_pins is not None),

@@ -24,8 +24,9 @@ sys.dont_write_bytecode=True
 ROOT=Path('/opt/synergy')
 LIMIT=256*1024*1024
 ENGINE=('controller.py','synergy_linux.py','lifecycle.py','conformance.py','apqe_layout.py','vpn.py','canary_rpc_relay.py','root_guard.py')
+OPTIONAL_ENGINE=('guest_lifecycle.py','vpn_authorization.py','treasury_send.py')
 def engine_names(files):
-    return (*ENGINE,'guest_lifecycle.py') if 'tools/guest_lifecycle.py' in files else ENGINE
+    return (*ENGINE,*(name for name in OPTIONAL_ENGINE if 'tools/'+name in files))
 
 def initial_engine_pins(stage, manifest):
     # The extractor already authenticated this exact manifest. Include optional
@@ -35,7 +36,7 @@ def initial_engine_pins(stage, manifest):
 
 def enrolled_engine(policy):
     names=set(policy.get('engine_files',{}))
-    require(names in (set(ENGINE),set((*ENGINE,'guest_lifecycle.py'))),'Incomplete enrolled engine')
+    require(set(ENGINE)<=names<=set((*ENGINE,*OPTIONAL_ENGINE)),'Incomplete enrolled engine')
     return tuple(sorted(names))
 
 HOST_LINKS={'sshd.conf':Path('/etc/ssh/sshd_config.d/synergy-nodenetwork.conf'),
@@ -47,6 +48,26 @@ VALIDATOR_UNIT_PATTERNS=('synergy-node.service','synergy-vpn.service','synergy-c
 
 def require(value,message):
     if not value:raise ValueError(message)
+
+
+def inert_missing_unit(unit):
+    # systemd retains a failed-state tombstone after its unit file is removed.
+    # A filtered list row alone cannot prove that it owns no runtime resources.
+    fields=('LoadState','ActiveState','SubState','MainPID','ControlPID','FragmentPath',
+            'SourcePath','DropInPaths','UnitFileState','Triggers','TriggeredBy','Job')
+    result=subprocess.run(['/usr/bin/systemctl','show',unit,'--property='+','.join(fields)],
+                          capture_output=True,text=True,check=False,timeout=8)
+    require(result.returncode==0 and not result.stderr and isinstance(result.stdout,str)
+            and len(result.stdout)<=65536,'Missing unit state could not be verified')
+    values={}
+    for line in result.stdout.splitlines():
+        key,separator,value=line.partition('=')
+        require(separator and key in fields and key not in values,'Invalid missing unit state')
+        values[key]=value
+    return (set(values)==set(fields) and values['LoadState']=='not-found'
+            and (values['ActiveState'],values['SubState']) in (('inactive','dead'),('failed','failed'))
+            and values['MainPID']==values['ControlPID']=='0'
+            and all(values[key]=='' for key in fields[5:]))
 
 
 def require_clean_service_namespace():
@@ -75,7 +96,9 @@ def require_clean_service_namespace():
             if not fields:continue
             require(any(fnmatchcase(fields[0],pattern) for pattern in VALIDATOR_UNIT_PATTERNS),
                     'Service inventory returned an unrelated or malformed row')
-            if operation=='list-units' and len(fields)>=4 and fields[1:4]==['not-found','inactive','dead']:continue
+            if (operation=='list-units' and len(fields)>=4 and fields[1]=='not-found'
+                    and fields[2:4] in (['inactive','dead'],['failed','failed'])
+                    and inert_missing_unit(fields[0])):continue
             require(False,'Legacy validator service registration requires review')
 
 
@@ -430,12 +453,7 @@ def bare_no_application_processes(root, pins, proc=Path('/proc')):
 
 
 def bare_initial_authorization(root,policy,release_id,pin):
-    """Only cancel an exact independently pinned, wholly unused first grant set.
-
-    Policy/grant files do not authenticate their own completeness. The native
-    app supplies the original public approval bytes after its compiled pin check.
-    Expiry cannot grant new authority here: even expired grants must all remain.
-    """
+    """Cancel only the independently pinned, wholly unused initial grant set."""
     base={'format','root','community_enrollment','qualified_operations','releases',
           'engine_files','host_files','host_account','root_guard_sha256'}
     if 'engineering_authorization' not in policy:
@@ -487,9 +505,9 @@ def bare_initial_authorization(root,policy,release_id,pin):
     for request in doc['requests']:
         operation=request['operation'];key=request['request_sha256']
         require(operation in ('install','commission','register','start','stop','restart','upgrade','uninstall',
-            'identity_generate','formation_prepare','treasury_prepare','genesis_stage','genesis_bind','network_formation_prepare',
-            'network_formation_sign','network_transport_prepare','network_transport_sign','vpn_enroll','vpn_bind','vpn_retire',
-            'guest_create','guest_stop','guest_remove') and key not in grants,'Invalid initial grant inventory')
+            'identity_generate','formation_prepare','treasury_prepare','treasury_send_prepare','treasury_send_submit','genesis_stage','genesis_bind','network_formation_prepare',
+            'network_formation_sign','network_transport_prepare','network_transport_sign','vpn_enroll','vpn_bind','vpn_retire','vpn_cancel_unused','vpn_stop','vpn_resume','boot_policy',
+            'guest_create','guest_stop','guest_resume','guest_remove') and key not in grants,'Invalid initial grant inventory')
         relative='tmp/controller/grants/'+key+'.json';grant_raw=bare_file(root/relative,65536)
         grant=json.loads(grant_raw)
         require(grant=={'root':str(root),'operation':operation,'request_sha256':key,'expires_at':doc['expires_at'],
@@ -612,7 +630,7 @@ def effective_engineering_selection(root,policy):
 
 def engineering_update_context(policy,previous,release_id,pin,now):
     context=globals().get('NATIVE_AUTHENTICATED_UPDATE_CONTEXT')
-    require(isinstance(context,dict) and set(context)=={'initial_sha256','parent_sha256','formation_sha256','target','selection','release_id','manifest_sha256','expires_at'},
+    require(isinstance(context,dict) and set(context) in ({'initial_sha256','parent_sha256','formation_sha256','target','selection','release_id','manifest_sha256','expires_at'}, {'initial_sha256','parent_sha256','formation_sha256','target','selection','release_id','manifest_sha256','expires_at','commission_grant_preservation'}),
             'Native update review context required')
     require(type(context['expires_at']) is int and now<context['expires_at']<=now+300,
             'Native update review expired')
@@ -653,15 +671,264 @@ def validate_guard_update(root, policy, receipt, manifest, pending):
     candidate['migration_plan'](root,policy['host_account'],source,previous,pin)
 
 
-def stage_engineering_update(stream, release_id, pin):
-    """Adopt a sealed candidate and its controller on a quiescent engineering host.
+# Public diagnostic labels only: never serialize exception text, paths, policy,
+# credentials or subprocess output. The native UI needs the failed trust boundary.
+UPDATE_PHASES={
+    'entry':'platform and private-root validation',
+    'engine':'enrolled controller byte authentication',
+    'receipt':'installed release and effective selection',
+    'context':'fresh native review context',
+    'namespace':'controller inventory',
+    'requests':'outstanding operator requests and commissioning preservation',
+    'grant_scope':'exact expired commissioning grant scope',
+    'grant_artifacts':'unchanged approved commissioning artifacts',
+    'grant_audit':'unused commissioning audit',
+    'grant_state':'unpublished commissioning state',
+    'quiescence':'stopped validator and attributed process checks',
+    'package':'exact staged package verification',
+    'adoption':'exact native-reviewed update lineage',
+    'verifier':'fresh adopted-controller inventory verification',
+    'backup_inventory':'bounded predecessor metadata inventory',
+    'backup_policy':'exact predecessor policy transformation',
+    'backup_members':'exact predecessor file attribution',
+    'cleanup':'attributed predecessor cleanup',
+    'exchange':'durable controller directory exchange',
+}
+_UPDATE_PHASE=None
 
-    The root operator supplies the independently authenticated pin. This
-    neither grants an upgrade request nor replaces installed validator files.
-    """
+def update_phase(phase):
+    global _UPDATE_PHASE
+    require(phase in UPDATE_PHASES,'Unknown public update phase')
+    _UPDATE_PHASE=phase
+
+
+def verify_adopted_controller(root):
+    """Do not reuse the predecessor interpreter after an engine-set exchange."""
+    code = r"""import hashlib,json,os,re,stat,sys
+from pathlib import Path
+root=Path(sys.argv[1]);control=root/'tmp/controller'
+policy_path=control/'policy.json'
+st=policy_path.lstat()
+assert stat.S_ISREG(st.st_mode) and st.st_nlink==1 and st.st_uid==os.geteuid() and stat.S_IMODE(st.st_mode)==0o600
+policy=json.loads(policy_path.read_bytes());pins=policy['engine_files']
+base={'controller.py','synergy_linux.py','lifecycle.py','conformance.py','apqe_layout.py','vpn.py','canary_rpc_relay.py','root_guard.py'}
+assert base<=set(pins)<=base|{'guest_lifecycle.py','vpn_authorization.py','treasury_send.py'}
+for name,pin in pins.items():
+ p=control/name if name=='controller.py' else control/'tools'/name
+ st=p.lstat()
+ assert p.resolve()==p and stat.S_ISREG(st.st_mode) and st.st_nlink==1 and st.st_uid==os.geteuid() and stat.S_IMODE(st.st_mode)==0o600
+ assert re.fullmatch('[a-f0-9]{64}',pin) and hashlib.sha256(p.read_bytes()).hexdigest()==pin
+sys.path[:0]=[str(control),str(control/'tools')]
+from controller import control_inventory
+control_inventory(root)
+"""
+    result=subprocess.run([sys.executable,'-I','-B','-c',code,str(root)],stdin=subprocess.DEVNULL,
+                          stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30,check=False)
+    require(result.returncode==0,'Adopted controller verification failed')
+
+
+def retire_update_backup(root, manifest, context, previous, policy):
+    """Remove only the authenticated predecessor; retain its policy until last."""
+    update_phase('backup_inventory')
+    backup=root/'tmp/controller-update';current=root/'tmp/controller'
+    if not backup.exists() and not backup.is_symlink():return
+    def inventory(directory):
+        st=directory.lstat()
+        require(directory.resolve()==directory and stat.S_ISDIR(st.st_mode) and st.st_uid==os.geteuid() and stat.S_IMODE(st.st_mode)==0o700,'Unsafe update controller directory')
+        # Historical install normalized policy-pinned tools to 0700. Older
+        # public authorization ancestors could inherit umask 022; neither
+        # compatibility applies to arbitrary members or writable directories.
+        local_policy={}
+        policy_file=directory/'policy.json'
+        if policy_file.exists() or policy_file.is_symlink():
+            pst=policy_file.lstat()
+            require(stat.S_ISREG(pst.st_mode) and pst.st_nlink==1 and pst.st_uid==os.geteuid()
+                    and stat.S_IMODE(pst.st_mode)==0o600 and pst.st_size<=1024*1024,'Unsafe update policy metadata')
+            local_policy=json.loads(policy_file.read_bytes());enrolled_engine(local_policy)
+        executable={'tools/'+name for name in local_policy.get('engine_files',{}) if name!='controller.py'}
+        public_dirs=set()
+        for name in local_policy.get('authorization_files',{}):
+            relative=Path('authorization/inputs')/name
+            require(not Path(name).is_absolute() and '..' not in Path(name).parts,'Unsafe public input namespace')
+            public_dirs.update(parent.as_posix() for parent in relative.parents if parent!=Path('.'))
+        entries={};total=0
+        for parent,dirs,files in os.walk(directory,followlinks=False):
+            require(len(entries)+len(dirs)+len(files)<=256,'Update controller inventory capacity exceeded')
+            for name in dirs+files:
+                path=Path(parent)/name;st=path.lstat();relative=path.relative_to(directory).as_posix()
+                modes=((0o700,0o755) if relative in public_dirs else (0o700,)) if stat.S_ISDIR(st.st_mode) else ((0o600,0o700) if relative in executable else (0o600,))
+                require(st.st_uid==os.geteuid() and (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode) and st.st_nlink==1)
+                        and stat.S_IMODE(st.st_mode) in modes,'Unsafe update controller member')
+                if stat.S_ISREG(st.st_mode):
+                    total+=st.st_size
+                    require(total<=32*1024*1024,'Update controller byte inventory capacity exceeded')
+                entries[relative]=None if stat.S_ISDIR(st.st_mode) else hashlib.sha256(path.read_bytes()).hexdigest()
+        return entries
+    actual=inventory(backup);live=inventory(current)
+    if not actual:
+        update_phase('cleanup')
+        backup.rmdir()
+        descriptor=os.open(root/'tmp',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:os.fsync(descriptor)
+        finally:os.close(descriptor)
+        return
+    update_phase('backup_policy')
+    original_path=backup/'policy.json'
+    require(actual.get('policy.json') is not None,'Original update policy required for reconciliation')
+    original=json.loads(original_path.read_bytes())
+    enrolled_engine(original)
+    expected=json.loads(json.dumps(original))
+    expected['engine_files']={name:manifest['files']['tools/'+name] for name in engine_names(manifest['files'])}
+    expected['releases'][manifest['release_id']]={'manifest_sha256':context['manifest_sha256'],'inventory_authenticated':True,'networks':{previous['network_id']:previous['chain_id']}}
+    expected['engineering_update']={'initial_sha256':context['initial_sha256'],'parent_sha256':context['parent_sha256'],
+        'formation_sha256':context['formation_sha256'],'previous_selection':previous,
+        'selection':{**previous,'release_id':manifest['release_id'],'manifest_sha256':context['manifest_sha256']},
+        'request_sha256':hashlib.sha256(json.dumps({'version':1,'operation':'update_stage','parameters':{'release_id':manifest['release_id'],'manifest_sha256':context['manifest_sha256']}},sort_keys=True,separators=(',',':')).encode()).hexdigest()}
+    require(expected==policy,'Update backup does not match the exact adopted policy')
+    update_phase('backup_members')
+    allowed=dict(live)
+    allowed['policy.json']=actual['policy.json']
+    for name in engine_names(manifest['files']):
+        relative=name if name=='controller.py' else 'tools/'+name
+        allowed.pop(relative,None)
+    for name,pin in original['engine_files'].items():
+        require(name in enrolled_engine(original),'Unknown predecessor engine')
+        allowed[name if name=='controller.py' else 'tools/'+name]=pin
+    require(all(name in allowed and allowed[name]==pin for name,pin in actual.items()),'Update backup member is outside the exact predecessor')
+    update_phase('cleanup')
+    # Missing members are allowed only for resuming this already-attributed cleanup.
+    for name,value in sorted(actual.items(),key=lambda row:-len(Path(row[0]).parts)):
+        if name=='policy.json':continue
+        path=backup/name
+        if value is None:path.rmdir()
+        else:path.unlink()
+    original_path.unlink();backup.rmdir()
+    descriptor=os.open(root/'tmp',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:os.fsync(descriptor)
+    finally:os.close(descriptor)
+
+
+def guest_management_quiescence(root,policy,process_guard,vpn_pid=None,proc=Path('/proc')):
+    """Exclude only the enrolled-engine-attributed guest, never a validator."""
+    if not isinstance(policy.get('managed_guest'),dict):return process_guard(root,vpn_pid=vpn_pid,proc=proc)
+    from guest_lifecycle import GuestManager
+    guest=GuestManager(root,policy);guest.verify_guard()
+    observed=guest.status({'guest_id':guest.spec['guest_id']})
+    pid=str(observed.get('pid',0))
+    if pid=='0':return process_guard(root,vpn_pid=vpn_pid,proc=proc)
+    # status authenticated exact /proc executable/argv; preserve that check on
+    # both sides of the complete remaining-process scan.
+    version=guest.receipt().get('runtime_version',1)
+    if version==1:guest.verify_process(pid) # Legacy API defaults to its v1 argv.
+    else:guest.verify_process(pid,version)
+    class GuestProcessView:
+        def __truediv__(self,value):return proc/value
+        def iterdir(self):return (p for p in proc.iterdir() if p.name!=pid)
+    process_guard(root,vpn_pid=vpn_pid,proc=GuestProcessView())
+    after=guest.status({'guest_id':guest.spec['guest_id']})
+    require(after==observed,'Managed guest changed during process verification')
+
+
+def update_commission_grant(root,policy,now):
+    """Read-only attribution of one expired, unused public-transport permission."""
+    from controller import Controller,request_digest,HOST_REMOVAL,VPN_ENROLLMENT,MUTATIONS
+    import lifecycle as life
+    c=Controller(root);control=c.control
+    for path in (control/HOST_REMOVAL,control/VPN_ENROLLMENT,root/life.UPGRADE_INTENT):
+        require(not path.exists() and not path.is_symlink(),'Outstanding operator mutation')
+    update_phase('grant_scope')
+    paths=list((control/'grants').iterdir())
+    if not paths:return None
+    from apqe_layout import FORMATION_PUBLIC_INPUTS
+    key=request_digest({'version':1,'operation':'commission','parameters':{}})
+    require(len(paths)==1 and paths[0].name==key+'.json','Unknown outstanding request')
+    grant_path=c.direct(paths[0],True,65536);raw=grant_path.read_bytes();grant=json.loads(raw)
+    auth=policy.get('engineering_authorization',{})
+    require(type(auth.get('sequence')) is int and auth['sequence']>0
+        and isinstance(auth.get('sha256'),str) and re.fullmatch('[a-f0-9]{64}',auth['sha256'])
+        and type(auth.get('expires_at')) is int and 0<auth['expires_at']<=now
+        and grant=={'root':str(root),'operation':'commission','request_sha256':key,'expires_at':auth['expires_at'],
+                    'authorization_sha256':auth['sha256'],'authorization_sequence':auth['sequence']},
+        'Only the exact expired unused commissioning grant may be preserved')
+    update_phase('grant_artifacts')
+    pins=policy.get('validator_commissioning_files')
+    require(isinstance(pins,dict) and set(pins)==FORMATION_PUBLIC_INPUTS,'Complete commissioning approval required')
+    for name,pin in pins.items():
+        require(isinstance(pin,str) and re.fullmatch('[a-f0-9]{64}',pin)
+                and policy.get('authorization_files',{}).get('commissioning/'+name)==pin,
+                'Commissioning approval differs')
+        path=c.direct(control/'authorization/inputs/commissioning'/name,True,4*1024*1024)
+        require(hashlib.sha256(path.read_bytes()).hexdigest()==pin,'Approved commissioning bytes changed')
+    require(all(pins['network/'+name]==pin for name,pin in c.genesis_pins().items()),'Commissioning Genesis differs')
+    update_phase('grant_audit')
+    audit=control/'audit.jsonl'
+    if audit.exists() or audit.is_symlink():
+        rows=c.direct(audit,True,1024*1024).read_bytes().splitlines()
+        require(len(rows)<=4096,'Commissioning audit exceeds bound')
+        for line in rows:
+            row=json.loads(line)
+            require(isinstance(row,dict) and set(row)=={'request_sha256','operation','time'}
+                    and isinstance(row['request_sha256'],str) and re.fullmatch('[a-f0-9]{64}',row['request_sha256'])
+                    and row['operation'] in MUTATIONS and type(row['time']) is int and 0<=row['time']<=now,
+                    'Malformed commissioning audit')
+            require(row['request_sha256']!=key and row['operation']!='commission','Commissioning request was consumed')
+    update_phase('grant_state')
+    require(not any((root/name).exists() or (root/name).is_symlink() for name in (
+        'data','tmp/commissioning','tmp/existing-network-identity-request.json',
+        'evidence/application-replacement-intent.json','evidence/authority-recovery-intent.json',
+        'evidence/autonomous-epoch-intent.json')) and not any((root/'tmp').glob('commission-prepare-*'))
+        and not any((root/'tmp').glob('commission-observe-*'))
+        and all((root/name).is_dir() and not (root/name).is_symlink() and not any((root/name).iterdir()) for name in ('config','network')),
+        'Published or partial commissioning state cannot preserve a grant')
+    life._commission_fresh_keys(root)
+    require(c.policy()==policy,'Commissioning policy changed')
+    return {'request_sha256':key,'grant_sha256':hashlib.sha256(raw).hexdigest(),'expires_at':grant['expires_at'],
+            'commissioning_sha256':hashlib.sha256(json.dumps(pins,sort_keys=True,separators=(',',':')).encode()).hexdigest()}
+
+
+def inspect_update_commission_grant(wire):
+    import time
+    require(isinstance(wire,dict) and set(wire)=={'context','challenge'},'Exact preservation proof required')
+    context=wire['context'];now=int(time.time())
+    require(isinstance(context,dict) and set(context)=={'initial_sha256','parent_sha256','formation_sha256','target','selection','expires_at'}
+        and type(context['expires_at']) is int and now<=context['expires_at']<=now+300,'Preservation review expired')
+    require(all(isinstance(value,str) and re.fullmatch('[a-f0-9]{64}',value) for value in (wire['challenge'],context['initial_sha256'],context['parent_sha256'],context['formation_sha256']))
+        and context['initial_sha256']==globals().get('NATIVE_AUTHENTICATED_AUTHORIZATION_INITIAL_SHA256'),'Native preservation scope required')
+    root=ROOT;control=root/'tmp/controller';path=control/'policy.json'
+    for ancestor in (control,*control.parents):
+        m=ancestor.lstat();require(stat.S_ISDIR(m.st_mode) and not ancestor.is_symlink() and m.st_uid==os.geteuid() and not m.st_mode&0o022,'Unsafe preservation ancestry')
+    m=path.lstat();require(stat.S_ISREG(m.st_mode) and m.st_nlink==1 and m.st_uid==os.geteuid() and stat.S_IMODE(m.st_mode)==0o600 and m.st_size<=1024*1024,'Unsafe preservation policy')
+    policy=json.loads(path.read_bytes())
+    for name in enrolled_engine(policy):
+        p=control/name if name=='controller.py' else control/'tools'/name;m=p.lstat()
+        require(p.resolve()==p and stat.S_ISREG(m.st_mode) and m.st_nlink==1 and m.st_uid==os.geteuid() and not m.st_mode&0o022
+                and m.st_size<=1024*1024 and hashlib.sha256(p.read_bytes()).hexdigest()==policy['engine_files'][name],'Preservation engine drift')
+    sys.path[:0]=[str(control),str(control/'tools')]
+    from controller import Controller,control_inventory
+    import lifecycle as life
+    with life._lifecycle_lock(root):
+        control_inventory(root);receipt,_=life._sealed_receipt(root)
+        require(context['initial_sha256']==policy.get('engineering_initial_authorization_sha256')
+                and context['parent_sha256']==policy.get('engineering_authorization',{}).get('sha256')
+                and context['formation_sha256']==policy.get('validator_formation_sha256')
+                and context['target']==policy.get('engineering_target') and context['selection']==effective_engineering_selection(root,policy)
+                and receipt['package_sha256']==context['selection']['manifest_sha256'],'Preservation scope changed')
+        state=life._unit_state('synergy-node.service');vpn=life._unit_state('synergy-vpn.service')
+        require(state.get('MainPID')=='0' and state.get('ActiveState') in ('inactive','failed'),'Stop validator before preservation review')
+        guest_management_quiescence(root,policy,life._assert_no_application_processes,vpn.get('MainPID'))
+        preservation=update_commission_grant(root,policy,now)
+        require(Controller(root).policy()==policy,'Preservation policy changed')
+        return {'schema':'nodenetwork-update-commission-grant-v1','challenge':wire['challenge'],
+                'parent_sha256':context['parent_sha256'],'authorization_sequence':policy['engineering_authorization']['sequence'],
+                'preservation':preservation,'mutation_performed':False}
+
+
+def stage_engineering_update(stream, release_id, pin, reconcile=False):
+    """Adopt authenticated software/controller only; no upgrade grant or runtime change."""
     import ctypes
     import fcntl
     import time
+    update_phase('entry')
     require(os.geteuid()==0 and sys.platform=='linux' and os.uname().machine=='x86_64','Linux x86_64 root target required')
     require(re.fullmatch(r'[a-zA-Z0-9._-]{1,128}',release_id) and re.fullmatch(r'[a-f0-9]{64}',pin),'Exact update release and manifest pin required')
     require(ROOT.resolve()==ROOT and stat.S_IMODE(ROOT.lstat().st_mode)==0o700 and ROOT.stat().st_uid==0,'Private canonical installation required')
@@ -670,6 +937,7 @@ def stage_engineering_update(stream, release_id, pin):
     old=root/'tmp/controller'
     pending=root/'tmp/update-master'
     replacement=root/'tmp/controller-update'
+    update_phase('engine')
     # Import the enrolled engine only after independently checking its pins.
     policy_path=old/'policy.json'
     require(policy_path.resolve()==policy_path and stat.S_IMODE(policy_path.lstat().st_mode)==0o600
@@ -689,26 +957,65 @@ def stage_engineering_update(stream, release_id, pin):
     lock=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
     try:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        update_phase('receipt')
         receipt,_=_sealed_receipt(root)
         network=receipt['network_id']
         previous=effective_engineering_selection(root,policy)
+        update_phase('context')
         context=engineering_update_context(policy,previous,release_id,pin,int(time.time()))
         require(receipt.get('role')=='validator'
                 and all(receipt.get(key)==previous[key] for key in ('network_id','chain_id','node_name')),
                 'Installed validator differs from the independently approved engineering selection')
+        update_phase('namespace')
         control_inventory(root)
-        require(not any((old/'grants').iterdir())
-                and not any((old/name).exists() for name in (HOST_REMOVAL,VPN_ENROLLMENT))
-                and not (root/UPGRADE_INTENT).exists(),'Prior operator request requires reconciliation')
+        update_phase('requests')
+        preservation=update_commission_grant(root,policy,int(time.time()))
+        require(('commission_grant_preservation' not in context and preservation is None)
+                or (preservation is not None and context.get('commission_grant_preservation')==preservation),
+                'Outstanding commissioning grant needs exact native preservation review')
+        update_phase('quiescence')
         status=_unit_state('synergy-node.service')
         require(status.get('MainPID','0')=='0' and status.get('ActiveState') in ('inactive','failed'),
                 'Stop the validator before adopting an update')
         vpn=_unit_state('synergy-vpn.service')
-        _assert_no_application_processes(root,vpn_pid=vpn.get('MainPID'))
+        guest_management_quiescence(root,policy,_assert_no_application_processes,vpn.get('MainPID'))
+        if reconcile:
+            update_phase('package')
+            require(pending.resolve()==pending and pending.is_dir(),'Exact staged package required')
+            manifest=verify_package(pending)
+            require(hashlib.sha256((pending/'package.json').read_bytes()).hexdigest()==pin and manifest['release_id']==release_id,'Staged package differs from native review')
+            update_phase('adoption')
+            expected_update={'initial_sha256':context['initial_sha256'],'parent_sha256':context['parent_sha256'],
+                'formation_sha256':context['formation_sha256'],'previous_selection':previous,
+                'selection':{**previous,'release_id':release_id,'manifest_sha256':pin},
+                'request_sha256':__import__('controller').request_digest({'version':1,'operation':'update_stage','parameters':{'release_id':release_id,'manifest_sha256':pin}})}
+            require(policy.get('engineering_update')==expected_update
+                    and policy.get('engine_files')=={name:manifest['files']['tools/'+name] for name in engine_names(manifest['files'])}
+                    and policy.get('releases',{}).get(release_id)=={'manifest_sha256':pin,'inventory_authenticated':True,'networks':{previous['network_id']:previous['chain_id']}},
+                    'Exact interrupted update adoption required')
+            update_phase('verifier')
+            verify_adopted_controller(root)
+            retire_update_backup(root,manifest,context,previous,policy)
+            return {'schema':'nodenetwork-update-stage-v1','stagedRelease':release_id,'manifestSha256':pin,'controllerAdopted':True,'validatorUpgraded':False,'initial_sha256':context['initial_sha256'],'parent_sha256':context['parent_sha256']}
+        superseded=globals().get('NATIVE_AUTHENTICATED_SUPERSEDED_UPGRADE')
+        if superseded is not None:
+            require(superseded is True and globals().get('NATIVE_AUTHENTICATED_MANIFEST_SHA256')==pin,
+                    'Superseded staging lacks independent native approval')
+            require(not replacement.exists() and not replacement.is_symlink(),'Prior controller exchange requires reconciliation')
+            line=stream.readline(2*1024*1024+1)
+            require(0<len(line)<=2*1024*1024 and line.endswith(b'\n'),'Superseded proof exceeds bound')
+            proof=json.loads(line)
+            require(proof.get('context')=={key:context[key] for key in ('initial_sha256','parent_sha256','formation_sha256','target','selection','expires_at')}
+                    and proof.get('adoption')==policy.get('engineering_update')
+                    and proof['request']['parameters']!={'release_id':release_id,'manifest_sha256':pin},
+                    'Superseded proof changes native update scope')
+            upgrade_not_applied_proof(proof,_already_locked=True,_retiring=True)
+            retire_superseded_update(root,proof['adoption']['selection'])
         require(not any(p.exists() or p.is_symlink() for p in (pending,replacement)),'Prior update staging requires reconciliation')
         pending.mkdir(mode=0o700)
         exchanged=False
         try:
+            update_phase('package')
             manifest=extract(stream,pending,{'manifest_sha256':pin,'release_id':release_id})
             require(verify_package(pending)==manifest,'Candidate verification differs')
             validate_guard_update(root,policy,receipt,manifest,pending)
@@ -735,6 +1042,7 @@ def stage_engineering_update(stream, release_id, pin):
             _sync_directory(replacement)
             _sync_directory(root/'tmp')
             # Keep all fixed SSH, sudo, and authorized-key paths resolvable.
+            update_phase('exchange')
             exchange=ctypes.CDLL(None,use_errno=True).renameat2
             exchange.argtypes=(ctypes.c_int,ctypes.c_char_p,ctypes.c_int,ctypes.c_char_p,ctypes.c_uint)
             exchange.restype=ctypes.c_int
@@ -742,8 +1050,9 @@ def stage_engineering_update(stream, release_id, pin):
                 raise OSError(ctypes.get_errno(),'Controller directory exchange failed')
             exchanged=True
             _sync_directory(root/'tmp')
-            control_inventory(root)
-            shutil.rmtree(replacement)
+            update_phase('verifier')
+            verify_adopted_controller(root)
+            retire_update_backup(root,manifest,context,previous,policy)
             _sync_directory(root/'tmp')
         except Exception:
             if not exchanged:
@@ -761,7 +1070,7 @@ def stage_engineering_update(stream, release_id, pin):
 # The document is not a public policy issuer, membership proof or credential API.
 AUTHORIZATION_PROFILE='nodenetwork-isolated-formation-authorization-v1'
 AUTHORIZATION_LIMIT=12*1024*1024
-AUTHORIZATION_FILES={'commissioning-readiness.json':128*1024,'managed-guest.json':16384,'formation-context.json':4096,'vpn-ca.pem':128*1024,'vpn-provider.json':16384,'vpn-enrollment.json':16384,'vpn-server-binding.json':16384,'vpn-retirement.json':16384,
+AUTHORIZATION_FILES={'commissioning-readiness.json':128*1024,'managed-guest.json':16384,'formation-context.json':4096,'vpn-ca.pem':128*1024,'vpn-provider.json':16384,'vpn-enrollment.json':16384,'vpn-server-binding.json':16384,'vpn-retirement.json':16384,'vpn-unused-cancellation.json':16384,
     'commissioning/config/node.json':1024*1024,'commissioning/config/start-authorized.json':65536,
     **{'commissioning/network/'+name:limit for name,limit in {
         'genesis.json':4*1024*1024,'authority.json':1024*1024,'authority-root.pub':8192,
@@ -878,20 +1187,19 @@ def authorization_inputs(doc,encoded):
 
 
 def readiness_refresh_allowed(root,policy,doc,inputs,continuation,consumed):
-    """Only an unused prestart readiness review can be superseded atomically.
-
-    Called under the existing controller exchange lock after native-pin,
-    target/selection/sequence and stopped-process verification. Other public
-    inputs, custody and carrier credentials remain immutable.
-    """
+    """Refresh only exact unused prestart readiness under the controller exchange lock."""
     name='commissioning-readiness.json';root=Path(root)
     source=root/'tmp/controller/authorization/inputs'/name
     if name not in inputs:return False
     from controller import Controller,request_digest
     c=Controller(root)
-    if source.exists() or source.is_symlink():
+    present=source.exists() or source.is_symlink()
+    pinned=name in policy.get('authorization_files',{})
+    require(present==pinned,'Prior readiness artifact and approval are incomplete')
+    first=not present
+    if present:
         raw=c.direct(source,True,128*1024).read_bytes()
-        require(hashlib.sha256(raw).hexdigest()==policy.get('authorization_files',{}).get(name),
+        require(hashlib.sha256(raw).hexdigest()==policy['authorization_files'][name],
                 'Prior readiness artifact differs from approved policy')
     require(continuation and set(inputs)=={name}
             and doc['target']==policy['engineering_target']
@@ -908,17 +1216,23 @@ def readiness_refresh_allowed(root,policy,doc,inputs,continuation,consumed):
     require(doc['requests']==[{'operation':'commission','request_sha256':key}] and key not in consumed,
             'Consumed or foreign commissioning review cannot be refreshed')
     previous=policy['engineering_authorization']
-    grant=c.public_json(c.control/'grants'/(key+'.json'),True)
-    require(grant=={'root':str(root),'operation':'commission','request_sha256':key,
-        'expires_at':previous['expires_at'],'authorization_sha256':previous['sha256'],
-        'authorization_sequence':previous['sequence']},'Original commissioning grant is absent, consumed or changed')
+    grant_path=c.control/'grants'/(key+'.json')
+    # A completed software authorization may retire the expired transport grant.
+    # Only the first readiness addition may supply that still-unaudited request.
+    if not first or grant_path.exists() or grant_path.is_symlink():
+        grant=c.public_json(grant_path,True)
+        require(grant=={'root':str(root),'operation':'commission','request_sha256':key,
+            'expires_at':previous['expires_at'],'authorization_sha256':previous['sha256'],
+            'authorization_sequence':previous['sequence']},'Original commissioning grant is absent, consumed or changed')
     require(not any((root/path).exists() or (root/path).is_symlink() for path in (
         'data','tmp/commissioning','tmp/existing-network-identity-request.json',
         'evidence/upgrade-intent.json','evidence/application-replacement-intent.json',
         'evidence/authority-recovery-intent.json','evidence/autonomous-epoch-intent.json'))
         and not any((root/'tmp').glob('commission-prepare-*')) and not any((root/'tmp').glob('commission-observe-*'))
-        and all((root/name).is_dir() and not any((root/name).iterdir()) for name in ('config','network','keys')),
+        and all((root/name).is_dir() and not any((root/name).iterdir()) for name in ('config','network')),
         'Readiness refresh refuses published or uncertain application state')
+    from lifecycle import _commission_fresh_keys
+    _commission_fresh_keys(root)
     return True
 
 
@@ -962,6 +1276,15 @@ def active_guest_policy_only(continuation,inputs,doc,policy):
             and 'guest' not in doc['target'])
 
 
+def transport_authorization(continuation,inputs,doc,policy):
+    names={n for n in AUTHORIZATION_FILES if n.startswith('commissioning/')}
+    key=hashlib.sha256(json.dumps({'version':1,'operation':'commission','parameters':{}},sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    return (continuation and set(inputs)==names and set(doc['artifacts'])==names
+        and doc['requests']==[{'operation':'commission','request_sha256':key}]
+        and isinstance(doc['genesis_pins'],dict) and set(doc['genesis_pins'])=={'genesis.json','authority.json','authority-root.pub'} and doc['genesis_pins']==policy.get('validator_identity_network')
+        and all(doc['artifacts']['commissioning/network/'+n]==v for n,v in doc['genesis_pins'].items()))
+
+
 def stage_engineering_authorization(stream):
     """Atomic exact engineering grants through the native application's admin transport.
 
@@ -972,6 +1295,7 @@ def stage_engineering_authorization(stream):
     import fcntl
     import time
     require(os.geteuid()==0 and sys.platform=='linux' and os.uname().machine=='x86_64','Linux x86_64 root required')
+    os.umask(0o077)
     raw=stream.read(AUTHORIZATION_LIMIT+1)
     require(0<len(raw)<=AUTHORIZATION_LIMIT,'Authorization transfer exceeds bound')
     wire=json.loads(raw)
@@ -1067,20 +1391,31 @@ def stage_engineering_authorization(stream):
         status=_unit_state('synergy-node.service')
         active=status.get('MainPID','0') not in ('','0') or status.get('ActiveState') not in ('inactive','failed')
         pure_lifecycle=(continuation and not inputs and doc['genesis_pins'] in (None,policy.get('validator_identity_network'))
-                        and doc['requests'][0]['operation'] in ('stop','restart'))
+                        and (doc['requests'][0]['operation'] in ('stop','restart','treasury_send_prepare','treasury_send_submit')
+                             or len(doc['requests'])==1 and doc['requests'][0]['operation']=='boot_policy'))
         guest_policy_only=active_guest_policy_only(continuation,inputs,doc,policy)
-        require(not active or pure_lifecycle or guest_policy_only,'Stop validator before artifact, formation or configuration authorization change')
+        guest_lifecycle_only=(continuation and not inputs and len(doc['requests'])==1
+            and doc['requests'][0]['operation'] in ('guest_stop','guest_resume','guest_remove')
+            and doc['genesis_pins'] in (None,policy.get('validator_identity_network')))
+        guest_manager=None
+        if guest_lifecycle_only:
+            from guest_lifecycle import GuestManager
+            guest_manager=GuestManager(ROOT,policy);guest_manager.verify_guard();guest_manager.status({'guest_id':guest_manager.spec['guest_id']})
+        require(not active or pure_lifecycle or guest_policy_only or guest_lifecycle_only,'Stop validator before artifact, formation or configuration authorization change')
         vpn=_unit_state('synergy-vpn.service')
-        if not active:_assert_no_application_processes(ROOT,vpn_pid=vpn.get('MainPID'))
+        if not active:
+            if guest_lifecycle_only or transport_authorization(continuation,inputs,doc,policy):guest_management_quiescence(ROOT,policy,_assert_no_application_processes,vpn.get('MainPID'))
+            else:_assert_no_application_processes(ROOT,vpn_pid=vpn.get('MainPID'))
         requests=[];seen=set()
         for request in doc['requests']:
             require(request['operation'] in __import__('controller').MUTATIONS,'Authorization may grant only exact supported mutations')
             key=request['request_sha256'];require(key not in seen,'Duplicate exact request');seen.add(key)
-            require(key not in consumed or continuation and request['operation'] in ('start','stop','restart'),'Consumed non-lifecycle request cannot be granted again')
+            require(key not in consumed or continuation and request['operation'] in ('start','stop','restart','vpn_stop','vpn_resume','boot_policy','guest_stop'),'Consumed non-lifecycle request cannot be granted again')
             requests.append((request,key))
             if request['operation']=='vpn_enroll':require('vpn-enrollment.json' in inputs,'Exact one-use VPN input required')
             if request['operation']=='vpn_bind':require('vpn-server-binding.json' in inputs,'Exact native provider binding required')
             if request['operation']=='vpn_retire':require('vpn-retirement.json' in inputs,'Exact verified provider retirement required')
+            if request['operation']=='vpn_cancel_unused':require('vpn-unused-cancellation.json' in inputs,'Exact verified unused cancellation required')
         guest_input=inputs.get('managed-guest.json')
         if guest_input is not None:
             require(guest_policy_only,'Guest resource approval must be its exact existing-host continuation')
@@ -1146,6 +1481,7 @@ def stage_engineering_authorization(stream):
                 if request['operation']=='vpn_enroll':grant['enrollment_sha256']=doc['artifacts']['vpn-enrollment.json']
                 if request['operation']=='vpn_bind':grant['binding_sha256']=doc['artifacts']['vpn-server-binding.json']
                 if request['operation']=='vpn_retire':grant['binding_sha256']=doc['artifacts']['vpn-retirement.json']
+                if request['operation']=='vpn_cancel_unused':grant['binding_sha256']=doc['artifacts']['vpn-unused-cancellation.json']
                 save(replacement/'grants'/(key+'.json'),json.dumps(grant,sort_keys=True).encode())
             (replacement/'policy.json').unlink();save(replacement/'policy.json',json.dumps(policy,sort_keys=True).encode())
             for path in replacement.rglob('*'):
@@ -1166,21 +1502,567 @@ def stage_engineering_authorization(stream):
     finally:os.close(lock)
 
 
+def retiring_update_members(root, selection):
+    """Only hash-authenticated leftover PUBLIC staging; manifest is removed last."""
+    pending=root/'tmp/update-master'
+    if not pending.exists() and not pending.is_symlink():return set()
+    metadata=pending.lstat()
+    require(stat.S_ISDIR(metadata.st_mode) and pending.resolve()==pending and metadata.st_uid==os.geteuid()
+            and stat.S_IMODE(metadata.st_mode)==0o700,'Unsafe superseded staging root')
+    package=pending/'package.json'
+    if not package.exists() and not package.is_symlink():
+        require(not any(pending.iterdir()),'Superseded staging lost its authenticated manifest')
+        return {pending.relative_to(root).as_posix()}
+    metadata=package.lstat()
+    require(stat.S_ISREG(metadata.st_mode) and package.resolve()==package and metadata.st_nlink==1
+            and metadata.st_uid==os.geteuid() and stat.S_IMODE(metadata.st_mode)==0o600
+            and 0<metadata.st_size<=1024*1024,'Unsafe superseded manifest')
+    raw=package.read_bytes();require(hashlib.sha256(raw).hexdigest()==selection['manifest_sha256'],'Superseded manifest differs')
+    manifest=json.loads(raw);files=manifest.get('files')
+    require(manifest.get('format')=='synergy-universal-linux-v1' and manifest.get('architecture')=='x86_64'
+            and manifest.get('release_id')==selection['release_id'] and isinstance(files,dict) and len(files)<=4096,
+            'Invalid superseded manifest')
+    for name,pin in files.items():
+        path=PurePosixPath(name)
+        require(name and name==path.as_posix() and not path.is_absolute() and '..' not in path.parts
+                and name!='package.json' and isinstance(pin,str) and re.fullmatch('[a-f0-9]{64}',pin),'Unsafe superseded member')
+    limit=master_archive_limit(manifest)
+    directories=set(DIRECTORIES)|{str(parent) for name in files for parent in PurePosixPath(name).parents if str(parent)!='.'}
+    roles=pending/'roles/roles.json'
+    if roles.exists() and not roles.is_symlink():
+        metadata=roles.lstat()
+        require(roles.resolve()==roles and stat.S_ISREG(metadata.st_mode) and metadata.st_nlink==1
+                and metadata.st_uid==os.geteuid() and stat.S_IMODE(metadata.st_mode)==0o600
+                and metadata.st_size<=65536,'Unsafe superseded roles')
+        require('roles/roles.json' in files and hashlib.sha256(roles.read_bytes()).hexdigest()==files['roles/roles.json'],'Superseded roles differ')
+        values=json.loads(roles.read_bytes())['roles']
+        require(isinstance(values,list) and len(values)<=20 and all(isinstance(v,str) and re.fullmatch('[a-z][a-z0-9_-]{0,63}',v) for v in values),'Invalid superseded roles')
+        directories.update('roles/'+v for v in values)
+    members={pending.relative_to(root).as_posix()};count=0;total=0
+    for current,dirs,names in os.walk(pending,followlinks=False):
+        for name in dirs+names:
+            count+=1;require(count<=8192,'Superseded inventory exceeds bound')
+            path=Path(current)/name;relative=path.relative_to(pending).as_posix();metadata=path.lstat()
+            require(path.resolve()==path and metadata.st_uid==os.geteuid() and not metadata.st_mode&0o022,'Unsafe superseded member')
+            if stat.S_ISDIR(metadata.st_mode):require(relative in directories and stat.S_IMODE(metadata.st_mode)==0o700,'Unknown superseded directory')
+            else:
+                require(stat.S_ISREG(metadata.st_mode) and metadata.st_nlink==1 and stat.S_IMODE(metadata.st_mode) in (0o600,0o700)
+                        and relative in set(files)|{'package.json'},'Unknown superseded file')
+                total+=metadata.st_size;require(total<=limit,'Superseded files exceed bound')
+                digest=hashlib.sha256()
+                with path.open('rb') as stream:
+                    for chunk in iter(lambda:stream.read(1024*1024),b''):digest.update(chunk)
+                require(digest.hexdigest()==(selection['manifest_sha256'] if relative=='package.json' else files[relative]),'Superseded file differs')
+            members.add(path.relative_to(root).as_posix())
+    return members
+
+
+def retire_superseded_update(root, selection):
+    members=retiring_update_members(root,selection)
+    pending=root/'tmp/update-master'
+    if not members:return
+    # Keep both directory authority (manifest) and empty-role inventory until
+    # their children have gone. Every intermediate crash is a validated subset.
+    def synced(directory):
+        fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:os.fsync(fd)
+        finally:os.close(fd)
+    held={pending/'package.json',pending/'roles/roles.json'}
+    for name in sorted(members):
+        path=root/name
+        if path.is_file() and path not in held:path.unlink();synced(path.parent)
+    for path in sorted((root/name for name in members),key=lambda p:-len(p.parts)):
+        if path.is_dir() and path not in (pending,pending/'roles'):
+            path.rmdir();synced(path.parent)
+    roles=pending/'roles/roles.json'
+    if roles.exists():roles.unlink();synced(roles.parent)
+    role_dir=pending/'roles'
+    if role_dir.exists():role_dir.rmdir();synced(pending)
+    package=pending/'package.json'
+    if package.exists():package.unlink();synced(pending)
+    pending.rmdir();synced(root/'tmp')
+
+
+UPGRADE_PROOF_PHASES="entry verifier engine scope receipt outcome audit package guest processes conformance".split()
+_UPGRADE_PROOF_PHASE=None
+
+def upgrade_not_applied_proof(wire, *, _already_locked=False, _retiring=False):
+    """Read-only terminal proof: no rollback, grant creation or upgrade replay."""
+    global _UPGRADE_PROOF_PHASE
+    _UPGRADE_PROOF_PHASE='entry'
+    import types,time
+    require(isinstance(wire,dict) and set(wire) in ({'context','adoption','request','challenge','verifier_manifest_json','verifier_conformance'},{'context','adoption','request','challenge','verifier_manifest_json','verifier_conformance','unused'}) and type(wire.get('unused',False)) is bool,'Exact upgrade proof required')
+    unused=wire.get('unused',False)
+    context=wire['context'];request=wire['request']
+    require(isinstance(context,dict) and set(context)=={'initial_sha256','parent_sha256','formation_sha256','target','selection','expires_at'}
+            and type(context['expires_at']) is int and int(time.time())<=context['expires_at']<=int(time.time())+300,'Upgrade proof scope expired')
+    require(isinstance(request,dict) and set(request)=={'version','operation','parameters'} and request['version']==1 and request['operation']=='upgrade'
+            and set(request['parameters'])=={'release_id','manifest_sha256'},'Exact upgrade request required')
+    for value in (wire['challenge'],context['initial_sha256'],context['parent_sha256'],context['formation_sha256'],request['parameters']['manifest_sha256']):
+        require(isinstance(value,str) and re.fullmatch('[a-f0-9]{64}',value),'Malformed upgrade proof pin')
+    _UPGRADE_PROOF_PHASE='verifier'
+    verifier=wire['verifier_manifest_json'];source=wire['verifier_conformance']
+    require(isinstance(verifier,str) and len(verifier.encode())<=1024*1024 and isinstance(source,str) and 0<len(source.encode())<=256*1024,'Upgrade verifier exceeds bound')
+    require(hashlib.sha256(verifier.encode()).hexdigest()==globals().get('NATIVE_AUTHENTICATED_MANIFEST_SHA256'),'Upgrade verifier lacks independent native approval')
+    manifest=json.loads(verifier)
+    require(hashlib.sha256(source.encode()).hexdigest()==manifest['files'].get('tools/conformance.py'),'Upgrade verifier source differs')
+    _UPGRADE_PROOF_PHASE='engine'
+    root=ROOT;control=root/'tmp/controller'
+    policy_path=control/'policy.json'
+    require(policy_path.resolve()==policy_path and stat.S_IMODE(policy_path.lstat().st_mode)==0o600 and policy_path.stat().st_uid==os.geteuid(),'Unsafe proof policy')
+    policy=json.loads(policy_path.read_bytes())
+    for name in enrolled_engine(policy):
+        path=control/name if name=='controller.py' else control/'tools'/name
+        metadata=path.lstat()
+        require(path.resolve()==path and stat.S_ISREG(metadata.st_mode) and metadata.st_nlink==1 and metadata.st_uid==os.geteuid()
+                and not metadata.st_mode&0o022 and metadata.st_size<=1024*1024
+                and hashlib.sha256(path.read_bytes()).hexdigest()==policy['engine_files'][name],'Enrolled proof engine drift')
+    sys.path[:0]=[str(control),str(control/'tools')]
+    from controller import Controller,request_digest,engineering_effective_selection
+    import lifecycle as life
+    from synergy_linux import verify_package,digest,read
+    c=Controller(root)
+    import contextlib
+    with (contextlib.nullcontext() if _already_locked else life._lifecycle_lock(root)):
+        _UPGRADE_PROOF_PHASE='scope'
+        require(c.policy()==policy,'Proof policy changed')
+        require(policy.get('engineering_initial_authorization_sha256')==context['initial_sha256']
+                and policy.get('engineering_authorization',{}).get('sha256')==context['parent_sha256']
+                and policy.get('validator_formation_sha256')==context['formation_sha256']
+                and policy.get('engineering_target')==context['target']
+                and engineering_effective_selection(root,policy)==context['selection']
+                and policy.get('engineering_update')==wire['adoption'],'Proof changes original native scope')
+        adoption=wire['adoption'];selection=adoption.get('selection',{})
+        require(adoption.get('initial_sha256')==context['initial_sha256'] and adoption.get('formation_sha256')==context['formation_sha256']
+                and adoption.get('previous_selection')==context['selection'] and request['parameters']=={k:selection.get(k) for k in ('release_id','manifest_sha256')},'Upgrade proof differs from exact adoption')
+        _UPGRADE_PROOF_PHASE='receipt'
+        receipt,old_manifest=life._sealed_receipt(root)
+        require(receipt['package_sha256']==context['selection']['manifest_sha256'],'Old installation differs from native-reviewed scope')
+        _UPGRADE_PROOF_PHASE='outcome'
+        path=root/life.UPGRADE_INTENT
+        require(not path.exists() and not path.is_symlink(),'Upgrade intent remains')
+        path=root/life.UPGRADE_COMPLETED
+        if path.exists() or path.is_symlink():
+            prior=json.loads(c.direct(path,True,4096).read_bytes())
+            require(isinstance(prior,dict) and set(prior)=={'format','root','old_package_sha256','new_package_sha256','resumed','consensus_started','automatic_restart'}
+                and prior['format']=='synergy-software-upgrade-completed-v1' and prior['root']==str(root)
+                and isinstance(prior['old_package_sha256'],str) and re.fullmatch('[a-f0-9]{64}',prior['old_package_sha256'])
+                and prior['new_package_sha256']==receipt['package_sha256']!=request['parameters']['manifest_sha256']
+                and prior['old_package_sha256']!=prior['new_package_sha256'] and type(prior['resumed']) is bool
+                and prior['consensus_started'] is False and prior['automatic_restart'] is False,'Foreign or unfinished upgrade completion')
+        count=0
+        for current,dirs,files in os.walk(root,followlinks=False):
+            for name in dirs+files:
+                count+=1;require(count<=200000 and '.upgrade-' not in name,'Upgrade partial or inventory capacity requires reconciliation')
+        _UPGRADE_PROOF_PHASE='audit'
+        key=request_digest(request);grant=control/'grants'/(key+'.json')
+        require(not grant.exists() and not grant.is_symlink(),'Upgrade grant is not consumed')
+        audit=control/'audit.jsonl';rows=[]
+        if not unused or audit.exists() or audit.is_symlink():
+            audit=c.direct(audit,True);require(audit.stat().st_size<=1024*1024,'Upgrade audit exceeds bound');rows=audit.read_bytes().splitlines()
+        require(len(rows)<=4096,'Upgrade audit exceeds bound')
+        found=[]
+        for row in rows:
+            value=json.loads(row)
+            require(isinstance(value,dict) and set(value)=={'operation','request_sha256','time'} and type(value['time']) is int
+                    and 0<=value['time']<=int(time.time()),'Malformed upgrade audit')
+            if value['request_sha256']==key or not unused and value['operation']=='upgrade':found.append(value)
+        require(not found if unused else len(found)==1 and found[0]['operation']=='upgrade' and found[0]['request_sha256']==key,'Upgrade audit does not match exact unused or consumed proof')
+        _UPGRADE_PROOF_PHASE='package'
+        candidate=root/'tmp/update-master'
+        retiring=retiring_update_members(root,selection) if _retiring else None
+        if _retiring:candidate_manifest=old_manifest
+        else:
+            candidate_manifest=verify_package(candidate)
+            require(digest(candidate/'package.json')==selection['manifest_sha256'] and candidate_manifest['release_id']==selection['release_id'],'Staged original upgrade differs')
+        _UPGRADE_PROOF_PHASE='guest'
+        from guest_lifecycle import require_upgrade_compatible
+        require_upgrade_compatible(root,candidate_manifest)
+        _UPGRADE_PROOF_PHASE='processes'
+        plan=life._integration_plan(root)
+        if plan:
+            units=life._attributed_units(root,plan)
+            node=units.get('synergy-node.service',{})
+            require(node.get('MainPID')=='0' and node.get('ActiveState') in ('inactive','failed'),'Stop owned validator before upgrade proof')
+        life._assert_no_application_processes(root,vpn_pid=units.get('synergy-vpn.service',{}).get('MainPID') if plan else None)
+        _UPGRADE_PROOF_PHASE='conformance'
+        module=types.ModuleType('nodenetwork_readonly_upgrade_conformance')
+        exec(compile(source,'<authenticated-upgrade-conformance>','exec'),module.__dict__)
+        if _retiring:
+            original=module.approved_upgrade_members
+            module.approved_upgrade_members=lambda root,pin,stage:original(root,None,stage)|retiring
+        result=module.installed(root,old_manifest,host=plan is not None,stage=life._installation_stage(root),
+            schema=read((root if _retiring else candidate)/'assets/node-config.schema.json'),allow_legacy_integrations=True,pending_upgrade_sha256=selection['manifest_sha256'])
+        require(isinstance(result,dict) and c.policy()==policy,'Upgrade proof did not complete')
+        return {'schema':'nodenetwork-upgrade-not-applied-v1','challenge':wire['challenge'],'request_sha256':key,
+                'old_manifest_sha256':receipt['package_sha256'],'candidate_manifest_sha256':selection['manifest_sha256'],
+                'not_applied':True,'mutation_performed':False}
+
+
+def continuation_absence_facts(root,control,controller,policy,context,pending):
+    """Pure reads; even expired grants and any consumed request forbid release."""
+    import time
+    require(controller.policy()==policy,'Continuation proof policy changed')
+    current=policy.get('engineering_authorization',{})
+    require(current==context['authorization'] and current.get('sequence')+1==pending['sequence']
+            and current.get('sha256')!=context['pending_sha256'],'Pending continuation has no exact predecessor')
+    require(policy.get('engineering_initial_authorization_sha256')==context['initial_sha256']
+            and policy.get('engineering_target')==context['target']
+            and policy.get('validator_formation_sha256')==context['formation_sha256']
+            and policy.get('validator_identity_network')==context['genesis_pins'],'Continuation proof scope changed')
+    require(all(pending[k]==context['selection'][k] for k in ('release_id','manifest_sha256','network_id','chain_id','node_name'))
+            and pending['target']==context['target'] and pending['artifacts']=={}
+            and len(pending['requests'])==1,'Only exact input-free continuation may be released')
+    for name in ('controller-authorization','controller-authorization.pending'):
+        path=root/'tmp'/name;require(not path.exists() and not path.is_symlink(),'Authorization exchange partial exists')
+    key=pending['requests'][0]['request_sha256'];grant=control/'grants'/(key+'.json')
+    require(not grant.exists() and not grant.is_symlink(),'Pending request has a grant')
+    audit=control/'audit.jsonl'
+    if audit.exists() or audit.is_symlink():
+        path=controller.direct(audit,True);require(path.stat().st_size<=1024*1024,'Authorization audit exceeds bound')
+        rows=path.read_bytes().splitlines();require(len(rows)<=4096,'Authorization audit exceeds bound')
+        for row in rows:
+            value=json.loads(row)
+            require(isinstance(value,dict) and set(value)=={'operation','request_sha256','time'}
+                    and isinstance(value['operation'],str) and isinstance(value['request_sha256'],str)
+                    and re.fullmatch('[a-f0-9]{64}',value['request_sha256']) and type(value['time']) is int
+                    and 0<=value['time']<=int(time.time()),'Malformed authorization audit')
+            require(value['request_sha256']!=key,'Pending request was consumed')
+    require(controller.policy()==policy,'Continuation proof policy changed')
+    return key
+
+
+def transport_absence_facts(root,control,controller,policy,context):
+    pins=context['artifact_sha256'];names={n[14:] for n in AUTHORIZATION_FILES if n.startswith('commissioning/')}
+    require(isinstance(pins,dict) and set(pins)==names and all(isinstance(v,str) and re.fullmatch('[a-f0-9]{64}',v) for v in pins.values()),'Exact transport inventory required')
+    genesis=context['genesis_pins']
+    require(isinstance(genesis,dict) and set(genesis)=={'genesis.json','authority.json','authority-root.pub'}
+        and all(pins['network/'+n]==v for n,v in genesis.items()),'Transport Genesis differs')
+    require('validator_commissioning_files' not in policy,'Commissioning already approved')
+    from controller import GENESIS_STAGE
+    for name,pin in genesis.items():
+        require(hashlib.sha256(controller.direct(root/GENESIS_STAGE/name,True,4*1024*1024).read_bytes()).hexdigest()==pin,'Prior signed Genesis changed')
+    for name,pin in pins.items():
+        label='commissioning/'+name;path=control/'authorization/inputs'/label
+        prior=policy.get('authorization_files',{}).get(label)
+        if path.exists() or path.is_symlink() or prior is not None:
+            require(name in {'network/'+n for n in genesis} and prior==pin
+                and hashlib.sha256(controller.direct(path,True,4*1024*1024).read_bytes()).hexdigest()==pin,'Transport input already present or changed')
+    for name in ('data','tmp/commissioning','tmp/existing-network-identity-request.json','evidence/upgrade-intent.json','evidence/application-replacement-intent.json'):
+        path=root/name;require(not path.exists() and not path.is_symlink(),'Published or partial application state')
+    for name in ('config','network'):
+        path=root/name;require(path.is_dir() and not path.is_symlink() and not any(path.iterdir()),'Published application configuration')
+    import lifecycle as life
+    node=life._unit_state('synergy-node.service');vpn=life._unit_state('synergy-vpn.service')
+    require(node.get('MainPID')=='0' and node.get('ActiveState') in ('inactive','failed'),'Stop validator before transport proof')
+    guest_management_quiescence(root,policy,life._assert_no_application_processes,vpn.get('MainPID'))
+    key=hashlib.sha256(json.dumps({'version':1,'operation':'commission','parameters':{}},sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    pending={**context['selection'],'target':context['target'],'artifacts':{},'requests':[{'operation':'commission','request_sha256':key}],'sequence':context['authorization']['sequence']+1}
+    continuation_absence_facts(root,control,controller,policy,context,pending)
+    return context['dispatch_sha256']
+
+
+def readiness_absence_facts(root,control,controller,policy,context,pending):
+    name='commissioning-readiness.json';pin=context['artifact_sha256']
+    require(isinstance(pin,str) and re.fullmatch('[a-f0-9]{64}',pin),'Invalid readiness artifact commitment')
+    key=hashlib.sha256(json.dumps({'version':1,'operation':'commission','parameters':{}},sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    dispatch={'operation':'commission','request_sha256':key,'artifact_sha256':pin}
+    require(context['dispatch_sha256']==hashlib.sha256(json.dumps(dispatch,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        and pending['artifacts']=={name:pin} and pending['requests']==[{'operation':'commission','request_sha256':key}]
+        and pending['genesis_pins']==context['genesis_pins'],'Original readiness request differs')
+    path=control/'authorization/inputs'/name
+    require(not path.exists() and not path.is_symlink() and name not in policy.get('authorization_files',{}),
+        'Readiness artifact or approval already present')
+    from apqe_layout import FORMATION_PUBLIC_INPUTS
+    pins=policy.get('validator_commissioning_files',{})
+    require(set(pins)==FORMATION_PUBLIC_INPUTS and isinstance(context['genesis_pins'],dict)
+        and all(pins.get('network/'+name)==value for name,value in context['genesis_pins'].items()),'Exact existing commissioning approval required')
+    for name,expected in pins.items():
+        raw=controller.direct(control/'authorization/inputs/commissioning'/name,True,4*1024*1024).read_bytes()
+        require(hashlib.sha256(raw).hexdigest()==expected,'Existing commissioning input changed')
+    projected={**pending,'artifacts':{}}
+    continuation_absence_facts(root,control,controller,policy,context,projected)
+    for name in ('data','tmp/commissioning','tmp/existing-network-identity-request.json','evidence/upgrade-intent.json',
+                 'evidence/application-replacement-intent.json','evidence/authority-recovery-intent.json','evidence/autonomous-epoch-intent.json'):
+        path=root/name;require(not path.exists() and not path.is_symlink(),'Published or partial application state')
+    require(not any((root/'tmp').glob('commission-prepare-*')) and not any((root/'tmp').glob('commission-observe-*')),
+        'Partial commissioning observation exists')
+    for name in ('config','network'):
+        path=root/name;require(path.is_dir() and not path.is_symlink() and not any(path.iterdir()),'Published application configuration')
+    import lifecycle as life
+    life._commission_fresh_keys(root)
+    node=life._unit_state('synergy-node.service');vpn=life._unit_state('synergy-vpn.service')
+    require(node.get('MainPID')=='0' and node.get('ActiveState') in ('inactive','failed'),'Stop validator before readiness proof')
+    guest_management_quiescence(root,policy,life._assert_no_application_processes,vpn.get('MainPID'))
+    continuation_absence_facts(root,control,controller,policy,context,projected)
+    return context['dispatch_sha256']
+
+
+def commission_absence_facts(root,control,controller,policy,context):
+    """Unaudited grant and wholly unpublished application; no freshness renewal."""
+    import time
+    key=hashlib.sha256(json.dumps({'version':1,'operation':'commission','parameters':{}},sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    current=policy.get('engineering_authorization',{})
+    require(context['request_sha256']==key and current==context['authorization']
+        and policy.get('engineering_initial_authorization_sha256')==context['initial_sha256']
+        and policy.get('engineering_target')==context['target']
+        and policy.get('validator_formation_sha256')==context['formation_sha256']
+        and policy.get('validator_identity_network')==context['genesis_pins'],'Commission proof scope changed')
+    require(isinstance(current,dict) and set(current)=={'sha256','sequence','expires_at'}
+        and re.fullmatch('[a-f0-9]{64}',current['sha256']) and type(current['sequence']) is int and current['sequence']>0
+        and type(current['expires_at']) is int and current['expires_at']>0,'Invalid commission authorization')
+    grant=control/'grants'/(key+'.json')
+    require(set(p.name for p in (control/'grants').iterdir())=={key+'.json'},'Other or absent commission grant')
+    expected={'root':str(root),'operation':'commission','request_sha256':key,'expires_at':current['expires_at'],
+        'authorization_sha256':current['sha256'],'authorization_sequence':current['sequence']}
+    require(json.loads(controller.direct(grant,True,65536).read_bytes())==expected,'Exact unused commission grant required')
+    audit=control/'audit.jsonl'
+    if audit.exists() or audit.is_symlink():
+        raw=controller.direct(audit,True,1024*1024).read_bytes();rows=raw.splitlines()
+        require(len(rows)<=4096,'Authorization audit exceeds bound')
+        for row in rows:
+            value=json.loads(row)
+            require(isinstance(value,dict) and set(value)=={'operation','request_sha256','time'}
+                and isinstance(value['operation'],str) and isinstance(value['request_sha256'],str)
+                and re.fullmatch('[a-f0-9]{64}',value['request_sha256']) and type(value['time']) is int
+                and 0<=value['time']<=int(time.time()),'Malformed authorization audit')
+            require(value['operation']!='commission' and value['request_sha256']!=key,'Commission was consumed')
+    name='commissioning-readiness.json';pin=policy.get('authorization_files',{}).get(name)
+    require(isinstance(pin,str) and re.fullmatch('[a-f0-9]{64}',pin),'Approved readiness required')
+    require(hashlib.sha256(controller.direct(control/'authorization/inputs'/name,True,128*1024).read_bytes()).hexdigest()==pin,'Approved readiness changed')
+    from apqe_layout import FORMATION_PUBLIC_INPUTS
+    pins=policy.get('validator_commissioning_files',{})
+    require(set(pins)==FORMATION_PUBLIC_INPUTS and isinstance(context['genesis_pins'],dict)
+        and set(context['genesis_pins'])=={'genesis.json','authority.json','authority-root.pub'}
+        and all(pins.get('network/'+n)==v for n,v in context['genesis_pins'].items()),'Exact commissioning approval required')
+    from controller import GENESIS_STAGE
+    for n,v in pins.items():
+        require(isinstance(v,str) and re.fullmatch('[a-f0-9]{64}',v)
+            and hashlib.sha256(controller.direct(control/'authorization/inputs/commissioning'/n,True,4*1024*1024).read_bytes()).hexdigest()==v,'Commissioning input changed')
+    for n,v in context['genesis_pins'].items():
+        require(hashlib.sha256(controller.direct(root/GENESIS_STAGE/n,True,4*1024*1024).read_bytes()).hexdigest()==v,'Bound Genesis changed')
+    for n in ('data','tmp/commissioning','tmp/controller-authorization','tmp/controller-authorization.pending',
+              'tmp/existing-network-identity-request.json','evidence/upgrade-intent.json','evidence/application-replacement-intent.json',
+              'evidence/authority-recovery-intent.json','evidence/autonomous-epoch-intent.json'):
+        path=root/n;require(not path.exists() and not path.is_symlink(),'Published or partial application state')
+    require(not any((root/'tmp').glob('commission-prepare-*')) and not any((root/'tmp').glob('commission-observe-*')),'Partial commissioning exists')
+    for n in ('config','network'):
+        path=root/n;require(path.is_dir() and not path.is_symlink() and not any(path.iterdir()),'Published application configuration')
+    import lifecycle as life
+    life._commission_fresh_keys(root)
+    require(controller.genesis_binding(locked=True).get('bound') is True,'Retained Genesis custody was not verified')
+    units=life._attributed_units(root)
+    node=units.get('synergy-node.service',{});vpn=units.get('synergy-vpn.service',{})
+    require(node.get('MainPID')=='0' and node.get('ActiveState') in ('inactive','failed'),'Stop validator before commission proof')
+    guest_management_quiescence(root,policy,life._assert_no_application_processes,vpn.get('MainPID'))
+    require(int(time.time())<=context['expires_at'] and controller.policy()==policy and json.loads(controller.direct(grant,True,65536).read_bytes())==expected,'Commission proof changed')
+    return pin
+
+
+def treasury_send_phase_facts(root,control,controller,policy,context,challenge):
+    """Public hashes and phase facts only; never classify an outcome or retry."""
+    import time
+    require(type(context['nonce']) is int and 0<=context['nonce']<2**64-1,'Invalid original treasury nonce')
+    require(policy.get('engineering_authorization')==context['authorization']
+        and policy.get('engineering_initial_authorization_sha256')==context['initial_sha256']
+        and policy.get('engineering_target')==context['target']
+        and policy.get('validator_formation_sha256')==context['formation_sha256']
+        and policy.get('validator_identity_network')==context['genesis_pins'],'Treasury phase scope changed')
+    current=context['authorization']
+    require(isinstance(current,dict) and set(current)=={'sha256','sequence','expires_at'}
+        and isinstance(current['sha256'],str) and re.fullmatch('[a-f0-9]{64}',current['sha256'])
+        and type(current['sequence']) is int and current['sequence']>0
+        and type(current['expires_at']) is int and current['expires_at']>0,'Invalid treasury authorization')
+    key=context['request_sha256'];grant=control/'grants'/(key+'.json');grant_state='absent'
+    if grant.exists() or grant.is_symlink():
+        value=json.loads(controller.direct(grant,True,65536).read_bytes())
+        expected={'root':str(root),'operation':'treasury_send_prepare','request_sha256':key,
+            'expires_at':current['expires_at'],'authorization_sha256':current['sha256'],'authorization_sequence':current['sequence']}
+        require(isinstance(value,dict) and set(value)==set(expected),'Malformed treasury grant')
+        grant_state='exact' if value==expected else 'different'
+    audit=control/'audit.jsonl';consumed=False
+    if audit.exists() or audit.is_symlink():
+        rows=controller.direct(audit,True,1024*1024).read_bytes().splitlines()
+        require(len(rows)<=4096,'Authorization audit exceeds bound')
+        for row in rows:
+            value=json.loads(row)
+            require(isinstance(value,dict) and set(value)=={'operation','request_sha256','time'}
+                and isinstance(value['operation'],str) and isinstance(value['request_sha256'],str)
+                and re.fullmatch('[a-f0-9]{64}',value['request_sha256']) and type(value['time']) is int
+                and 0<=value['time']<=int(time.time()),'Malformed authorization audit')
+            if value['request_sha256']==key:
+                require(value['operation']=='treasury_send_prepare','Treasury audit operation differs')
+                consumed=True
+    def directory(path):
+        m=path.lstat();require(path.resolve()==path and stat.S_ISDIR(m.st_mode) and m.st_uid==os.geteuid()
+            and stat.S_IMODE(m.st_mode)==0o700,'Unsafe treasury phase directory')
+    directory(root/'keys');treasury=root/'keys/formation-treasury';directory(treasury)
+    names={'request.json','treasury-public.json','treasury.enc.json','unlock'}
+    require(set(p.name for p in treasury.iterdir()) in (names,names|{'sends'}),'Unexpected treasury custody inventory')
+    for name in names:
+        m=(treasury/name).lstat();require(stat.S_ISREG(m.st_mode) and m.st_nlink==1 and m.st_uid==os.geteuid()
+            and stat.S_IMODE(m.st_mode)==0o600,'Unsafe treasury custody member')
+    files={name:None for name in ('request','prepared','admission','dispatch')};request_raw=None;empty=set()
+    sends=treasury/'sends';path=sends/format(context['nonce'],'020d');reservation='absent'
+    if sends.exists() or sends.is_symlink():
+        directory(sends);children=list(sends.iterdir());require(len(children)<=128,'Treasury nonce inventory exceeds bound')
+        for child in children:
+            require(re.fullmatch('[0-9]{20}',child.name) and int(child.name)<2**64-1,'Unknown treasury nonce');directory(child)
+        if path.exists() or path.is_symlink():
+            directory(path)
+            allowed={'request.json':('request',2*1024*1024),'prepared.json':('prepared',128*1024),
+                'admission.json':('admission',1024*1024),'dispatch-intent.json':('dispatch',4096)}
+            require(set(p.name for p in path.iterdir())<=set(allowed),'Unknown treasury reservation member')
+            for name,(label,limit) in allowed.items():
+                source=path/name
+                if source.exists() or source.is_symlink():
+                    raw=controller.direct(source,True,limit).read_bytes();require(len(raw)<=limit,'Oversized treasury reservation member')
+                    files[label]=hashlib.sha256(raw).hexdigest()
+                    if not raw:empty.add(label)
+                    if label=='request':request_raw=raw
+            reservation='complete_inventory_unverified' if all(files[n] is not None and n not in empty for n in ('request','prepared','admission')) else 'partial'
+    if files['request']==key:
+        original=json.loads(request_raw);parameters=original.get('parameters') if isinstance(original,dict) else None
+        require(isinstance(original,dict) and set(original)=={'version','operation','parameters'}
+            and type(original['version']) is int and original['version']==1 and original['operation']=='treasury_send_prepare'
+            and isinstance(parameters,dict) and type(parameters.get('nonce')) is int and parameters['nonce']==context['nonce']
+            and parameters.get('formation_sha256')==context['formation_sha256']
+            and parameters.get('genesis_sha256')==context['genesis_pins'].get('genesis.json'),'Original treasury request scope differs')
+    require(int(time.time())<=context['expires_at'] and controller.policy()==policy,'Treasury phase scope expired or changed')
+    return {'schema':'nodenetwork-treasury-send-phase-v1','challenge':challenge,'request_sha256':key,'nonce':context['nonce'],
+        'authorization_sha256':current['sha256'],'grant_state':grant_state,'audit_state':'consumed' if consumed else 'not_consumed',
+        'reservation':reservation,'files':files,'request_matches':None if files['request'] is None else files['request']==key,
+        'mutation_performed':False}
+
+
+def treasury_send_not_applied_facts(root,control,controller,policy,context,challenge):
+    """Only unaudited preparation with no nonce reservation can be released."""
+    def absent():
+        for name in ('tmp/controller-authorization','tmp/controller-authorization.pending','tmp/controller-update',
+                     'evidence/upgrade-intent.json','evidence/application-replacement-intent.json'):
+            path=root/name;require(not path.exists() and not path.is_symlink(),'Treasury proof refuses partial lifecycle state')
+        require(not any((root/'tmp').glob('treasury-send-*')),'Treasury preparation temporary state exists')
+        path=root/'keys/formation-treasury/sends'/format(context['nonce'],'020d')
+        require(not path.exists() and not path.is_symlink(),'Treasury nonce reservation exists')
+    first=treasury_send_phase_facts(root,control,controller,policy,context,challenge)
+    require(first['grant_state']=='exact' and first['audit_state']=='not_consumed'
+        and first['reservation']=='absent' and all(value is None for value in first['files'].values()),
+        'Exact unaudited unused treasury grant and absent nonce required')
+    sends=root/'keys/formation-treasury/sends'
+    if sends.exists():
+        for other in sends.iterdir():
+            names={path.name for path in other.iterdir()}
+            require(names in ({'request.json','prepared.json','admission.json'},
+                {'request.json','prepared.json','admission.json','dispatch-intent.json'}),'Unknown or partial treasury nonce exists')
+            raw=controller.direct(other/'request.json',True,2*1024*1024).read_bytes()
+            require(hashlib.sha256(raw).hexdigest()!=context['request_sha256'],'Original treasury request has a reservation')
+            previous=json.loads(raw);parameters=previous.get('parameters') if isinstance(previous,dict) else None
+            require(isinstance(previous,dict) and set(previous)=={'version','operation','parameters'}
+                and type(previous['version']) is int and previous['version']==1 and previous['operation']=='treasury_send_prepare'
+                and isinstance(parameters,dict) and type(parameters.get('nonce')) is int and parameters['nonce']==int(other.name)
+                and parameters.get('formation_sha256')==context['formation_sha256']
+                and parameters.get('genesis_sha256')==context['genesis_pins'].get('genesis.json'),'Other treasury reservation is unattributed')
+            for name,limit in (('prepared.json',128*1024),('admission.json',1024*1024),('dispatch-intent.json',4096)):
+                if name in names:controller.direct(other/name,True,limit)
+    pins=context['genesis_pins']
+    require(isinstance(pins,dict) and set(pins)=={'genesis.json','authority.json','authority-root.pub'},'Exact signed Genesis pins required')
+    for name,pin in pins.items():
+        require(isinstance(pin,str) and re.fullmatch('[a-f0-9]{64}',pin)
+            and hashlib.sha256(controller.direct(root/'network'/name,True,4*1024*1024).read_bytes()).hexdigest()==pin,
+            'Installed signed Genesis changed')
+    absent()
+    require(treasury_send_phase_facts(root,control,controller,policy,context,challenge)==first,'Treasury phase changed during proof')
+    absent()
+    return {'schema':'nodenetwork-treasury-send-not-applied-v1','challenge':challenge,
+        'request_sha256':context['request_sha256'],'nonce':context['nonce'],
+        'authorization_sha256':context['authorization']['sha256'],'not_applied':True,'mutation_performed':False}
+
+
+def continuation_not_applied_proof(wire,transport=False,readiness=False,commission=False,treasury=False,treasury_not_applied=False):
+    """Native-embedded proof only; never stages authorization or changes target state."""
+    import time
+    require(sum((transport,readiness,commission,treasury,treasury_not_applied))<=1,'Conflicting continuation proof modes')
+    treasury=treasury or treasury_not_applied
+    require(isinstance(wire,dict) and set(wire)==({'context','challenge'} if transport or commission or treasury else {'context','pending_json','challenge'}),'Exact continuation proof required')
+    context=wire['context'];now=int(time.time())
+    require(isinstance(context,dict) and set(context)==({'initial_sha256','authorization','formation_sha256','target','selection','genesis_pins',('request_sha256' if commission or treasury else 'pending_sha256'),'expires_at'}|({'artifact_sha256','dispatch_sha256'} if transport or readiness else {'nonce'} if treasury else set()))
+            and type(context['expires_at']) is int and now<=context['expires_at']<=now+120,'Continuation proof expired')
+    for value in (wire['challenge'],context['initial_sha256'],context['formation_sha256'],context['request_sha256' if commission or treasury else 'pending_sha256']):
+        require(isinstance(value,str) and re.fullmatch('[a-f0-9]{64}',value),'Invalid continuation proof pin')
+    require(context['initial_sha256']==globals().get('NATIVE_AUTHENTICATED_AUTHORIZATION_INITIAL_SHA256'),'No native initial approval')
+    if not transport and not commission and not treasury:
+        raw=wire['pending_json'];require(isinstance(raw,str) and len(raw.encode())<=65536,'Continuation exceeds bound')
+        # Expiry is not extended: historical structure is validated solely for cancellation.
+        value=json.loads(raw);expiry=value.get('expires_at')
+        require(type(expiry) is int and expiry>0,'Invalid original continuation expiry')
+        pending=authorization_document(raw,context['pending_sha256'],expiry-1)
+    elif transport:require(isinstance(context['dispatch_sha256'],str) and re.fullmatch('[a-f0-9]{64}',context['dispatch_sha256']),'Invalid transport dispatch')
+    root=ROOT;control=root/'tmp/controller';path=control/'policy.json'
+    for ancestor in (control,*control.parents):
+        m=ancestor.lstat();require(stat.S_ISDIR(m.st_mode) and not ancestor.is_symlink() and m.st_uid==os.geteuid() and not m.st_mode&0o022,'Unsafe proof ancestry')
+    m=path.lstat();require(stat.S_ISREG(m.st_mode) and m.st_nlink==1 and m.st_uid==os.geteuid() and stat.S_IMODE(m.st_mode)==0o600 and m.st_size<=1024*1024,'Unsafe proof policy')
+    policy=json.loads(path.read_bytes())
+    for name in enrolled_engine(policy):
+        path=control/name if name=='controller.py' else control/'tools'/name;m=path.lstat()
+        require(path.resolve()==path and stat.S_ISREG(m.st_mode) and m.st_nlink==1 and m.st_uid==os.geteuid() and not m.st_mode&0o022 and m.st_size<=1024*1024
+                and hashlib.sha256(path.read_bytes()).hexdigest()==policy['engine_files'][name],'Enrolled proof engine drift')
+    sys.path[:0]=[str(control),str(control/'tools')]
+    from controller import Controller,control_inventory,engineering_effective_selection,MUTATIONS
+    import lifecycle as life
+    with life._lifecycle_lock(root):
+        controller=Controller(root);control_inventory(root)
+        require(engineering_effective_selection(root,policy)==context['selection'],'Continuation selection changed')
+        if not transport and not commission and not treasury:require(pending['requests'][0]['operation'] in MUTATIONS,'Unknown pending operation')
+        receipt,_=life._sealed_receipt(root)
+        require(receipt['package_sha256']==context['selection']['manifest_sha256'],'Installed master changed')
+        if treasury_not_applied:return treasury_send_not_applied_facts(root,control,controller,policy,context,wire['challenge'])
+        if treasury:return treasury_send_phase_facts(root,control,controller,policy,context,wire['challenge'])
+        if commission:
+            pin=commission_absence_facts(root,control,controller,policy,context)
+            return {'schema':'nodenetwork-commission-not-applied-v1','challenge':wire['challenge'],
+                'request_sha256':context['request_sha256'],'authorization_sha256':context['authorization']['sha256'],
+                'readiness_sha256':pin,'not_applied':True,'mutation_performed':False}
+        key=(readiness_absence_facts(root,control,controller,policy,context,pending) if readiness else
+             transport_absence_facts(root,control,controller,policy,context) if transport else continuation_absence_facts(root,control,controller,policy,context,pending))
+        return {'schema':'nodenetwork-readiness-not-applied-v1' if readiness else 'nodenetwork-transport-not-applied-v1' if transport else 'nodenetwork-continuation-not-applied-v1','challenge':wire['challenge'],
+                'pending_sha256':context['pending_sha256'],('dispatch_sha256' if transport or readiness else 'request_sha256'):key,'parent_sha256':context['authorization']['sha256'],
+                'not_applied':True,'mutation_performed':False}
+
+
 def main():
+    global _UPDATE_PHASE,_UPGRADE_PROOF_PHASE
+    _UPDATE_PHASE=None;_UPGRADE_PROOF_PHASE=None
     try:
-        if len(sys.argv)==4 and sys.argv[1]=='--bare-rollback-preflight':
+        if len(sys.argv)==2 and sys.argv[1]=='--inspect-update-commission-grant':
+            raw=sys.stdin.buffer.read(65537);require(len(raw)<=65536,'Preservation proof exceeds bound')
+            operation=inspect_update_commission_grant(json.loads(raw))
+        elif len(sys.argv)==2 and sys.argv[1] in ('--continuation-not-applied-proof','--prove-transport-not-applied','--prove-readiness-not-applied','--commission-outcome-proof','--treasury-send-phase-proof','--treasury-send-not-applied-proof'):
+            raw=sys.stdin.buffer.read(131073);require(len(raw)<=131072,'Continuation proof exceeds bound')
+            operation=continuation_not_applied_proof(json.loads(raw),sys.argv[1]=='--prove-transport-not-applied',sys.argv[1]=='--prove-readiness-not-applied',sys.argv[1]=='--commission-outcome-proof',sys.argv[1]=='--treasury-send-phase-proof',sys.argv[1]=='--treasury-send-not-applied-proof')
+        elif len(sys.argv)==2 and sys.argv[1]=='--upgrade-not-applied-proof':
+            raw=sys.stdin.buffer.read(2*1024*1024+1);require(len(raw)<=2*1024*1024,'Upgrade proof input exceeds bound')
+            operation=upgrade_not_applied_proof(json.loads(raw))
+        elif len(sys.argv)==4 and sys.argv[1]=='--bare-rollback-preflight':
             operation=bare_rollback(sys.argv[2],sys.argv[3])
         elif len(sys.argv)==5 and sys.argv[1]=='--bare-rollback-apply':
             operation=bare_rollback(sys.argv[2],sys.argv[3],sys.argv[4])
         elif len(sys.argv)==2 and sys.argv[1]=='--stage-engineering-authorization':
             operation=stage_engineering_authorization(sys.stdin.buffer)
+        elif len(sys.argv)==4 and sys.argv[1]=='--reconcile-engineering-update':
+            operation=stage_engineering_update(None,sys.argv[2],sys.argv[3],reconcile=True)
         elif len(sys.argv)==4 and sys.argv[1]=='--stage-engineering-update':
             operation=stage_engineering_update(sys.stdin.buffer,sys.argv[2],sys.argv[3])
         else:
             require(len(sys.argv)==1,'Unsupported bootstrap invocation')
             operation=bootstrap(sys.stdin.buffer)
         result={'version':1,'ok':True,'result':operation}
-    except Exception:result={'version':1,'ok':False,'error':{'code':'bootstrap_refused','message':'Bootstrap validation or enrollment failed; no validator activated'}}
+    except Exception:
+        if sys.argv[1:]==['--upgrade-not-applied-proof'] and _UPGRADE_PROOF_PHASE in UPGRADE_PROOF_PHASES:
+            result={'version':1,'ok':False,'error':{'code':'upgrade_proof_'+_UPGRADE_PROOF_PHASE+'_refused','message':'Read-only upgrade proof refused'}}
+        elif _UPDATE_PHASE in UPDATE_PHASES:
+            result={'version':1,'ok':False,'error':{'code':'engineering_update_'+_UPDATE_PHASE+'_refused',
+                'message':'Engineering update refused at '+UPDATE_PHASES[_UPDATE_PHASE]+'. Inspect and reconcile the exact target; no validator was activated.'}}
+        else:result={'version':1,'ok':False,'error':{'code':'bootstrap_refused','message':'Bootstrap validation or enrollment failed; no validator activated'}}
     print(json.dumps(result,sort_keys=True))
 
 if __name__=='__main__':main()

@@ -112,10 +112,39 @@ class BootstrapTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'exceeds bound'):b.require_clean_service_namespace()
 
     def test_filtered_missing_validator_does_not_block_clean_bootstrap(self):
+        detail=self.missing_unit_detail()
         with patch.object(b.subprocess, 'run', side_effect=[
             subprocess.CompletedProcess([], 0, stdout=''),
             subprocess.CompletedProcess([], 0, stdout='synergy-node.service not-found inactive dead\n'),
+            subprocess.CompletedProcess([], 0, stdout=detail,stderr=''),
         ]):
             b.require_clean_service_namespace()
+
+    @staticmethod
+    def missing_unit_detail(**changes):
+        values=dict(LoadState='not-found',ActiveState='inactive',SubState='dead',MainPID='0',ControlPID='0',
+                    FragmentPath='',SourcePath='',DropInPaths='',UnitFileState='',Triggers='',TriggeredBy='',Job='')
+        values.update(changes)
+        return ''.join(f'{key}={value}\n' for key,value in values.items())
+
+    def test_deleted_failed_unit_requires_independent_inert_state(self):
+        def check(detail,status=0,stderr=''):
+            with patch.object(b.subprocess,'run',side_effect=[
+                    subprocess.CompletedProcess([],1,stdout='',stderr=''),
+                    subprocess.CompletedProcess([],0,stdout='synergy-posy-old.service not-found failed failed Old validator\n',stderr=''),
+                    subprocess.CompletedProcess([],status,stdout=detail,stderr=stderr)]):
+                b.require_clean_service_namespace()
+        check(self.missing_unit_detail(ActiveState='failed',SubState='failed'))
+        for field,value in [('LoadState','loaded'),('ActiveState','active'),('SubState','auto-restart'),
+                ('MainPID','2'),('ControlPID','3'),('FragmentPath','/etc/systemd/system/old.service'),
+                ('SourcePath','/generated/old'),('DropInPaths','/etc/old.conf'),('UnitFileState','masked'),
+                ('Triggers','other.service'),('TriggeredBy','old.timer'),('Job','1')]:
+            with self.subTest(field=field),self.assertRaises(ValueError):
+                check(self.missing_unit_detail(ActiveState='failed',SubState='failed',**{field:value})
+                      if field not in ('ActiveState','SubState') else self.missing_unit_detail(**{field:value}))
+        exact=self.missing_unit_detail(ActiveState='failed',SubState='failed')
+        for detail,status,stderr in [(exact,1,''),(exact,0,'warning'),(exact+'MainPID=0\n',0,''),
+                (exact.replace('Job=\n',''),0,''),(exact+'Unknown=\n',0,''),('x'*65537,0,'')]:
+            with self.subTest(status=status,stderr=stderr),self.assertRaises(ValueError):check(detail,status,stderr)
 
 if __name__=='__main__':unittest.main()

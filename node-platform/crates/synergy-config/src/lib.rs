@@ -107,8 +107,7 @@ mod tests {
         assert!(invalid.validate().is_err());
     }
 
-    #[test]
-    fn native_formation_namespace_still_requires_the_exact_apqe_trust_profile() {
+    fn formation_transport_configuration() -> NodeConfiguration {
         let mut cfg = configuration(NodeRole::Validator);
         cfg.chain_id = 999998;
         cfg.network_id = "nodenetwork-formation-disposable-20261112".into();
@@ -134,6 +133,12 @@ mod tests {
             custody_path: "/opt/synergy/keys/apqe/custody.json".into(),
             custody_unlock_path: "/opt/synergy/keys/apqe/unlock".into(),
         });
+        cfg
+    }
+
+    #[test]
+    fn native_formation_namespace_still_requires_the_exact_apqe_trust_profile() {
+        let cfg = formation_transport_configuration();
         assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
         for other in [
             "mainnet",
@@ -154,6 +159,68 @@ mod tests {
                 _ => unreachable!(),
             }
             assert!(candidate.validate().is_err(), "{without}");
+        }
+    }
+
+    #[test]
+    fn controlled_canary_namespace_preserves_chain_and_apqe_provenance_gates() {
+        let mut cfg = formation_transport_configuration();
+        cfg.chain_id = 99999;
+        cfg.network_id = "synergy-posy-canary-20261117".into();
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+        for name in [
+            "synergy-posy-canary-",
+            "synergy-posy-canary--bad",
+            "synergy-posy-canary-Mainnet",
+            "synergy-posy-canary-bad_name",
+            "synergy-posy-mainnet-20261117",
+            "mainnet",
+        ] {
+            let mut candidate = cfg.clone();
+            candidate.network_id = name.into();
+            assert!(candidate.validate().is_err(), "{name}");
+        }
+        for chain in [0, 1266, 999998] {
+            let mut candidate = cfg.clone();
+            candidate.chain_id = chain;
+            assert!(candidate.validate().is_err(), "chain {chain}");
+        }
+        for missing in [
+            "provider",
+            "genesis",
+            "authority",
+            "root",
+            "report_pin",
+            "transport_pin",
+            "genesis_pin",
+        ] {
+            let mut candidate = cfg.clone();
+            match missing {
+                "provider" => candidate.aegis_provider = None,
+                "genesis" => candidate.genesis_path = None,
+                "authority" => candidate.consensus.authority_binding = None,
+                "root" => candidate.consensus.authority_trust_key_path = None,
+                "report_pin" => candidate
+                    .aegis_provider
+                    .as_mut()
+                    .unwrap()
+                    .authenticated_report_sha256
+                    .clear(),
+                "transport_pin" => candidate
+                    .apqe_transport
+                    .as_mut()
+                    .unwrap()
+                    .registry_trust_key_sha256
+                    .clear(),
+                "genesis_pin" => candidate
+                    .apqe_transport
+                    .as_mut()
+                    .unwrap()
+                    .genesis_trust_key_sha256
+                    .clear(),
+                _ => unreachable!(),
+            }
+            assert!(candidate.validate().is_err(), "{missing}");
         }
     }
 

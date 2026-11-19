@@ -247,11 +247,16 @@ def install(package, root, role, network_id, chain_id, node_name, *, staged_mast
         require(not list(path.iterdir()) or relative == 'tmp' and staged_master_sha256 is not None
                 and set(path.iterdir()) == {root/'tmp/controller'}, 'master contains runtime/private state')
     (root / 'data').rmdir()  # Native initialization owns exclusive data-root creation.
-    for path in root.rglob('*'):
-        if path.is_dir():
-            os.chmod(path, 0o700)
-        elif path.is_file():
-            os.chmod(path, 0o700 if path.parent.name in ('bin', 'tools') else 0o600)
+    # Normalize only authenticated software, never the enrolled controller,
+    # its public authorization inputs, custody or other retained runtime state.
+    software_directories=set()
+    for relative in manifest['files']:
+        path=root/relative
+        os.chmod(path, 0o700 if path.parent.name in ('bin', 'tools') else 0o600)
+        software_directories.update(parent for parent in path.parents if parent!=root and root in parent.parents)
+    for path in software_directories:
+        os.chmod(path, 0o700)
+    os.chmod(root/'package.json', 0o600)
     receipt = {'format': MARKER, 'root': str(root), 'role': role, 'network_id': network_id,
                'chain_id': chain_id, 'node_name': node_name,
                'package_sha256': digest(root / 'package.json'),

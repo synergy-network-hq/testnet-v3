@@ -38,6 +38,64 @@ class AuthorizationTests(unittest.TestCase):
     def controlled(self):
         self.p={**self.p,'profile':v.CONTROLLED_PROFILE,
                 'network_binding':{k:self.b[k] for k in ('network_id','chain_id','formation_sha256')}}
+    def unused(self):
+        return {'schema':'nodenetwork-vpn-unused-preflight-v1','quiescent':True,
+                'attempt_sha256':'d'*64,'binding':self.b}
+    def test_unused_cancellation_exact_zero_usage_and_absence_is_idempotent(self):
+        self.issue()
+        flow=self.flow([self.account,(200,[]),(200,[self.key]),(204,None),(404,None),(200,[]),(200,[])])
+        proof=flow.cancel_unused(self.unused())
+        self.assertTrue(proof['unused_verified']);self.assertNotIn(self.key['key'],json.dumps(proof))
+        self.assertEqual(sum(call.args[0]=='DELETE' for call in self.request.call_args_list),1)
+        flow=self.flow([self.account,(200,[]),(404,None),(200,[]),(200,[])])
+        self.assertEqual(flow.cancel_unused(self.unused()),proof)
+        self.assertFalse(any(call.args[0]=='DELETE' for call in self.request.call_args_list))
+        with self.assertRaises(ValueError):flow.prepare(self.b)
+    def test_unused_cancellation_used_or_matching_peer_never_deletes(self):
+        self.issue()
+        for responses in ([self.account,(200,[self.peer])],
+                          [self.account,(200,[]),(200,[{**self.key,'used_times':1}])],
+                          [self.account,(200,[]),(200,[{**self.key,'id':'foreign'}])]):
+            flow=self.flow(responses)
+            with self.assertRaises(ValueError):flow.cancel_unused(self.unused())
+            self.assertFalse(any(call.args[0]=='DELETE' for call in self.request.call_args_list))
+            self.assertFalse((self.root/'cancel-unused-intent.json').exists())
+    def test_unused_cancellation_uncertain_delete_reconciles_without_second_delete(self):
+        self.issue();flow=self.flow([self.account,(200,[]),(200,[self.key]),OSError('uncertain')])
+        with self.assertRaises(OSError):flow.cancel_unused(self.unused())
+        flow=self.flow([self.account,(200,[]),(200,self.key)])
+        with self.assertRaises(ValueError):flow.cancel_unused(self.unused())
+        self.assertFalse(any(call.args[0]=='DELETE' for call in self.request.call_args_list))
+        flow=self.flow([self.account,(200,[]),(404,None),(200,[]),(200,[])])
+        self.assertTrue(flow.cancel_unused(self.unused())['setup_key_absent'])
+        wrong=self.unused();wrong['attempt_sha256']='e'*64
+        flow=self.flow([self.account,(200,[])])
+        with self.assertRaises(ValueError):flow.cancel_unused(wrong)
+    def test_unused_cancellation_partial_writes_and_concurrent_cancel_are_fenced(self):
+        import fcntl,os
+        self.issue()
+        stage=self.root/'.cancel-unused-intent.json.stage';stage.write_bytes(b'partial');stage.chmod(0o600)
+        flow=self.flow([self.account,(200,[]),(200,[self.key]),OSError('after durable intent')])
+        with self.assertRaises(OSError):flow.cancel_unused(self.unused())
+        self.assertFalse(stage.exists());self.assertTrue((self.root/'cancel-unused-intent.json').exists())
+        stage=self.root/'.cancelled-unused.json.stage';stage.write_bytes(b'partial');stage.chmod(0o600)
+        flow=self.flow([self.account,(200,[]),(404,None),(200,[]),(200,[])])
+        self.assertTrue(flow.cancel_unused(self.unused())['setup_key_absent']);self.assertFalse(stage.exists())
+        fd=os.open(self.root,os.O_RDONLY|os.O_DIRECTORY)
+        try:
+            fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            flow=self.flow([])
+            with self.assertRaises(BlockingIOError):flow.cancel_unused(self.unused())
+            self.request.assert_not_called()
+        finally:os.close(fd)
+
+    def test_unused_cancellation_target_scope_and_quiescence_are_exact(self):
+        self.issue()
+        for wrong in ({**self.unused(),'quiescent':False},{**self.unused(),'binding':{**self.b,'target_sha256':'e'*64}}):
+            flow=self.flow([self.account])
+            with self.assertRaises(ValueError):flow.cancel_unused(wrong)
+            self.assertEqual(self.request.call_count,1)
+
     def test_controlled_policy_exact_profile_scope_and_pin(self):
         self.controlled()
         raw=v.encode(self.p);sha=hashlib.sha256(raw).hexdigest()

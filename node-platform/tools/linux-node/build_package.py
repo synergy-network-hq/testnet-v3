@@ -16,7 +16,7 @@ sys.dont_write_bytecode = True
 SOURCE = Path(__file__).resolve().parents[2]
 MASTER = SOURCE.parents[1] / 'Node-Architecture/Linux/synergy'
 TOOLS = ('synergy_linux.py', 'lifecycle.py', 'vpn.py', 'conformance.py',
-         'test_cross_network.py', 'apqe_layout.py', 'canary_rpc_relay.py', 'controller.py', 'bootstrap.py', 'activate_authority_recovery.py', 'epoch_readiness.py', 'root_guard.py', 'guest_lifecycle.py')
+         'test_cross_network.py', 'apqe_layout.py', 'canary_rpc_relay.py', 'controller.py', 'bootstrap.py', 'activate_authority_recovery.py', 'epoch_readiness.py', 'root_guard.py', 'guest_lifecycle.py', 'vpn_authorization.py', 'treasury_send.py')
 DIRECTORIES = ('bin', 'lib', 'assets', 'config', 'network', 'systemd', 'tools',
                'data', 'keys', 'logs', 'cache', 'tmp', 'run', 'vpn',
                'snapshots', 'recovery', 'evidence', 'roles')
@@ -334,6 +334,15 @@ R5_MANIFEST_SHA256 = '43eae3fdc42a2bff9e0ba2fa369d708fb60d14e90c6e18a6f344f5071c
 
 def compose_existing_root_compatibility(original, output, expected_manifest):
     """Update existing-root boundary and service tooling around a pinned runtime."""
+    return _compose_tooling(original, output, expected_manifest, existing_root=True)
+
+
+def compose_tooling_update(original, output, expected_manifest):
+    """Seal canonical Linux tools while retaining authenticated native provenance."""
+    return _compose_tooling(original, output, expected_manifest, existing_root=False)
+
+
+def _compose_tooling(original, output, expected_manifest, *, existing_root):
     from synergy_linux import digest, verify_package
     original, output = Path(original), Path(output)
     require(re.fullmatch('[a-f0-9]{64}', expected_manifest) is not None,
@@ -342,6 +351,8 @@ def compose_existing_root_compatibility(original, output, expected_manifest):
             and digest(original/'package.json') == expected_manifest,
             'base package manifest pin mismatch')
     baseline = verify_package(original)
+    require(existing_root or 'existing_root_compatibility' not in baseline,
+            'lowercase tooling updates require a canonical lowercase base')
     require(output.is_absolute() and output.name == 'synergy'
             and not output.exists() and not output.is_symlink()
             and output.parent.is_dir() and output.parent.resolve() == output.parent
@@ -349,8 +360,8 @@ def compose_existing_root_compatibility(original, output, expected_manifest):
             and output.parent.stat().st_mode & 0o777 == 0o700
             and not output.is_relative_to(original) and not original.is_relative_to(output),
             'fresh lowercase output under a private direct workspace required')
-    tooling_paths = { 'tools/'+name:Path(__file__).parent/name
-                      for name in ('synergy_linux.py','lifecycle.py','canary_rpc_relay.py','conformance.py') }
+    names = ('synergy_linux.py','lifecycle.py','canary_rpc_relay.py','conformance.py') if existing_root else TOOLS
+    tooling_paths = {'tools/'+name:Path(__file__).parent/name for name in names}
     require(set(tooling_paths) <= set(baseline['files']), 'base lacks canonical lifecycle tooling')
     tooling = {name:path.read_bytes() for name,path in tooling_paths.items()}
     tooling_pins = {name:hashlib.sha256(data).hexdigest() for name,data in tooling.items()}
@@ -362,9 +373,11 @@ def compose_existing_root_compatibility(original, output, expected_manifest):
     }
     manifest['files'] = dict(baseline['files'], **tooling_pins)
     manifest['source_sha256'] = content_sha256({'baseline':expected_manifest, 'tooling':tooling_pins})
-    manifest['release_id'] = 'synergy-linux-existing-root-' + manifest['source_sha256'][:16]
+    prefix = 'synergy-linux-existing-root-' if existing_root else 'synergy-linux-tooling-'
+    manifest['release_id'] = prefix + manifest['source_sha256'][:16]
     manifest['acceptance_status'] = 'CANDIDATE_REQUIRES_RECORDED_ACCEPTANCE_GATES'
-    manifest['existing_root_compatibility'] = '/opt/Synergy'
+    if existing_root:
+        manifest['existing_root_compatibility'] = '/opt/Synergy'
     output.mkdir(mode=0o700)
     try:
         for directory in DIRECTORIES: (output/directory).mkdir(mode=0o700)
@@ -554,6 +567,14 @@ def promote_r5_controller(candidate, candidate_pin, current_pin, preserve):
 
 
 def main():
+    if sys.argv[1:2] == ['tooling-update']:
+        p = argparse.ArgumentParser(description='Seal canonical Linux tools around an exact authenticated native baseline')
+        p.add_argument('--base',type=Path,required=True)
+        p.add_argument('--base-sha256',required=True)
+        p.add_argument('--output',type=Path,required=True)
+        args=p.parse_args(sys.argv[2:])
+        print(json.dumps(compose_tooling_update(args.base,args.output,args.base_sha256),sort_keys=True))
+        return
     if sys.argv[1:2] == ['existing-root-compatibility']:
         p = argparse.ArgumentParser(description='Compose approved existing-root tooling without rebuilding native artifacts')
         p.add_argument('--base',type=Path,required=True)

@@ -39,6 +39,7 @@ RUNTIME_FILES = (
  r'run/(admin|netbird)\.sock', r'logs/(node|netbird|netbird-service|canary-rpc-relay)\.log(?:\.[0-9]+)?',
  r'evidence/(vpn-server-binding|configured-chain-acceptance-[0-9]+|host-integrations|vpn-enrollment|vpn-enrollment-attempt|vpn-gateway-route|initialization|public-identity|vpn-boot-integration)\.json',
  r'evidence/(upgrade-intent|upgrade-completed|vpn-retirement|application-replacement-intent)\.json',
+ r'evidence/(vpn-attempts|vpn-cancel-unused-intent)\.json',
  r'evidence/authority-recovery-(intent|completed)\.json',
  r'evidence/autonomous-epoch-intent\.json',
  r'evidence/gateway-bootstrap-pin\.json',
@@ -243,6 +244,23 @@ def _outside_path(path,root,allowed):
             'external service path overlaps or escapes reviewed disjoint roots')
 
 
+def without_owned_guest_registration(root, names):
+    """Exclude only the current fully attributed managed guest, never a prefix."""
+    names=set(names)
+    if not any(name.startswith('synergy-guest-') for name in names):return names
+    from controller import Controller
+    from guest_lifecycle import GuestManager, approved_inventory
+    policy=Controller(root).policy()
+    approved_inventory(root,policy)
+    manager=GuestManager(root,policy)
+    observed=manager.status({'guest_id':manager.spec['guest_id']})
+    require(observed.get('exists') is True and observed.get('phase')=='created'
+            and manager.unit_name in names,
+            'Managed guest registration is not owned by the current receipt')
+    names.remove(manager.unit_name)
+    return names
+
+
 def verify_external_services(root,names):
     require(names <= set(EXTERNAL_UNITS),'obsolete or undeclared Synergy service registered')
     properties='FragmentPath,DropInPaths,ExecStart,ExecStartPre,ExecStartPost,ExecStop,ExecStopPost,WorkingDirectory,RootDirectory,EnvironmentFiles,ReadWritePaths,ReadOnlyPaths,BindPaths,BindReadOnlyPaths'
@@ -355,6 +373,159 @@ def approved_upgrade_members(root, candidate_pin, stage):
     return paths
 
 
+# Operational inventory bound, not a nonce or transaction retry policy. Exhaustion
+# refuses conformance; no journal or dispatch fence is removed by this reader.
+TREASURY_SEND_LIMIT = 256
+
+
+def approved_vpn_attempt_members(root):
+    """Fixed bounded public cancellation history; never grants enrollment/removal."""
+    from controller import Controller, canonical, request_digest
+    from vpn import ATTEMPTS, attempt_state, public_hash, validate_unused_cancellation
+    names={'evidence/vpn-enrollment-attempt.json':4096,ATTEMPTS:256*1024,
+           'evidence/vpn-cancel-unused-intent.json':16384}
+    if not any((root/name).exists() or (root/name).is_symlink() for name in (ATTEMPTS,'evidence/vpn-cancel-unused-intent.json')):
+        return set()  # Existing original-attempt behavior is unchanged.
+    present=set()
+    for name,limit in names.items():
+        path=root/name
+        if not path.exists() and not path.is_symlink():continue
+        st=path.lstat()
+        require(path.resolve()==path and stat.S_ISREG(st.st_mode) and st.st_nlink==1
+                and st.st_uid==os.geteuid() and stat.S_IMODE(st.st_mode)==0o600
+                and 0<st.st_size<=limit,'Unsafe VPN attempt evidence: '+name)
+        present.add(name)
+    if not present:return set()
+    state=attempt_state(root)
+    controller=Controller(root)
+    policy=controller.policy()
+    provider=None
+    scope=None
+    for event in state['events']:
+        if event['kind']=='attempt':scope=event['cancellation_sha256'];continue
+        receipt=event['receipt'];validate_unused_cancellation(receipt)
+        require(receipt['binding']==controller.vpn_provider_binding(scope),
+                'VPN cancellation history changes original target/formation')
+        if provider is None:
+            provider_path=controller.direct(controller.control/'authorization/inputs/vpn-provider.json',True,16384)
+            provider=read(provider_path,16384)
+            require(digest(provider_path)==policy.get('authorization_files',{}).get('vpn-provider.json'),
+                    'VPN cancellation provider lacks native approval')
+        require(receipt['provider_sha256']==hashlib.sha256(canonical(provider)).hexdigest()
+                and receipt['account_id']==provider.get('account_id')
+                and receipt['name']=='nn-'+hashlib.sha256(canonical(receipt['binding'])).hexdigest()[:60],
+                'VPN cancellation history provider attribution differs')
+    pending=root/'evidence/vpn-cancel-unused-intent.json'
+    if pending.relative_to(root).as_posix() in present:
+        intent=read(pending,16384)
+        require(isinstance(intent,dict) and set(intent)=={'format','request_sha256','receipt_sha256','attempt_sha256','grant'}
+                and intent['format']=='nodenetwork-vpn-cancel-intent-v1'
+                and intent['attempt_sha256']==state['attempt_sha256'],'VPN cancellation pending intent differs')
+        request={'version':1,'operation':'vpn_cancel_unused','parameters':{'attempt_sha256':state['attempt_sha256']}}
+        artifact=controller.direct(controller.control/'authorization/inputs/vpn-unused-cancellation.json',True,16384)
+        receipt=read(artifact,16384);validate_unused_cancellation(receipt)
+        require(intent['request_sha256']==request_digest(request)
+                and intent['receipt_sha256']==public_hash(receipt)
+                and receipt['attempt_sha256']==state['attempt_sha256']
+                and receipt['binding']==controller.vpn_provider_binding(state['scope_sha256'])
+                and digest(artifact)==policy.get('authorization_files',{}).get('vpn-unused-cancellation.json'),
+                'VPN cancellation pending artifact differs')
+        provider_path=controller.direct(controller.control/'authorization/inputs/vpn-provider.json',True,16384)
+        provider=read(provider_path,16384)
+        require(digest(provider_path)==policy.get('authorization_files',{}).get('vpn-provider.json')
+                and receipt['provider_sha256']==hashlib.sha256(canonical(provider)).hexdigest()
+                and receipt['account_id']==provider.get('account_id')
+                and receipt['name']=='nn-'+hashlib.sha256(canonical(receipt['binding'])).hexdigest()[:60],
+                'VPN cancellation pending provider attribution differs')
+        grant=intent['grant']
+        require(isinstance(grant,dict) and set(grant)=={'root','operation','request_sha256','expires_at','authorization_sha256','authorization_sequence','binding_sha256'}
+                and grant['root']==str(root) and grant['operation']=='vpn_cancel_unused'
+                and grant['request_sha256']==intent['request_sha256'] and grant['binding_sha256']==digest(artifact)
+                and type(grant['expires_at']) is int and grant['expires_at']>0
+                and type(grant['authorization_sequence']) is int and grant['authorization_sequence']>0
+                and isinstance(grant['authorization_sha256'],str) and re.fullmatch('[a-f0-9]{64}',grant['authorization_sha256']),
+                'VPN cancellation pending original grant differs')
+    return present
+
+
+def approved_treasury_sends(root, directory, treasury, flags):
+    """Exact native-owned immutable admissions; UNKNOWN remains fenced."""
+    from synergy_linux import native
+    sends = directory/'sends'
+    if not (sends.exists() or sends.is_symlink()):
+        return set()
+
+    def checked(path, directory=False, maximum=None):
+        metadata = path.lstat()
+        require(metadata.st_uid == os.geteuid()
+                and stat.S_IMODE(metadata.st_mode) == (0o700 if directory else 0o600)
+                and (stat.S_ISDIR(metadata.st_mode) if directory else
+                     stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1)
+                and (maximum is None or 0 < metadata.st_size <= maximum),
+                'Treasury send ownership, type, size, permissions or links differ')
+
+    checked(sends, directory=True)
+    # Do not materialize or recursively walk an unbounded caller-owned tree.
+    with os.scandir(sends) as scan:
+        names = []
+        for entry in scan:
+            require(len(names) < TREASURY_SEND_LIMIT, 'Treasury send inventory bound exceeded')
+            names.append(entry.name)
+    paths = {sends.relative_to(root).as_posix()}
+    required = {'request.json', 'prepared.json', 'admission.json'}
+    bounds = {'request.json': 2*1024*1024, 'prepared.json': 128*1024,
+              'admission.json': 1024*1024, 'dispatch-intent.json': 4096}
+    for name in sorted(names):
+        require(re.fullmatch(r'[0-9]{20}', name) and int(name) < (1 << 64)-1,
+                'Treasury send nonce directory differs')
+        slot = sends/name
+        checked(slot, directory=True)
+        with os.scandir(slot) as scan:
+            children = set()
+            for child in scan:
+                require(child.name in bounds and child.name not in children,
+                        'Unexpected treasury send inventory')
+                children.add(child.name)
+        require(children in (required, required | {'dispatch-intent.json'}),
+                'Incomplete treasury send reservation; reconcile without regeneration')
+        for child in children:
+            checked(slot/child, maximum=bounds[child])
+        # Native review opens only no-follow bounded files, authenticates both
+        # signatures, custody/public binding and the exact nonce/immutable intent.
+        # Never invoke prepare/take: review cannot hand off an admission or retry.
+        result = json.loads(native([root/'bin/synergy-keytool', 'review-formation-treasury-send',
+                                    directory, str(int(name)), *flags], maximum_stdout=128*1024))
+        fields = {'schema', 'request_sha256', 'formation_sha256', 'genesis_sha256',
+                  'transaction_id', 'receipt_id', 'admission_sha256', 'sender', 'receiver',
+                  'amount_nwei', 'nonce', 'fee_nwei', 'state', 'automatic_retry'}
+        require(isinstance(result, dict) and set(result) == fields
+                and result['schema'] == 'nodenetwork-formation-treasury-send-v1'
+                and type(result['nonce']) is int and result['nonce'] == int(name)
+                and result['formation_sha256'] == treasury['formation_sha256']
+                and result['sender'] == treasury['address']
+                and result['state'] == ('dispatch_unknown' if 'dispatch-intent.json' in children else 'prepared')
+                and result['automatic_retry'] is False and result['fee_nwei'] == '840000'
+                and all(isinstance(result[key], str) and re.fullmatch('[0-9a-f]{64}', result[key])
+                        for key in ('request_sha256', 'genesis_sha256', 'transaction_id', 'admission_sha256'))
+                and isinstance(result['receipt_id'], str) and re.fullmatch('[0-9a-f]{128}', result['receipt_id']),
+                'Native treasury send verification or scope differs')
+        paths.add(slot.relative_to(root).as_posix())
+        paths.update((slot/child).relative_to(root).as_posix() for child in children)
+    return paths
+
+
+def _require_fresh_keys(root, treasury):
+    # treasury is the exact inventory already authenticated by the existing
+    # native custody verifier. No name-only directory exemption is sufficient.
+    keys=Path(root)/'keys';metadata=keys.lstat()
+    require(keys.resolve()==keys and stat.S_ISDIR(metadata.st_mode)
+            and metadata.st_uid==os.geteuid() and stat.S_IMODE(metadata.st_mode)==0o700,
+            'fresh stage requires a direct private keys directory')
+    require({path.relative_to(root).as_posix() for path in keys.rglob('*')}
+            =={name for name in treasury if name.startswith('keys/')},
+            'fresh stage contains keys outside exact approved treasury custody')
+
+
 def approved_treasury_members(root):
     """Only the complete APQE-verified ordinary treasury is managed custody."""
     from controller import Controller, parse_request, request_digest
@@ -363,11 +534,18 @@ def approved_treasury_members(root):
     root=Path(root);directory=root/'keys/formation-treasury';intent=root/'tmp/treasury-prepare-request.json'
     if not any(path.exists() or path.is_symlink() for path in (directory,intent)):return set()
     c=Controller(root);selection,flags=c.formation_context()
-    require_frozen_tree(directory)
+    metadata=directory.lstat()
+    require(directory.is_absolute() and directory.resolve()==directory and stat.S_ISDIR(metadata.st_mode)
+            and metadata.st_uid==os.geteuid() and stat.S_IMODE(metadata.st_mode)==0o700,
+            'Treasury custody directory must be direct, owned and private')
     files={'request.json','treasury-public.json','treasury.enc.json','unlock'}
-    children=list(directory.iterdir())
-    require({path.name for path in children}==files,'Incomplete or unexpected treasury custody inventory')
-    for path in (directory,*children):
+    children=set()
+    with os.scandir(directory) as scan:
+        for entry in scan:
+            require(entry.name in files | {'sends'},'Incomplete or unexpected treasury custody inventory')
+            children.add(entry.name)
+    require(children in (files, files | {'sends'}),'Incomplete or unexpected treasury custody inventory')
+    for path in (directory,*(directory/name for name in files)):
         metadata=path.lstat()
         require(metadata.st_uid==os.geteuid() and stat.S_IMODE(metadata.st_mode)==(0o700 if path==directory else 0o600)
                 and (path==directory or stat.S_ISREG(metadata.st_mode) and metadata.st_nlink==1),
@@ -382,7 +560,9 @@ def approved_treasury_members(root):
             and result.get('effective_at_unix')==prepared['parameters']['effective_at_unix']
             and all(result.get(key)==selection[key] for key in ('network_id','chain_id','formation_sha256')),
             'Native treasury custody verification or scope differs')
-    return {path.relative_to(root).as_posix() for path in (directory,intent,*children)}
+    sends=approved_treasury_sends(root,directory,result,flags)
+    require_frozen_tree(directory)
+    return {path.relative_to(root).as_posix() for path in (directory,intent,*(directory/name for name in files))} | sends
 
 
 def approved_network_formation_members(root):
@@ -540,7 +720,9 @@ def installed(root, expected_manifest=None, host=False, initialized=True, schema
     pending_upgrade=approved_upgrade_members(root,pending_upgrade_sha256,stage) if pending_upgrade_sha256 is not None else set()
     pending_upgrade |= approved_network_formation_members(root)
     pending_upgrade |= approved_network_transport_members(root)
-    pending_upgrade |= approved_treasury_members(root)
+    treasury_members=approved_treasury_members(root)
+    pending_upgrade |= treasury_members
+    approved_vpn_attempt_members(root)
     if (root/'hosted-machines').exists() or (root/'hosted-machines').is_symlink():
         from controller import Controller
         from guest_lifecycle import approved_inventory
@@ -588,7 +770,8 @@ def installed(root, expected_manifest=None, host=False, initialized=True, schema
                 and not (root/'config/start-authorized.json').exists(),
                 'uncommissioned stage contains selected network or startup authority')
         if stage=='fresh':
-            require(not (root/'config/node.json').exists() and not list((root/'keys').iterdir())
+            _require_fresh_keys(root,treasury_members)
+            require(not (root/'config/node.json').exists()
                     and not (root/'data/metadata/schema-version').exists(),
                     'fresh stage contains initialized state')
         else:
@@ -653,7 +836,7 @@ def installed(root, expected_manifest=None, host=False, initialized=True, schema
                 require(UNIT in external,'guard registration not found in effective inventory')
                 check_registration(pin)
                 external.remove(UNIT)
-        verify_external_services(root,external)
+        verify_external_services(root,without_owned_guest_registration(root,external))
         output['host_integrations_checked']=True
     return output
 

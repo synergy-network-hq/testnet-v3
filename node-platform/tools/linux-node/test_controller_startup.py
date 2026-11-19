@@ -9,6 +9,8 @@ import tempfile
 import unittest
 import controller
 import bootstrap
+import build_package
+import ssl
 
 class IsolatedControllerStartupTests(unittest.TestCase):
     def run_enrolled(self,root,raw=b'{"version":1,"operation":"target","parameters":{}}',linux=False):
@@ -59,15 +61,74 @@ except m.Refused as e:
         with tempfile.TemporaryDirectory() as temporary:
             stage=Path(temporary);(stage/'tools').mkdir()
             files={}
-            for name in (*bootstrap.ENGINE,'guest_lifecycle.py','unapproved.py'):
+            for name in (*bootstrap.ENGINE,*bootstrap.OPTIONAL_ENGINE,'unapproved.py'):
                 raw=('pinned-'+name).encode();(stage/'tools'/name).write_bytes(raw)
                 files['tools/'+name]=hashlib.sha256(raw).hexdigest()
             full=bootstrap.initial_engine_pins(stage,{'files':files})
             self.assertEqual(set(full),set(controller.ENGINE_MODULES))
             self.assertEqual(full['guest_lifecycle.py'],files['tools/guest_lifecycle.py'])
             self.assertNotIn('unapproved.py',full)
+            self.assertEqual(bootstrap.enrolled_engine({'engine_files':full}),tuple(sorted(controller.ENGINE_MODULES)))
+            del files['tools/vpn_authorization.py'];del files['tools/treasury_send.py']
+            legacy=bootstrap.initial_engine_pins(stage,{'files':files})
+            self.assertEqual(set(legacy),set((*bootstrap.ENGINE,'guest_lifecycle.py')))
+            self.assertEqual(set(bootstrap.enrolled_engine({'engine_files':legacy})),set(legacy))
             del files['tools/guest_lifecycle.py']
             self.assertEqual(set(bootstrap.initial_engine_pins(stage,{'files':files})),set(bootstrap.ENGINE))
+
+    def test_packaged_vpn_dependency_is_available_in_real_isolated_process_only(self):
+        # Copy exactly the builder's tool inventory, not the repository directory.
+        # A public CA from the OS is test input only, never an issued credential.
+        with tempfile.TemporaryDirectory() as temporary:
+            root=self.fixture(temporary);tools=root/'tools';tools.mkdir(mode=0o700)
+            source=Path(controller.__file__).parent
+            self.assertIn('vpn_authorization.py',build_package.TOOLS)
+            for name in build_package.TOOLS:
+                path=tools/name;path.write_bytes((source/name).read_bytes());path.chmod(0o600)
+            control=root/'tmp/controller';inputs=control/'authorization/inputs'
+            inputs.mkdir(parents=True,mode=0o700);inputs.parent.chmod(0o700)
+            ca=ssl.DER_cert_to_PEM_cert(ssl.create_default_context().get_ca_certs(binary_form=True)[0]).encode()
+            provider={'version':1,'profile':'nodenetwork-controlled-canary-v1',
+                      'ca_sha256':hashlib.sha256(ca).hexdigest(),
+                      'network_binding':{'network_id':'fresh-network','chain_id':99999,'formation_sha256':'c'*64}}
+            policy_path=control/'policy.json';policy=json.loads(policy_path.read_bytes())
+            policy.update(engineering_initial_authorization_sha256='a'*64,
+                          engineering_authorization={'sha256':'b'*64,'sequence':1,'expires_at':1},
+                          engineering_selection={'network_id':'fresh-network','chain_id':99999},
+                          validator_formation_sha256='c'*64,authorization_files={})
+            for name,raw in [('vpn-ca.pem',ca),('vpn-provider.json',json.dumps(provider).encode())]:
+                path=inputs/name;path.write_bytes(raw);path.chmod(0o600)
+                policy['authorization_files'][name]=hashlib.sha256(raw).hexdigest()
+            policy_path.write_text(json.dumps(policy))
+            program='''import sys
+from pathlib import Path
+root=Path(sys.argv[1]);source=Path(sys.argv[2])
+assert all(source!=Path(p) for p in sys.path)
+sys.path.insert(0,str(root/'tools'))
+from vpn import client_environment
+result=client_environment(root)
+import vpn_authorization
+assert Path(vpn_authorization.__file__)==root/'tools/vpn_authorization.py'
+assert result['SSL_CERT_FILE']==str(root/'tmp/controller/authorization/inputs/vpn-ca.pem')
+print('packaged VPN dependency verified')
+'''
+            command=[sys.executable,'-I','-B','-c',program,str(root),str(source)]
+            result=subprocess.run(command,cwd=temporary,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=15)
+            self.assertEqual(result.returncode,0,result.stderr.decode());self.assertEqual(result.stdout,b'packaged VPN dependency verified\n')
+            # Missing packaged dependency must not accidentally resolve through
+            # test pre-imports, CWD, PYTHONPATH or the source checkout.
+            (tools/'vpn_authorization.py').unlink()
+            result=subprocess.run(command,cwd=temporary,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=15)
+            self.assertNotEqual(result.returncode,0);self.assertIn(b'ModuleNotFoundError',result.stderr)
+            self.assertFalse(list(root.rglob('__pycache__')))
+
+    def test_new_vpn_engine_drift_refuses_before_dependency_import(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=self.fixture(temporary)
+            (root/'tmp/controller/tools/vpn_authorization.py').write_text("print('UNTRUSTED_VPN_DEPENDENCY')")
+            result=self.run_enrolled(root);reply=json.loads(result.stdout)
+            self.assertFalse(reply['ok']);self.assertIn('engine bytes differ',reply['error']['message'])
+            self.assertNotIn(b'UNTRUSTED_VPN_DEPENDENCY',result.stdout)
 
     def test_isolated_target_read_verifies_engine_before_tool_import(self):
         with tempfile.TemporaryDirectory() as temporary:

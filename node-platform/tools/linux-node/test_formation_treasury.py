@@ -1,6 +1,7 @@
 """Treasury application boundary; no keys, hosts or node processes."""
 import contextlib
 import json
+import os
 import time
 import unittest
 from unittest.mock import patch
@@ -62,3 +63,121 @@ class TreasuryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'inventory'):conformance.approved_treasury_members(self.root)
             (directory/'unknown').unlink();(directory/'unlock').unlink()
             with self.assertRaisesRegex(ValueError,'inventory'):conformance.approved_treasury_members(self.root)
+
+    def send_fixture(self):
+        """Fake public DTOs qualify inventory delegation, never cryptography."""
+        selection={'network_id':'new-network','chain_id':'99999','formation_sha256':'a'*64}
+        (self.root/'keys').mkdir(mode=0o700)
+        directory=self.root/'keys/formation-treasury';directory.mkdir(mode=0o700)
+        req=fixture.request('treasury_prepare',{'formation_sha256':'a'*64,'effective_at_unix':100})
+        self.save(self.root/'tmp/treasury-prepare-request.json',req)
+        for name in ('request.json','treasury-public.json','treasury.enc.json','unlock'):
+            self.save(directory/name,req if name=='request.json' else {})
+        treasury={'schema':'nodenetwork-formation-treasury-v1','pending':True,'possession_verified':True,
+                  'request_sha256':c.request_digest(req),'effective_at_unix':100,'address':'syna1public',**selection}
+        sends=directory/'sends';sends.mkdir(mode=0o700)
+        slot=sends/'00000000000000000000';slot.mkdir(mode=0o700)
+        for name in ('request.json','prepared.json','admission.json'):self.save(slot/name,{'test':True})
+        receipt={'schema':'nodenetwork-formation-treasury-send-v1','request_sha256':'b'*64,
+                 'formation_sha256':'a'*64,'genesis_sha256':'c'*64,'transaction_id':'d'*64,
+                 'receipt_id':'e'*128,'admission_sha256':'f'*64,'sender':'syna1public','receiver':'syna1receiver',
+                 'amount_nwei':'1000000','nonce':0,'fee_nwei':'840000','state':'prepared','automatic_retry':False}
+        calls=[]
+        def native(argv,**kwargs):
+            calls.append(argv[1:]);self.assertEqual(kwargs,{'maximum_stdout':128*1024})
+            if argv[1]=='review-formation-treasury':return json.dumps(treasury).encode()
+            self.assertEqual(argv[1:],['review-formation-treasury-send',directory,'0'])
+            return json.dumps(receipt).encode()
+        stack=contextlib.ExitStack();self.addCleanup(stack.close)
+        stack.enter_context(patch.object(c.Controller,'formation_context',return_value=(selection,[])))
+        stack.enter_context(patch('apqe_layout.require_frozen_tree'))
+        stack.enter_context(patch('synergy_linux.native',side_effect=native))
+        return directory,slot,receipt,calls
+
+    def test_send_restart_keeps_exact_prepared_and_unknown_fence(self):
+        _,slot,receipt,calls=self.send_fixture()
+        prepared=conformance.approved_treasury_members(self.root)
+        self.assertEqual(len(prepared),11)
+        self.assertEqual(prepared,conformance.approved_treasury_members(self.root))
+        self.save(slot/'dispatch-intent.json',{'test':'native-verified fence'});receipt['state']='dispatch_unknown'
+        unknown=conformance.approved_treasury_members(self.root)
+        self.assertEqual(unknown,prepared|{'keys/formation-treasury/sends/00000000000000000000/dispatch-intent.json'})
+        self.assertEqual(unknown,conformance.approved_treasury_members(self.root))
+        self.assertTrue((slot/'dispatch-intent.json').exists())
+        self.assertTrue(all(call[0].startswith('review-') for call in calls))
+
+    def test_send_partial_and_foreign_inventory_refused_before_native_send_review(self):
+        _,slot,_,calls=self.send_fixture()
+        for name in ('request.json','prepared.json','admission.json'):
+            raw=(slot/name).read_bytes();(slot/name).unlink()
+            with self.assertRaisesRegex(ValueError,'Incomplete treasury send reservation'):
+                conformance.approved_treasury_members(self.root)
+            self.save(slot/name,json.loads(raw))
+        self.save(slot/'foreign.json',{})
+        with self.assertRaisesRegex(ValueError,'Unexpected treasury send inventory'):
+            conformance.approved_treasury_members(self.root)
+        self.assertFalse(any(call[0]=='review-formation-treasury-send' for call in calls))
+
+    def test_send_links_modes_size_and_nonce_aliases_refused(self):
+        directory,slot,_,_=self.send_fixture()
+        original=slot/'admission.json';raw=original.read_bytes()
+        original.unlink();original.symlink_to(directory/'treasury.enc.json')
+        with self.assertRaisesRegex(ValueError,'links differ'):conformance.approved_treasury_members(self.root)
+        original.unlink();os.link(directory/'treasury.enc.json',original)
+        with self.assertRaisesRegex(ValueError,'links differ'):conformance.approved_treasury_members(self.root)
+        original.unlink();self.save(original,json.loads(raw));original.chmod(0o644)
+        with self.assertRaisesRegex(ValueError,'permissions or links'):conformance.approved_treasury_members(self.root)
+        original.chmod(0o600)
+        with original.open('r+b') as stream:stream.truncate(1024*1024+1)
+        with self.assertRaisesRegex(ValueError,'size'):conformance.approved_treasury_members(self.root)
+        self.save(original,json.loads(raw))
+        for name in ('0','18446744073709551615','0000000000000000000x'):
+            other=directory/'sends'/name;other.mkdir(mode=0o700)
+            with self.assertRaisesRegex(ValueError,'nonce directory'):conformance.approved_treasury_members(self.root)
+            other.rmdir()
+        moved=self.root/'tmp/saved-slot';slot.rename(moved);slot.symlink_to(moved,target_is_directory=True)
+        with self.assertRaisesRegex(ValueError,'links differ'):conformance.approved_treasury_members(self.root)
+        slot.unlink();moved.rename(slot)
+        sends=directory/'sends';moved=self.root/'tmp/saved-sends';sends.rename(moved);sends.symlink_to(moved,target_is_directory=True)
+        with self.assertRaisesRegex(ValueError,'links differ'):conformance.approved_treasury_members(self.root)
+
+    def test_send_native_scope_and_unknown_state_must_match(self):
+        _,slot,receipt,_=self.send_fixture()
+        for key,value in [('formation_sha256','b'*64),('sender','syna1foreign'),('nonce',1),('nonce',False),
+                          ('request_sha256','wrong'),('automatic_retry',True),('state','dispatch_unknown'),
+                          ('admission',{}),('fee_nwei','0')]:
+            old=receipt.get(key);receipt[key]=value
+            with self.assertRaisesRegex(ValueError,'verification or scope'):conformance.approved_treasury_members(self.root)
+            if old is None:del receipt[key]
+            else:receipt[key]=old
+        self.save(slot/'dispatch-intent.json',{})
+        with self.assertRaisesRegex(ValueError,'verification or scope'):conformance.approved_treasury_members(self.root)
+
+    def test_send_native_tamper_failure_preserves_all_files(self):
+        _,slot,_,_=self.send_fixture()
+        before={p.name:p.read_bytes() for p in slot.iterdir()}
+        from synergy_linux import native as delegate
+        def rejected(argv,**kwargs):
+            if argv[1]=='review-formation-treasury-send':raise ValueError('Immutable treasury admission journal differs')
+            return delegate(argv,**kwargs)
+        with patch('synergy_linux.native',side_effect=rejected):
+            with self.assertRaisesRegex(ValueError,'journal differs'):conformance.approved_treasury_members(self.root)
+        self.assertEqual(before,{p.name:p.read_bytes() for p in slot.iterdir()})
+
+    def test_send_inventory_bound_fails_closed(self):
+        directory,_,_,calls=self.send_fixture()
+        (directory/'sends/00000000000000000001').mkdir(mode=0o700)
+        # A reduced diagnostic cap exercises the identical pre-review bound.
+        # Exhaustion is not a consensus quota and never retires durable records.
+        with patch.object(conformance,'TREASURY_SEND_LIMIT',1):
+            with self.assertRaisesRegex(ValueError,'inventory bound'):conformance.approved_treasury_members(self.root)
+        self.assertFalse(any(call[0]=='review-formation-treasury-send' for call in calls))
+
+
+    def test_send_treasury_root_symlink_refused_before_inventory_or_native(self):
+        directory,_,_,calls=self.send_fixture()
+        moved=self.root/'tmp/foreign-treasury';directory.rename(moved)
+        directory.symlink_to(moved,target_is_directory=True)
+        with self.assertRaisesRegex(ValueError,'directory must be direct'):
+            conformance.approved_treasury_members(self.root)
+        self.assertEqual(calls,[])

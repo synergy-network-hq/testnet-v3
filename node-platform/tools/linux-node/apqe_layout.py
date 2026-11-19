@@ -182,7 +182,9 @@ def assemble_formation_stage(root, stage, pins, *, public=None, readiness_sha256
         policy=json.loads(contents['config/start-authorized.json'][0])
         require(policy.get('all_validators_ready') is False and policy.get('all_pairs_vpn_verified') is False,
                 'Readiness must be derived from the immutable unapproved draft')
-        policy.update(all_validators_ready=True,all_pairs_vpn_verified=True,commissioning_readiness_sha256=readiness_sha256)
+        artifact_path=root/'tmp/controller/authorization/inputs'/READINESS_FILE
+        require(digest(artifact_path)==readiness_sha256,'Approved readiness artifact changed')
+        policy=readiness_startup_policy(policy,read(artifact_path),readiness_sha256)
         data=json.dumps(policy,sort_keys=True,separators=(',',':')).encode()
         contents['config/start-authorized.json']=(data,hashlib.sha256(data).hexdigest())
     config=json.loads(contents['config/node.json'][0])
@@ -217,12 +219,91 @@ OBSERVATION_FIELDS={'schema','observed_at_unix','target','manifest_sha256','prov
     'public_file_sha256','commissioning_file_sha256','validator_addresses','registry_peer_ips','vpn_binding','peers'}
 
 
+def signed_voting_weights(authority,roster):
+    records=authority['validators']
+    require(isinstance(records,list) and len(records)<=4096,'Bounded signed authority roster required')
+    weights={}
+    for entry in records:
+        record=entry['record']
+        if record['status']!='active':continue
+        address=record['validator_id'];weight=record['frozen_voting_weight']
+        require(isinstance(address,str) and address not in weights and type(weight) is int and 0<weight<2**128,
+                'Distinct positive signed frozen voting weights required')
+        weights[address]=str(weight)
+    require(set(weights)==set(roster) and len(roster)==len(set(roster)),'Signed authority and transport roster differ')
+    return {address:weights[address] for address in sorted(weights)}
+
+
+def require_online_quorum(roster,weights,online):
+    """Operational gate mirrors the runtime's strict checked-u128 dual quorum."""
+    require(isinstance(roster,list) and roster==sorted(set(roster)) and roster
+            and isinstance(weights,dict) and set(weights)==set(roster)
+            and isinstance(online,list) and online==sorted(set(online)) and set(online)<=set(roster),
+            'Exact distinct signed roster and online subset required')
+    total=selected=0
+    for address in roster:
+        raw=weights[address]
+        require(isinstance(raw,str) and re.fullmatch('[1-9][0-9]{0,38}',raw) and int(raw)<2**128,
+                'Canonical positive frozen voting weight required')
+        weight=int(raw);total+=weight
+        if address in online:selected+=weight
+        require(total<2**128 and selected<2**128,'Frozen voting weight sum overflow')
+    require(len(online)*3>len(roster)*2,'Online subset fails strict signed count quorum')
+    require(selected*3<2**128 and total*2<2**128 and selected*3>total*2,
+            'Online subset fails strict signed frozen-weight quorum')
+    return True
+
+
+def readiness_startup_policy(draft,artifact,pin):
+    require(draft.get('all_validators_ready') is False and draft.get('all_pairs_vpn_verified') is False,
+            'Readiness must derive from the immutable unapproved draft')
+    result={**draft,'all_validators_ready':True,'all_pairs_vpn_verified':True,'commissioning_readiness_sha256':pin}
+    if artifact.get('schema')=='nodenetwork-commissioning-readiness-v2':
+        require(set(artifact)=={'schema','online_addresses','excluded_addresses','observations'}
+                and isinstance(artifact['observations'],list) and artifact['observations'],'Exact subset readiness artifact required')
+        first=artifact['observations'][0];roster=first['validator_addresses'];online=artifact['online_addresses']
+        require_online_quorum(roster,first['frozen_voting_weights'],online)
+        require(set(draft['validator_addresses'])==set(roster) and artifact['excluded_addresses']==sorted(set(roster)-set(online)),
+                'Startup subset or unobserved roster differs')
+        result.update(all_validators_ready=online==roster,all_pairs_vpn_verified=online==roster,
+                      quorum_validators_ready=True,online_pairs_vpn_verified=True,
+                      online_validator_addresses=online,unobserved_validator_addresses=artifact['excluded_addresses'])
+    else:require(artifact.get('schema')=='nodenetwork-commissioning-readiness-v1','Unknown readiness schema')
+    return result
+
+
+def startup_readiness_authorized(root,policy,address=None,authority_source=None):
+    """Bind subset startup flags to retained host-approved artifact and signed weights."""
+    if 'quorum_validators_ready' not in policy:
+        return policy.get('all_validators_ready',policy.get('all_five_ready')) is True and policy.get('all_pairs_vpn_verified') is True
+    from controller import Controller
+    owner=Controller(root);approved=owner.policy()
+    pin=approved.get('authorization_files',{}).get(READINESS_FILE)
+    raw=owner.direct(owner.control/'authorization/inputs'/READINESS_FILE,True,128*1024).read_bytes()
+    require(isinstance(pin,str) and hashlib.sha256(raw).hexdigest()==pin==policy.get('commissioning_readiness_sha256'),
+            'Startup readiness provenance differs')
+    artifact=json.loads(raw)
+    draft_raw=owner.direct(owner.control/'authorization/inputs/commissioning/config/start-authorized.json',True,4*1024*1024).read_bytes()
+    require(hashlib.sha256(draft_raw).hexdigest()==approved['validator_commissioning_files']['config/start-authorized.json'],
+            'Original startup approval differs')
+    require(policy==readiness_startup_policy(json.loads(draft_raw),artifact,pin),'Derived startup readiness policy differs')
+    authority=read(Path(authority_source or root)/'network/authority.json')['payload']
+    weights=signed_voting_weights(authority,policy['validator_addresses'])
+    require(weights==artifact['observations'][0]['frozen_voting_weights'],'Startup signed frozen weights differ')
+    require_online_quorum(sorted(weights),weights,policy['online_validator_addresses'])
+    require(address is None or address in policy['online_validator_addresses'],'Unobserved validator cannot start')
+    return policy['quorum_validators_ready'] is True and policy['online_pairs_vpn_verified'] is True
+
+
+OBSERVATION_FIELDS_V2=OBSERVATION_FIELDS|{'online_addresses','frozen_voting_weights','observation_kind'}
+
+
 def validate_commissioning_readiness(value,local,now):
     """Native-approved observations are operational evidence, never chain authority.
 
     The controller authenticates the fixed artifact against its host policy first.
-    This validation additionally requires exact current local facts, five unique
-    target/custody/VPN identities and every directed carrier key/IP/probe binding.
+    This validation requires exact current local facts and unique target/custody/
+    VPN identities for the declared signed-quorum subset and all its directed probes.
     """
     import base64
     import ipaddress
@@ -230,17 +311,25 @@ def validate_commissioning_readiness(value,local,now):
     def key(v):
         try:return isinstance(v,str) and len(base64.b64decode(v,validate=True))==32 and base64.b64encode(base64.b64decode(v)).decode()==v
         except (ValueError,TypeError):return False
-    require(isinstance(value,dict) and set(value)=={'schema','observations'}
-            and value['schema']=='nodenetwork-commissioning-readiness-v1'
-            and isinstance(value['observations'],list) and len(value['observations'])==5,'Exact five-controller readiness required')
+    subset=isinstance(value,dict) and value.get('schema')=='nodenetwork-commissioning-readiness-v2'
+    require(isinstance(value,dict) and set(value)==({'schema','observations','online_addresses','excluded_addresses'} if subset else {'schema','observations'})
+            and value['schema'] in ('nodenetwork-commissioning-readiness-v1','nodenetwork-commissioning-readiness-v2')
+            and isinstance(value['observations'],list),'Exact authenticated controller readiness required')
     observations=value['observations'];roster=local['validator_addresses']
+    online=value['online_addresses'] if subset else roster
+    if subset:
+        require_online_quorum(roster,local['frozen_voting_weights'],online)
+        require(local['online_addresses']==online and local['observation_kind']=='prestart_vpn'
+                and value['excluded_addresses']==sorted(set(roster)-set(online)),'Online subset or unobserved members differ')
     require(isinstance(roster,list) and len(roster)==5 and roster==sorted(set(roster)), 'Exact five-member signed roster required')
-    require([o.get('address') for o in observations if isinstance(o,dict)]==roster,'Readiness roster/order differs')
+    require([o.get('address') for o in observations if isinstance(o,dict)]==online and local['address'] in online,'Readiness roster/order differs')
     target_ids=set();vpn_ids=set();vpn_keys=set();vpn_ips=set();enrollments=set()
     shared=('manifest_sha256','provider_report_sha256','vpn_provider_sha256','network_id','chain_id',
             'formation_sha256','public_file_sha256','validator_addresses','registry_peer_ips')
+    if subset:shared+=('online_addresses','frozen_voting_weights','observation_kind')
+    fields=OBSERVATION_FIELDS_V2 if subset else OBSERVATION_FIELDS
     for observation in observations:
-        require(set(observation)==OBSERVATION_FIELDS and observation['schema']=='nodenetwork-commissioning-observation-v1', 'Unexpected observation fields')
+        require(set(observation)==fields and observation['schema']==('nodenetwork-commissioning-observation-v2' if subset else 'nodenetwork-commissioning-observation-v1'), 'Unexpected observation fields')
         require(type(observation['observed_at_unix']) is int and -30<=now-observation['observed_at_unix']<=300,
                 'Commissioning observations expired or clock differs')
         require(all(observation[k]==local[k] for k in shared),'Commissioning network, roster, provider or master differs')
@@ -282,9 +371,9 @@ def validate_commissioning_readiness(value,local,now):
                 and own['ip']==observation['registry_peer_ips'][observation['address']], 'VPN identity/provider differs from signed endpoint')
         require(own['peer_id'] not in vpn_ids and own['wireguard_public_key'] not in vpn_keys and own['ip'] not in vpn_ips,'Duplicate VPN identity')
         vpn_ids.add(own['peer_id']);vpn_keys.add(own['wireguard_public_key']);vpn_ips.add(own['ip'])
-        require(isinstance(observation['peers'],dict) and set(observation['peers'])==set(roster)-{observation['address']},'All directed peer observations required')
+        require(isinstance(observation['peers'],dict) and set(observation['peers'])==set(online)-{observation['address']},'All directed peer observations required')
         if observation['address']==local['address']:
-            require(all(observation[k]==local[k] for k in OBSERVATION_FIELDS-{'observed_at_unix'}),'Local readiness facts changed after native review')
+            require(all(observation[k]==local[k] for k in fields-{'observed_at_unix'}),'Local readiness facts changed after native review')
     for observation in observations:
         for other in observations:
             if other['address']==observation['address']:continue

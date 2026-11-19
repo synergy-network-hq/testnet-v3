@@ -39,6 +39,10 @@ class RefusalTests(unittest.TestCase):
             files={p.relative_to(stage).as_posix():hashlib.sha256(p.read_bytes()).hexdigest()
                    for p in stage.rglob('*') if p.is_file()}
             node.write_new(stage/'package.json', {'format':node.MARKER,'architecture':'x86_64','files':files})
+            from test_controller_startup import IsolatedControllerStartupTests
+            IsolatedControllerStartupTests().fixture(temp)
+            control=root/'tmp/controller'
+            before_modes={p.relative_to(control):p.stat().st_mode&0o777 for p in control.rglob('*')}
             pin=node.digest(stage/'package.json')
             with patch.object(node,'_require_install_operator'), patch.object(lifecycle,'_mountinfo_text',return_value=''), patch.object(node,'native') as operation:
                 with self.assertRaisesRegex(ValueError,'digest'):
@@ -52,6 +56,7 @@ class RefusalTests(unittest.TestCase):
                 result=node.install(stage,root,'validator','offline-fixture',99999,'fixture',
                                     staged_master_sha256=pin)
                 operation.assert_called_once_with([root/'bin/synergy-node','version'])
+            self.assertEqual(before_modes,{p.relative_to(control):p.stat().st_mode&0o777 for p in control.rglob('*')})
             self.assertEqual(result['package_sha256'],pin)
             self.assertFalse(result['consensus_started'])
             self.assertFalse(stage.exists())

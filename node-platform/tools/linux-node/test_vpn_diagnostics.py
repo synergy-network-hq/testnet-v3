@@ -59,6 +59,17 @@ class VpnDiagnosticsTests(unittest.TestCase):
         self.assertNotIn('NEVER-RETURN', json.dumps(result))
         self.assertEqual(len(self.commands), 3)
 
+    def test_live_sample_is_shared_once_before_any_protocol_probes(self):
+        samples=[]
+        def observe(value):
+            self.assertEqual(len(self.commands),1)
+            samples.append(value)
+        with patch.object(vpn,'native',side_effect=self.native):
+            result=vpn.diagnostics(self.root,self.enrollment,observe_live=observe)
+        self.assertEqual(samples,[self.public])
+        self.assertEqual(sum(command[0]==str(self.root/'tools/netbird-client') for command in self.commands),1)
+        self.assertNotIn('NEVER-RETURN',json.dumps(result))
+
     def test_peer_failure_is_categorical_and_never_relays_command_text(self):
         def fail(argv, **options):
             if argv[0] == 'ping': raise ValueError('secret-key private-command-output')
@@ -84,6 +95,28 @@ class VpnDiagnosticsTests(unittest.TestCase):
             native.assert_not_called()
         self.assertNotIn('secret-detail', json.dumps(result))
 
+    def test_launcher_log_is_bounded_categorical_and_not_hidden_by_daemon_log(self):
+        logs=self.root/'logs';logs.mkdir()
+        (logs/'netbird.log').write_bytes(b'X'*40000+b'connection refused secret-one')
+        service=logs/'netbird-service.log'
+        service.write_bytes(b'X'*40000+b'ModuleNotFoundError: secret-two')
+        real=os.fstat
+        def owned(fd):
+            value=real(fd)
+            return SimpleNamespace(st_mode=value.st_mode,st_nlink=value.st_nlink,st_uid=0,
+                                   st_size=value.st_size,st_mtime_ns=value.st_mtime_ns)
+        with patch.object(vpn.os,'fstat',side_effect=owned):result=vpn.diagnostic_log(self.root)
+        self.assertEqual(result['sampled_bytes'],65536)
+        self.assertEqual(result['codes'],['connection_refused','launcher_import_failure'])
+        self.assertNotIn('secret-',json.dumps(result))
+        (logs/'netbird.log').unlink()
+        with patch.object(vpn.os,'fstat',side_effect=owned):result=vpn.diagnostic_log(self.root)
+        self.assertTrue(result['available']);self.assertEqual(result['codes'],['launcher_import_failure'])
+        (logs/'netbird.log').write_bytes(b'connection refused')
+        service.unlink();service.symlink_to(self.provider)
+        with patch.object(vpn.os,'fstat',side_effect=owned):result=vpn.diagnostic_log(self.root)
+        self.assertEqual(result['codes'],['connection_refused'])
+
     def test_log_is_tail_bounded_public_codes_only_and_rejects_links(self):
         directory = self.root/'logs'; directory.mkdir()
         path = directory/'netbird.log'
@@ -95,7 +128,7 @@ class VpnDiagnosticsTests(unittest.TestCase):
                                    st_size=actual.st_size, st_mtime_ns=actual.st_mtime_ns)
         with patch.object(vpn.os, 'fstat', side_effect=owned):
             result = vpn.diagnostic_log(self.root)
-        self.assertTrue(result['available']); self.assertEqual(result['sampled_bytes'], 65536)
+        self.assertTrue(result['available']); self.assertEqual(result['sampled_bytes'], 32768)
         self.assertEqual(result['codes'], ['tls_untrusted'])
         self.assertNotIn('secret-api-token', json.dumps(result))
         path.unlink(); path.symlink_to(self.provider)
@@ -118,11 +151,13 @@ class VpnDiagnosticsTests(unittest.TestCase):
         import lifecycle
         with patch.object(lifecycle, '_lifecycle_lock', return_value=contextlib.nullcontext()) as lock, \
              patch.object(lifecycle, '_sealed_receipt') as sealed, \
-             patch.object(vpn, 'diagnostics', return_value={'public': True}) as diagnosis:
-            self.assertEqual(actual.vpn_diagnostics(), {'public': True})
+             patch.object(vpn, 'diagnostics', return_value={'public': True}) as diagnosis, \
+             patch.object(actual, 'vpn_roster_diagnostics', return_value={'available': False}):
+            self.assertEqual(actual.vpn_diagnostics(), {'public': True,'roster':{'available':False}})
             lock.assert_called_once_with(self.root)
             sealed.assert_called_once_with(self.root)
-            diagnosis.assert_called_once_with(self.root, self.enrollment)
+            self.assertEqual(diagnosis.call_args.args,(self.root,self.enrollment))
+            self.assertTrue(callable(diagnosis.call_args.kwargs['observe_live']))
         self.assertIn('vpn_diagnostics', controller.READS)
         self.assertNotIn('vpn_diagnostics', controller.MUTATIONS)
 

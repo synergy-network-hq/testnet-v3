@@ -16,6 +16,91 @@ from test_consensus_schema import native_schema
 SOURCE=Path(__file__).resolve().parents[2]
 
 class ConformanceTests(unittest.TestCase):
+    def test_upgrade_preflight_runs_guest_and_full_conformance_before_any_grant(self):
+        import controller,lifecycle
+        root=Path('/opt/synergy');owner=controller.Controller(root)
+        package=root/'tmp/update-master';parameters={'release_id':'synergy-linux-fixture','manifest_sha256':'a'*64}
+        req={'version':1,'operation':'upgrade_preflight','parameters':parameters}
+        with patch.object(controller.platform,'system',return_value='Linux'),patch.object(controller.platform,'machine',return_value='x86_64'), \
+             patch.object(owner,'approved_package',return_value=(package,{'release_id':parameters['release_id']},{})), \
+             patch('synergy_linux.safe_root',return_value=root),patch.object(lifecycle,'_sealed_receipt'), \
+             patch.object(lifecycle,'_integration_plan',return_value={}),patch.object(lifecycle,'_installation_stage',return_value='fresh'), \
+             patch.object(owner,'public_json',return_value={'schema':'fixture'}),patch.object(owner,'authorize') as authorize, \
+             patch('guest_lifecycle.require_upgrade_compatible') as guest,patch.object(c,'installed') as installed:
+            for failure in ('guest','conformance',None):
+                guest.side_effect=ValueError('guest refusal') if failure=='guest' else None
+                installed.side_effect=ValueError('conformance refusal') if failure=='conformance' else None
+                if failure:
+                    with self.subTest(failure=failure),self.assertRaises(ValueError):owner.dispatch(req)
+                else:
+                    self.assertTrue(owner.dispatch(req)['packageVerified'])
+            authorize.assert_not_called()
+            installed.assert_called_with(root,host=True,stage='fresh',schema={'schema':'fixture'},
+                                         allow_legacy_integrations=True,pending_upgrade_sha256='a'*64)
+
+    def vpn_attempt_fixture(self,temporary,pending=False):
+        import hashlib
+        import controller
+        import vpn
+        from test_controller_startup import IsolatedControllerStartupTests
+        root=IsolatedControllerStartupTests().fixture(temporary);(root/'evidence').mkdir(mode=0o700)
+        control=root/'tmp/controller';inputs=control/'authorization/inputs';inputs.mkdir(parents=True,mode=0o700);inputs.parent.chmod(0o700)
+        policy=json.loads((control/'policy.json').read_bytes())
+        policy.update(engineering_selection={'manifest_sha256':'a'*64,'network_id':'fixture-network','chain_id':99999},
+                      engineering_target={'kind':'remote','host':'fixture.invalid','port':22,'root':str(root)},validator_formation_sha256='b'*64,authorization_files={})
+        original=root/'evidence/vpn-enrollment-attempt.json';original.write_text('{"format":"nodenetwork-vpn-attempt-v1"}');original.chmod(0o600)
+        provider={'account_id':'account'};provider_path=inputs/'vpn-provider.json';provider_path.write_text(json.dumps(provider));provider_path.chmod(0o600)
+        policy['authorization_files']['vpn-provider.json']=digest(provider_path)
+        (control/'policy.json').write_text(json.dumps(policy))
+        owner=controller.Controller(root);binding=owner.vpn_provider_binding()
+        receipt={'format':'nodenetwork-vpn-unused-cancellation-v1','binding':binding,'provider_sha256':hashlib.sha256(controller.canonical(provider)).hexdigest(),
+                 'account_id':'account','setup_key_id':'key','name':'nn-'+hashlib.sha256(controller.canonical(binding)).hexdigest()[:60],
+                 'intent_sha256':'c'*64,'attempt_sha256':digest(original),'unused_verified':True,'setup_key_absent':True,'peer_absence_verified':True}
+        if pending:
+            artifact=inputs/'vpn-unused-cancellation.json';artifact.write_bytes(controller.canonical(receipt));artifact.chmod(0o600)
+            policy['authorization_files']['vpn-unused-cancellation.json']=digest(artifact);(control/'policy.json').write_text(json.dumps(policy))
+            request={'version':1,'operation':'vpn_cancel_unused','parameters':{'attempt_sha256':digest(original)}};key=controller.request_digest(request)
+            grant={'root':str(root),'operation':'vpn_cancel_unused','request_sha256':key,'binding_sha256':digest(artifact),
+                   'authorization_sha256':'d'*64,'authorization_sequence':3,'expires_at':1}
+            intent={'format':'nodenetwork-vpn-cancel-intent-v1','request_sha256':key,'receipt_sha256':vpn.public_hash(receipt),'attempt_sha256':digest(original),'grant':grant}
+            path=root/'evidence/vpn-cancel-unused-intent.json';path.write_text(json.dumps(intent));path.chmod(0o600)
+        else:vpn.append_attempt_event(root,{'kind':'cancel','receipt':receipt})
+        return root,receipt
+
+    def test_exact_cancel_history_is_accepted_and_wrong_original_scope_refused(self):
+        import vpn
+        with tempfile.TemporaryDirectory() as temporary:
+            root,receipt=self.vpn_attempt_fixture(temporary)
+            self.assertIn(vpn.ATTEMPTS,c.approved_vpn_attempt_members(root))
+            self.assertTrue(any(rule.fullmatch(vpn.ATTEMPTS) for rule in c.RULES))
+            for field,value in [('attempt_sha256','f'*64),('binding',{}),('provider_sha256','f'*64),('unused_verified',False)]:
+                changed=copy.deepcopy(receipt);changed[field]=value
+                path=root/vpn.ATTEMPTS;path.write_text(json.dumps({'format':'nodenetwork-vpn-attempts-v1','events':[{'kind':'cancel','receipt':changed}]}))
+                with self.subTest(field=field),self.assertRaises(ValueError):c.approved_vpn_attempt_members(root)
+
+    def test_pending_cancellation_preserves_expired_audited_grant_but_rejects_wrong_binding(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root,_=self.vpn_attempt_fixture(temporary,pending=True)
+            name='evidence/vpn-cancel-unused-intent.json';self.assertIn(name,c.approved_vpn_attempt_members(root))
+            path=root/name;original=json.loads(path.read_bytes())
+            for key in ('request_sha256','binding_sha256','root','operation'):
+                changed=copy.deepcopy(original);changed['grant'][key]='wrong';path.write_text(json.dumps(changed))
+                with self.subTest(key=key),self.assertRaises(ValueError):c.approved_vpn_attempt_members(root)
+            path.write_text(json.dumps(original));path.chmod(0o644)
+            with self.assertRaisesRegex(ValueError,'Unsafe VPN attempt evidence'):c.approved_vpn_attempt_members(root)
+
+    def test_cancel_history_link_and_capacity_do_not_expand_runtime_allowlist(self):
+        import vpn
+        with tempfile.TemporaryDirectory() as temporary:
+            root,receipt=self.vpn_attempt_fixture(temporary);path=root/vpn.ATTEMPTS
+            original=path.read_bytes();path.unlink();path.symlink_to(root/'evidence/vpn-enrollment-attempt.json')
+            with self.assertRaisesRegex(ValueError,'Unsafe VPN attempt evidence'):c.approved_vpn_attempt_members(root)
+            path.unlink();path.write_bytes(original);path.chmod(0o600)
+            path.write_text(json.dumps({'format':'nodenetwork-vpn-attempts-v1','events':[{'kind':'cancel','receipt':receipt}]*129}))
+            with self.assertRaises(ValueError):c.approved_vpn_attempt_members(root)
+            for name in ('evidence/vpn-attempts-2.json','evidence/vpn-cancel-unused-intent-extra.json'):
+                self.assertFalse(any(rule.fullmatch(name) for rule in c.RULES))
+
     def test_epoch_scoped_processing_store_is_exactly_inventoried(self):
         import re
         with tempfile.TemporaryDirectory() as tmp:

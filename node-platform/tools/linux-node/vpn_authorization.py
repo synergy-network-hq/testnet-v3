@@ -236,7 +236,8 @@ class Authorization:
     def prepare(self, binding):
         network_scope(self.policy, binding)
         fields = {'target_sha256', 'manifest_sha256', 'formation_sha256', 'network_id', 'chain_id'}
-        require(isinstance(binding, dict) and set(binding) == fields
+        require(isinstance(binding, dict) and set(binding) in (fields,fields|{'attempt_sha256'})
+                and ('attempt_sha256' not in binding or pin(binding['attempt_sha256']))
                 and all(pin(binding[f]) for f in fields if f.endswith('sha256'))
                 and isinstance(binding['network_id'], str)
                 and re.fullmatch('[a-z0-9][a-z0-9_-]{1,127}', binding['network_id'])
@@ -310,6 +311,82 @@ class Authorization:
         else:
             self._write('bound.json', result)
         return result
+
+    def _cancel_write(self, name, value):
+        # Cancellation only: a process can die while writing without leaving a
+        # malformed durable proof or permitting a second DELETE on restart.
+        require(name in ('cancel-unused-intent.json','cancelled-unused.json'),'Unknown cancellation receipt')
+        path=self.directory/name;stage=self.directory/('.'+name+'.stage')
+        if path.exists():
+            require(self._read(name)==value,'Cancellation receipt differs')
+            return
+        if stage.exists() or stage.is_symlink():
+            meta=stage.lstat()
+            require(stat.S_ISREG(meta.st_mode) and meta.st_uid==os.geteuid() and meta.st_nlink==1
+                    and not meta.st_mode&0o077,'Unsafe interrupted cancellation staging')
+            stage.unlink()
+        raw=encode(value)
+        require(len(raw)<=LIMIT,'Cancellation receipt exceeds bound')
+        fd=os.open(stage,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        try:
+            with os.fdopen(fd,'wb') as output:output.write(raw);output.flush();os.fsync(output.fileno())
+            os.replace(stage,path)
+            fd=os.open(self.directory,os.O_RDONLY|os.O_DIRECTORY)
+            try:os.fsync(fd)
+            finally:os.close(fd)
+        finally:
+            if stage.exists():stage.unlink()
+
+    def cancel_unused(self, local):
+        """One fenced DELETE only after authoritative zero-use and peer absence."""
+        import fcntl
+        fd=os.open(self.directory,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:
+            fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            return self._cancel_unused(local)
+        finally:os.close(fd)
+
+    def _cancel_unused(self, local):
+        self._account('revoke')
+        intent=self._read('intent.json');issued=self._read('issued.json')
+        require(intent.get('provider_sha256')==hashlib.sha256(encode(self.policy)).hexdigest()
+                and intent.get('account_id')==self.policy['account_id']
+                and issued.get('binding')==intent['binding'] and issued.get('name')==intent['name']
+                and identifier(issued.get('setup_key_id')),'Original issued VPN intent differs')
+        require(isinstance(local,dict) and local.get('schema')=='nodenetwork-vpn-unused-preflight-v1'
+                and local.get('quiescent') is True and pin(local.get('attempt_sha256'))
+                and local.get('binding')==intent['binding'],'Exact quiescent original target required')
+        proof={'format':'nodenetwork-vpn-unused-cancellation-v1','binding':intent['binding'],
+               'provider_sha256':intent['provider_sha256'],'account_id':intent['account_id'],
+               'setup_key_id':issued['setup_key_id'],'name':intent['name'],
+               'intent_sha256':hashlib.sha256(encode(intent)).hexdigest(),
+               'attempt_sha256':local['attempt_sha256'],'unused_verified':True,
+               'setup_key_absent':True,'peer_absence_verified':True}
+        def no_peer():
+            require(not any(peer.get('name')==intent['name'] for peer in self._list('peers')),
+                    'Matching peer prevents unused-attempt cancellation')
+        no_peer()
+        pending=self.directory/'cancel-unused-intent.json';terminal=self.directory/'cancelled-unused.json'
+        if terminal.exists():
+            require(self._read('cancelled-unused.json')==proof and pending.exists()
+                    and self._read('cancel-unused-intent.json')==proof,'Prior unused cancellation differs')
+        if pending.exists():
+            require(self._read('cancel-unused-intent.json')==proof,'Uncertain unused cancellation scope differs')
+        else:
+            require(not (self.directory/'revoke-intent.json').exists(),'Prior unqualified revocation cannot prove unused state')
+            keys=[key for key in self._list('setup-keys') if key.get('name')==intent['name'] or str(key.get('id'))==issued['setup_key_id']]
+            require(len(keys)==1 and str(keys[0]['id'])==issued['setup_key_id'],'Exact original unused key required')
+            self._key(keys[0],intent,consumed=False)
+            self._cancel_write('cancel-unused-intent.json',proof)
+            code,_=self.request('DELETE','/api/setup-keys/'+issued['setup_key_id'])
+            require(code in (200,204,404),'Unused key deletion uncertain; reconcile absence without repeating DELETE')
+        code,_=self.request('GET','/api/setup-keys/'+issued['setup_key_id'])
+        require(code==404,'Original unused key absence not verified')
+        require(not any(key.get('name')==intent['name'] or str(key['id'])==issued['setup_key_id']
+                        for key in self._list('setup-keys')),'Original unused key remains')
+        no_peer()
+        if not terminal.exists():self._cancel_write('cancelled-unused.json',proof)
+        return proof
 
     def revoke_setup_key(self):
         """Even a lost create response can be revoked by its exact durable name."""

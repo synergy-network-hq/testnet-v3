@@ -79,8 +79,11 @@ def valid_id(value):
 
 def validate_parameters(operation, parameters):
     require(isinstance(parameters, dict) and set(parameters) ==
-            (CREATE if operation == 'guest_create' else {'guest_id'}), 'Exact guest parameters required')
+            (CREATE if operation == 'guest_create' else {'guest_id','resume_sequence','create_request_sha256'} if operation=='guest_resume' else {'guest_id'}), 'Exact guest parameters required')
     require(valid_id(parameters['guest_id']), 'Invalid managed guest identifier')
+    if operation=='guest_resume':
+        require(isinstance(parameters['create_request_sha256'],str) and re.fullmatch('[a-f0-9]{64}',parameters['create_request_sha256']),'Exact guest creation binding required')
+        require(type(parameters['resume_sequence']) is int and 1<=parameters['resume_sequence']<=128, 'Bounded guest resume sequence required')
     if operation == 'guest_create':
         require(isinstance(parameters['image_sha256'], str)
                 and re.fullmatch('[a-f0-9]{64}', parameters['image_sha256']), 'Exact approved image pin required')
@@ -220,20 +223,22 @@ class GuestManager:
         return [str(self.root/'lib/guest-tools/bin'/LOADER),'--inhibit-cache','--library-path',
                 str(self.root/'lib/guest-tools/lib'),str(self.root/'lib/guest-tools/bin'/name)]
 
-    def argv(self):
+    def argv(self, runtime_version=2):
+        require(runtime_version in (1,2), 'Unsupported managed guest runtime')
         s = self.spec
-        return self.tool_argv('qemu-system-x86_64')+['-no-user-config', '-nodefaults',
+        diagnostics=[] if runtime_version==1 else ['-chardev','file,id=firmware,path='+str(self.directory/'qemu.log')+',append=on','-device','isa-debugcon,iobase=0x402,chardev=firmware']
+        return self.tool_argv('qemu-system-x86_64')+diagnostics+['-no-user-config', '-nodefaults',
                 '-L',str(self.root/'lib/guest-tools'),
                 '-bios', str(self.root/'lib/guest-tools/bios.bin'), '-machine', 'q35,accel=kvm', '-cpu', 'host', '-smp', str(s['cpu_count']), '-m', str(s['memory_mib']),
                 '-drive', 'file='+str(self.directory/'disk.qcow2')+',if=virtio,format=qcow2',
                 '-drive', 'file='+str(self.directory/'seed.iso')+',if=virtio,format=raw,readonly=on',
                 '-netdev', 'user,id=n0,ipv6=off,hostfwd=tcp:127.0.0.1:'+str(s['ssh_forward_port'])+'-:22',
-                '-device', 'virtio-net-pci,netdev=n0,romfile=', '-display', 'none', '-serial', 'none', '-monitor', 'none',
+                '-device', 'virtio-net-pci,netdev=n0,romfile=', '-display', 'none', '-serial', 'none' if runtime_version==1 else 'stdio', '-monitor', 'none',
                 '-sandbox', 'on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny']
 
-    def unit(self):
+    def unit(self, runtime_version=2):
         # All arguments are fixed vocabulary, validated integer or root-owned path.
-        command = ' '.join('"'+arg+'"' for arg in self.argv())
+        command = ' '.join('"'+arg+'"' for arg in self.argv(runtime_version))
         return f'''[Unit]
 Description=Synergy NodeNetwork managed Linux guest {self.spec['guest_id']}
 After=network-online.target synergy-installation-guard.service
@@ -267,11 +272,17 @@ StandardError=append:{self.directory}/qemu.log
     def attributed_state(self, allow_absent=False):
         from lifecycle import _unit_state
         require(not self.registration.with_name(self.unit_name+'.d').exists(), 'Guest service override is not approved')
+        version=self.receipt().get('runtime_version',1) if (self.base/'record.json').exists() else 2
+        versions={version}
+        if (self.base/'record.json').exists() and self.receipt().get('resume',{}).get('phase')=='prepared':versions={1,2}
         if self.registration.exists() or self.registration.is_symlink():
             st = self.registration.lstat()
             require(stat.S_ISLNK(st.st_mode) and st.st_uid == os.geteuid()
                     and os.readlink(self.registration) == str(self.target), 'Guest service is foreign')
-            require(checked(self.target).read_bytes() == self.unit(), 'Managed guest service bytes changed')
+            raw=checked(self.target).read_bytes()
+            matches=[v for v in versions if raw==self.unit(v)]
+            require(len(matches)==1, 'Managed guest service bytes changed')
+            version=matches[0]
         else: require(allow_absent, 'Managed guest service is absent')
         state = _unit_state(self.unit_name)
         require(not state.get('DropInPaths') and state.get('FragmentPath', '') in ('', str(self.registration), str(self.target)),
@@ -279,17 +290,18 @@ StandardError=append:{self.directory}/qemu.log
         if not (self.registration.exists() or self.registration.is_symlink()):
             require(state.get('LoadState') == 'not-found' and state.get('MainPID', '0') == '0',
                     'Unattributed guest process or loaded service')
-        if state.get('MainPID', '0') != '0': self.verify_process(state['MainPID'])
+        if state.get('MainPID', '0') != '0': self.verify_process(state['MainPID'],version)
         return state
 
-    def verify_process(self, pid):
+    def verify_process(self, pid, runtime_version=None):
+        if runtime_version is None:runtime_version=self.receipt().get('runtime_version',1)
         require(isinstance(pid,str) and pid.isdecimal() and int(pid)>1, 'Invalid managed guest PID')
         process=Path('/proc')/pid
         require(process.stat().st_uid == 0
                 and (process/'exe').resolve() == self.root/'lib/guest-tools/bin'/LOADER,
                 'Managed guest process executable differs')
         with (process/'cmdline').open('rb') as stream: raw=stream.read(16385)
-        require(len(raw)<=16384 and raw == b'\x00'.join(arg.encode() for arg in self.argv())+b'\x00',
+        require(len(raw)<=16384 and raw == b'\x00'.join(arg.encode() for arg in self.argv(runtime_version))+b'\x00',
                 'Managed guest process arguments differ')
 
     def inventory(self):
@@ -297,9 +309,11 @@ StandardError=append:{self.directory}/qemu.log
         checked(self.directory, directory=True)
         found = set()
         for path in self.directory.iterdir():
-            require(path.name in FILES, 'Unexpected guest member; preserve for reconciliation')
+            require(path.name in FILES|{'.guest.service.tmp'}, 'Unexpected guest member; preserve for reconciliation')
             checked(path)
             found.add(path.name)
+        if '.guest.service.tmp' in found:
+            require(self.receipt().get('resume',{}).get('phase')=='prepared' and self.unit(2).startswith(checked(self.directory/'.guest.service.tmp',maximum=len(self.unit(2))).read_bytes()),'Unattributed guest unit temporary')
         return found
 
     def receipt(self):
@@ -308,6 +322,13 @@ StandardError=append:{self.directory}/qemu.log
         require(value.get('schema') == 'nodenetwork-guest-intent-v1' and value.get('root') == str(self.root)
                 and value.get('selection') == self.spec and value.get('phase') in ('creating', 'start-dispatched', 'created')
                 and re.fullmatch('[a-f0-9]{64}', value.get('request_sha256', '')), 'Guest receipt differs from approved selection')
+        require(value.get('runtime_version',1) in (1,2) and type(value.get('runtime_version',1)) is int, 'Unknown guest runtime')
+        resume=value.get('resume')
+        if resume is not None:
+            require(isinstance(resume,dict) and set(resume)=={'sequence','request_sha256','grant_sha256','phase'}
+                and type(resume['sequence']) is int and 1<=resume['sequence']<=128
+                and resume['phase'] in ('prepared','start-dispatched','stopped')
+                and all(isinstance(resume[k],str) and re.fullmatch('[a-f0-9]{64}',resume[k]) for k in ('request_sha256','grant_sha256')), 'Malformed guest resume intent')
         return value
 
     def status(self, parameters):
@@ -321,13 +342,17 @@ StandardError=append:{self.directory}/qemu.log
         state = self.attributed_state(allow_absent=receipt['phase'] != 'created')
         ready = receipt['phase'] in ('created', 'start-dispatched')
         if ready:
-            require(self.inventory() == FILES, 'Guest preparation is incomplete')
+            require(self.inventory()==FILES or receipt.get('resume',{}).get('phase')=='prepared' and self.inventory()==FILES|{'.guest.service.tmp'}, 'Guest preparation is incomplete')
             public, fingerprint = public_ssh(checked(self.directory/'ssh-host.pub', maximum=1024).read_bytes())
             require(fingerprint == receipt.get('ssh_host_fingerprint') and public == receipt.get('ssh_host_public_key'),
                     'Independent guest SSH host identity changed')
         return {'schema':'nodenetwork-guest-status-v1', 'guest_id':self.spec['guest_id'], 'exists':True,
                 'phase':receipt['phase'], 'request_sha256':receipt['request_sha256'],
                 'service_state':state.get('ActiveState'), 'pid':int(state.get('MainPID', '0')),
+                'runtime_version':receipt.get('runtime_version',1),
+                'resume_sequence':receipt.get('resume',{}).get('sequence',0),
+                'resume_request_sha256':receipt.get('resume',{}).get('request_sha256'),
+                'resume_verified':receipt.get('resume',{}).get('phase')=='start-dispatched' and state.get('ActiveState')=='active' and int(state.get('MainPID','0'))>1,
                 'ssh_endpoint':{'host':'127.0.0.1','port':self.spec['ssh_forward_port']} if ready else None,
                 'ssh_host_public_key':receipt.get('ssh_host_public_key') if ready else None,
                 'ssh_host_fingerprint':receipt.get('ssh_host_fingerprint') if ready else None,
@@ -368,7 +393,7 @@ StandardError=append:{self.directory}/qemu.log
         authorize()
         image, tools = self.dependencies()
         receipt = {'schema':'nodenetwork-guest-intent-v1', 'root':str(self.root), 'selection':self.spec,
-                   'request_sha256':request_sha256, 'phase':'creating'}
+                   'request_sha256':request_sha256, 'phase':'creating','runtime_version':2}
         write_new(self.base/'record.json', receipt)
         self.directory.mkdir(mode=0o700); sync(self.base)
         self.command([tools/'ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', self.directory/'ssh-host'])
@@ -406,15 +431,78 @@ StandardError=append:{self.directory}/qemu.log
         receipt['phase'] = 'created'; atomic(self.base/'record.json', receipt)
         return self.status(parameters)
 
-    def stop(self, parameters, authorize):
+    def stop(self, parameters, authorize, request_sha256=None):
         self.selected(parameters); self.inventory(); self.receipt()
         state = self.attributed_state()
-        if state.get('MainPID', '0') == '0' and state.get('ActiveState') in ('inactive','failed'): return self.status(parameters)
+        receipt=self.receipt()
         authorize()
         self.command(['/usr/bin/systemctl','stop',self.unit_name])
         state = self.attributed_state()
         require(state.get('MainPID', '0') == '0' and state.get('ActiveState') in ('inactive','failed'), 'Guest did not stop')
+        if receipt.get('resume'):
+            temporary=self.directory/'.guest.service.tmp'
+            if temporary.exists():temporary.unlink();sync(self.directory)
+            receipt['runtime_version']=2 if checked(self.target).read_bytes()==self.unit(2) else 1
+            receipt['resume']['phase']='stopped'
+        if request_sha256 is not None:
+            receipt['stop']={'request_sha256':request_sha256,'resume_request_sha256':receipt.get('resume',{}).get('request_sha256')}
+        if receipt.get('resume') or request_sha256 is not None:atomic(self.base/'record.json',receipt)
         return self.status(parameters)
+
+    def resume(self, parameters, request_sha256, grant_sha256, authorize):
+        self.selected(parameters);self.verify_guard();self.dependencies();self.inventory()
+        receipt=self.receipt();require(receipt['phase']=='created' and parameters['create_request_sha256']==receipt['request_sha256'],'Incomplete or different creation cannot resume')
+        state=self.attributed_state();prior=receipt.get('resume')
+        if prior and prior['request_sha256']==request_sha256:
+            require(prior['sequence']==parameters['resume_sequence'] and prior['grant_sha256']==grant_sha256,'Resume request differs')
+            if prior['phase']!='prepared':return self.status({'guest_id':parameters['guest_id']}) # Never replay a dispatched start.
+        else:
+            require(not prior or prior['phase']=='stopped','Explicitly stop before another resume')
+            require(parameters['resume_sequence']==(prior['sequence']+1 if prior else 1),'Resume sequence differs')
+            require(state.get('MainPID')=='0' and state.get('ActiveState') in ('inactive','failed'),'Explicitly stop before diagnostic resume')
+            receipt['resume']={'sequence':parameters['resume_sequence'],'request_sha256':request_sha256,'grant_sha256':grant_sha256,'phase':'prepared'}
+            atomic(self.base/'record.json',receipt)
+        require(state.get('MainPID')=='0' and state.get('ActiveState') in ('inactive','failed'),'Guest is not stopped')
+        from lifecycle import _reject_installation_mounts
+        _reject_installation_mounts(self.root)
+        authorize()
+        temporary=self.target.with_name('.guest.service.tmp')
+        wanted=self.unit(2)
+        if temporary.exists() or temporary.is_symlink():
+            existing=checked(temporary,maximum=len(wanted)).read_bytes()
+            require(wanted.startswith(existing),'Interrupted guest unit differs')
+            fd=os.open(temporary,os.O_WRONLY|os.O_TRUNC|os.O_NOFOLLOW)
+        else:fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'wb') as stream:stream.write(wanted);stream.flush();os.fsync(stream.fileno())
+        os.replace(temporary,self.target);sync(self.directory)
+        self.command(['/usr/bin/systemctl','daemon-reload'])
+        self.attributed_state()
+        receipt['runtime_version']=2;receipt['resume']['phase']='start-dispatched'
+        atomic(self.base/'record.json',receipt) # Fence before native start; a lost reply never starts again.
+        self.command(['/usr/bin/systemctl','start',self.unit_name])
+        return self.status({'guest_id':parameters['guest_id']})
+
+    def boot_diagnostics(self,parameters):
+        self.selected(parameters);observed=self.status(parameters)
+        path=checked(self.directory/'qemu.log');size=path.stat().st_size
+        fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+        with os.fdopen(fd,'rb') as source:
+            require(os.fstat(source.fileno()).st_ino==path.lstat().st_ino,'Guest log changed')
+            source.seek(max(0,size-65536));raw=source.read(65536)
+        # Fixed categories only. Never export serial text, keys, usernames or addresses.
+        sampled=len(raw)
+        raw=re.sub(rb'\x1b\[[0-?]*[ -/]*[@-~]',b'',raw)
+        categories={'firmware_started':b'SeaBIOS (version ' in raw,'boot_device_attempted':b'Booting from ' in raw,
+                    'boot_device_failed':b'Boot failed' in raw or b'No bootable device' in raw,
+                    'firmware_asset_missing':b'kvmvapic.bin' in raw and b'could not' in raw.lower(),
+                    'kernel_started':b'Linux version ' in raw,
+                    'cloud_init_observed':b'cloud-init' in raw or b'Cloud-init' in raw,
+                    'ssh_started':b'Started OpenBSD Secure Shell' in raw or b'Started ssh.service' in raw,
+                    'ssh_failed':b'Failed to start' in raw and (b'Secure Shell' in raw or b'ssh.service' in raw),
+                    'kernel_panic':b'Kernel panic' in raw,'login_prompt':b' login:' in raw}
+        return {'schema':'nodenetwork-guest-boot-diagnostics-v1','guest_id':parameters['guest_id'],
+                'request_sha256':observed['request_sha256'],'runtime_version':observed['runtime_version'],
+                'sampled_bytes':sampled,'log_size_bytes':size,'categories':categories,'mutation_performed':False}
 
     def remove(self, parameters, request_sha256, authorize):
         self.selected(parameters)
@@ -482,6 +570,32 @@ def approved_inventory(root, policy):
             and set((tools/'bin').iterdir()) == {tools/'bin'/name for name in (*TOOLS,LOADER)},
             'Unexpected guest toolchain inventory')
     return {path.relative_to(root).as_posix() for path in allowed}
+
+
+def require_upgrade_compatible(root, manifest):
+    """Software upgrades may preserve only an exact, stopped managed guest.
+
+    Candidate assets cannot replace the backing image or runtime of an existing
+    disk. Removal/replacement retain the stricter require_removed gate.
+    """
+    root=Path(root)
+    record=root/'hosted-machines/record.json'
+    if not record.exists() and not record.is_symlink():
+        require_removed(root)
+        return
+    from controller import Controller
+    policy=Controller(root).policy()
+    manager=GuestManager(root,policy)
+    manager.verify_guard()
+    approved_inventory(root,policy)
+    receipt=manager.receipt()
+    require(receipt.get('phase')=='created' and
+            (receipt.get('resume') is None or receipt['resume']['phase']=='stopped'),
+            'Reconcile managed guest resume before upgrading')
+    current=manager.status({'guest_id':manager.spec['guest_id']})
+    require(current.get('pid')==0 and current.get('service_state') in ('inactive','failed'),
+            'Stop managed guest before upgrading')
+    validate_resource_policy(root,manager.spec,resource_file_pins(manifest),operator_public_key(root))
 
 
 def require_removed(root):
