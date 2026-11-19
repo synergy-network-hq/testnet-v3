@@ -2095,6 +2095,10 @@ def continuation_not_applied_proof(wire,transport=False,readiness=False,commissi
 
 
 HANDOFF_UNITS=('synergy-chain1266-role@rpc-gateway.service','synergy-canary-rpc-relay.service','synergy-vpn.service')
+HANDOFF_MANAGED_UNIT_LINKS={
+    '/etc/systemd/system/synergy-canary-rpc-relay.service':'/opt/Synergy/systemd/synergy-canary-rpc-relay.service',
+    '/etc/systemd/system/synergy-vpn.service':'/opt/Synergy/systemd/synergy-vpn.service',
+}
 HANDOFF_FILES={
     'nginx_rpc':'/etc/nginx/sites-available/testnet-core-rpc.synergy-network.io',
     'nginx_origin_only':'/etc/nginx/snippets/synergy-cloudflare-origin-only.conf',
@@ -2105,13 +2109,22 @@ HANDOFF_FILES={
 }
 
 
-def _handoff_public(path,limit=131072):
-    path=Path(path)
-    require(path.is_absolute() and path.resolve()==path,'Noncanonical handoff public file')
+def _handoff_secure_parents(path):
     for parent in path.parents:
         info=parent.lstat()
         require(stat.S_ISDIR(info.st_mode) and info.st_uid==0 and not info.st_mode&0o022,
                 'Unsafe handoff parent')
+
+
+def _handoff_file_stamp(info):
+    return (info.st_dev,info.st_ino,info.st_mode,info.st_nlink,info.st_uid,
+            info.st_gid,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+
+
+def _handoff_public(path,limit=131072):
+    path=Path(path)
+    require(path.is_absolute() and path.resolve()==path,'Noncanonical handoff public file')
+    _handoff_secure_parents(path)
     fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
     try:
         info=os.fstat(fd)
@@ -2123,11 +2136,27 @@ def _handoff_public(path,limit=131072):
                 digest.update(chunk)
                 if limit<=131072:data.extend(chunk)
                 require(stream.tell()<=limit,'Handoff public file exceeds bound')
-        stable=lambda value:(value.st_dev,value.st_ino,value.st_mode,value.st_nlink,value.st_uid,
-                             value.st_gid,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
-        require(stable(os.fstat(fd))==stable(info)==stable(path.lstat()),'Handoff public file changed')
+        require(_handoff_file_stamp(os.fstat(fd))==_handoff_file_stamp(info)==_handoff_file_stamp(path.lstat()),
+                'Handoff public file changed')
         return digest.hexdigest(),bytes(data)
     finally:os.close(fd)
+
+
+def _handoff_unit_pin(fragment):
+    managed=HANDOFF_MANAGED_UNIT_LINKS.get(fragment)
+    if managed is None:
+        return _handoff_public(fragment)[0]
+    # These two legacy registrations link to files inside their managed root.
+    # The target itself is still read as a canonical, fixed, root-owned file.
+    path=Path(fragment)
+    _handoff_secure_parents(path)
+    before=path.lstat()
+    require(stat.S_ISLNK(before.st_mode) and before.st_uid==0 and before.st_nlink==1
+            and os.readlink(path)==managed and path.resolve()==Path(managed),'Unexpected legacy unit link')
+    pin,_=_handoff_public(managed)
+    require(_handoff_file_stamp(path.lstat())==_handoff_file_stamp(before)
+            and os.readlink(path)==managed,'Legacy unit link changed')
+    return pin
 
 
 def _handoff_command(args,limit=65536,timeout=5):
@@ -2158,7 +2187,7 @@ def _handoff_unit(name,fragment,executable):
             and values['FragmentPath']==fragment and not values['DropInPaths']
             and values['ActiveState'] in ('active','inactive','failed')
             and re.fullmatch('[0-9]{1,10}',values['MainPID']),'Unattributed handoff service')
-    pin,_=_handoff_public(fragment)
+    pin=_handoff_unit_pin(fragment)
     pid=values['MainPID'];active=values['ActiveState']=='active'
     require(active==(pid!='0'),'Ambiguous handoff service state')
     if active:

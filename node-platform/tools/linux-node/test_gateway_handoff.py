@@ -104,6 +104,32 @@ class GatewayHandoffTests(unittest.TestCase):
                 with self.assertRaises(ValueError):b._handoff_public(p,2)
             self.assertEqual(p.read_bytes(),b'public bytes');self.assertEqual(stat.S_IMODE(p.stat().st_mode),0o600)
 
+    def test_unit_pin_accepts_the_exact_managed_link_and_refuses_substitution(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary).resolve()
+            target=root/'managed.service'
+            target.write_bytes(b'public unit')
+            fragment=root/'registered.service'
+            fragment.symlink_to(target)
+            original_lstat=Path.lstat;original_fstat=os.fstat
+            with patch.dict(b.HANDOFF_MANAGED_UNIT_LINKS,{str(fragment):str(target)},clear=True),\
+                 patch.object(Path,'lstat',lambda path:self.root_owned(original_lstat(path))),\
+                 patch.object(b.os,'fstat',lambda fd:self.root_owned(original_fstat(fd))):
+                self.assertEqual(b._handoff_unit_pin(str(fragment)),hashlib.sha256(b'public unit').hexdigest())
+                replacement=root/'replacement.service'
+                replacement.symlink_to(target)
+                original_public=b._handoff_public
+                def replace_link(path):
+                    result=original_public(path)
+                    replacement.replace(fragment)
+                    return result
+                with patch.object(b,'_handoff_public',side_effect=replace_link),self.assertRaisesRegex(ValueError,'link changed'):
+                    b._handoff_unit_pin(str(fragment))
+                fragment.unlink()
+                fragment.symlink_to(root/'foreign.service')
+                with self.assertRaisesRegex(ValueError,'Unexpected legacy unit link'):
+                    b._handoff_unit_pin(str(fragment))
+
     def test_machine_pin_uses_verified_normalized_convention_not_raw_file_digest(self):
         for raw in (b'0'*32,b'0'*32+b'\n'):
             with patch.object(b,'_handoff_public',return_value=('a'*64,raw)):
@@ -146,6 +172,7 @@ class GatewayHandoffTests(unittest.TestCase):
         args.append(b'root@62.146.182.207')
         def public(path,*unused):return 'a'*64,routes if str(path)==b.HANDOFF_FILES['nginx_rpc'] else b'public'
         with patch.object(b,'_handoff_public',side_effect=public),patch.object(b,'_handoff_command',side_effect=command),\
+             patch.object(b,'_handoff_unit_pin',side_effect=lambda fragment:public(fragment)[0]),\
              patch.object(b,'_handoff_root_entries',return_value=('b'*64,set())),\
              patch.object(Path,'is_symlink',side_effect=lambda:True),\
              patch.object(Path,'lstat',return_value=SimpleNamespace(st_uid=0)),\
