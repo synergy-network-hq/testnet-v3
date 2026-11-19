@@ -1093,6 +1093,10 @@ def gateway_install(c,request):
         _gateway_target_origin(c,c.policy(),receipt,manifest,package)
         # No service registration may be borrowed from another installation.
         _gateway_target_services(c)
+        # Match install's exact fresh-root closure before readiness or grant use;
+        # co-resident state must never be merged. Install rechecks before copy.
+        from synergy_linux import _staged_master
+        _staged_master(c.root,package,p['manifest_sha256'])
         if op=='gateway_install_preflight':return {'packageVerified':True,'release':manifest['release_id'],'root':str(c.root),'networkSelectionApproved':True,'genesisAuthorityVerified':False,'activationAuthorized':False}
         require(not _exists(c.control/'gateway-install-request.json'),'Reconcile original gateway installation before another request')
         c.authorize(request)

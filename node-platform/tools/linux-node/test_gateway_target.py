@@ -165,6 +165,41 @@ class GatewayTargetTests(unittest.TestCase):
   for marker in (False,None):
    bad=dict(receipt,gateway_commissioned=marker);self.save(self.root/'installation.json',g._gateway_request_bytes(bad));self.assertEqual(self.call('gateway_target_status')['state'],'uncertain')
   self.save(self.root/'installation.json',g._gateway_request_bytes(receipt));(self.root/g.GATEWAY_TARGET/'commissioned.json').unlink();self.assertEqual(self.call('gateway_target_status')['state'],'uncertain')
+ def test_install_fresh_root_gate_precedes_ready_or_authorization(self):
+  from test_controller_startup import IsolatedControllerStartupTests
+  import synergy_linux as installer
+  with tempfile.TemporaryDirectory() as temp:
+   root=IsolatedControllerStartupTests().fixture(temp);target=c.Controller(root)
+   stage=root/'tmp/bootstrap-master';stage.mkdir(mode=0o700)
+   self.save(stage/'package.json',b'{"fixture":"authenticated package"}')
+   self.save(stage/'roles/roles.json',b'{"implemented":["rpc_gateway"]}')
+   pin=installer.digest(stage/'package.json')
+   p={'release_id':'gateway-test','manifest_sha256':pin,'network_id':'synergy-posy-canary-fixture','chain_id':99999,'node_name':'gateway-01'}
+   mutation=req('gateway_install',p);digest=c.request_digest(mutation)
+   grant=target.control/'grants'/(digest+'.json');self.save(grant,b'{"fixture":"unused grant"}')
+   original={path:path.read_bytes() for path in root.rglob('*') if path.is_file()}
+   with patch.object(target,'approved_package',return_value=(stage,{'release_id':p['release_id']},{'networks':{p['network_id']:99999}})),patch.object(g,'native',return_value=g._gateway_request_bytes(g.GATEWAY_TARGET_CAPABILITY)),patch.object(g,'_gateway_target_origin'),patch.object(g,'_gateway_target_services'),patch.object(target,'authorize') as authorize,patch('synergy_linux.install') as install,patch('lifecycle._mountinfo_text',return_value=''):
+    checked=g.gateway_install(target,req('gateway_install_preflight',p))
+    self.assertTrue(checked['packageVerified']);self.assertFalse(checked['activationAuthorized'])
+    self.assertEqual(original,{path:path.read_bytes() for path in root.rglob('*') if path.is_file()})
+    for defect in ('chain1266','foreign','symlink','mode','stage_digest'):
+     member=root/('chain1266' if defect=='chain1266' else 'foreign');saved=(stage/'package.json').read_bytes()
+     if defect=='chain1266':member.mkdir(mode=0o700)
+     elif defect=='foreign':self.save(member,b'must survive')
+     elif defect=='symlink':member.symlink_to(stage,target_is_directory=True)
+     elif defect=='mode':root.chmod(0o755)
+     else:self.save(stage/'package.json',b'{"changed":true}')
+     try:
+      for op in ('gateway_install_preflight','gateway_install'):
+       with self.subTest(defect=defect,operation=op),self.assertRaises(ValueError):g.gateway_install(target,req(op,p))
+      authorize.assert_not_called();install.assert_not_called()
+      self.assertEqual(grant.read_bytes(),original[grant]);self.assertFalse((target.control/'gateway-install-request.json').exists())
+     finally:
+      if defect=='chain1266':member.rmdir()
+      elif defect in ('foreign','symlink'):member.unlink()
+      elif defect=='mode':root.chmod(0o700)
+      else:self.save(stage/'package.json',saved)
+
  def test_utf8_commission_request_digest_matches_retained_canonical_bytes(self):
   p=self.params();p['admission_json']='{"public":"é"}';p['admission_sha256']=sha(p['admission_json'].encode());request=req('gateway_target_commission',p)
   self.assertEqual(c.request_digest(request),sha(g._gateway_request_bytes(request)))
