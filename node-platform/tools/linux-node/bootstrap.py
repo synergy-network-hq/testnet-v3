@@ -2215,7 +2215,7 @@ def _handoff_root_entries(root,allowed):
     return hashlib.sha256(raw).hexdigest(),blockers
 
 
-def _gateway_handoff_snapshot():
+def _gateway_handoff_snapshot(*, canary_only=False):
     files={key:_handoff_public(path)[0] for key,path in HANDOFF_FILES.items()}
     enabled=Path('/etc/nginx/sites-enabled/testnet-core-rpc.synergy-network.io')
     require(enabled.is_symlink() and enabled.lstat().st_uid==0
@@ -2249,8 +2249,8 @@ def _gateway_handoff_snapshot():
                'rpc_listener_owned':active and owns(5640,pid),'ws_listener_owned':active and owns(5660,pid)}
     role='/opt/synergy/chain1266/releases/chain1266-incarnation-4-rc30/bin/synergy-rpc-gateway-node'
     role_pin,role_active,role_pid=_handoff_unit(HANDOFF_UNITS[0],'/etc/systemd/system/synergy-chain1266-role@.service',role)
-    canary_pin,canary_active,_=_handoff_unit(HANDOFF_UNITS[1],'/etc/systemd/system/'+HANDOFF_UNITS[1],'/opt/Synergy/bin/synergy-node')
-    vpn_pin,vpn_active,_=_handoff_unit(HANDOFF_UNITS[2],'/etc/systemd/system/'+HANDOFF_UNITS[2],'/opt/Synergy/bin/netbird')
+    canary_pin,canary_active,canary_pid=_handoff_unit(HANDOFF_UNITS[1],'/etc/systemd/system/'+HANDOFF_UNITS[1],'/opt/Synergy/bin/synergy-node')
+    vpn_pin,vpn_active,vpn_pid=_handoff_unit(HANDOFF_UNITS[2],'/etc/systemd/system/'+HANDOFF_UNITS[2],'/opt/Synergy/bin/netbird')
     lower,lower_blockers=_handoff_root_entries('/opt/synergy',{'chain1266'})
     upper,upper_blockers=_handoff_root_entries('/opt/Synergy',DIRECTORIES|{'package.json','installation.json'})
     blockers={'metrics_resolution_required','explicit_retirement_approval_required','legacy_inventory_requires_attribution'}|lower_blockers|upper_blockers
@@ -2259,13 +2259,62 @@ def _gateway_handoff_snapshot():
     metrics={'unit_sha256':role_pin,'service_active':role_active,
         'listener_owned':role_active and owns(6030,role_pid),'consumer_ip':'209.145.50.9','resolution':'unresolved'}
     if not metrics['listener_owned']:blockers.add('legacy_attribution_failed')
-    legacy={'chain1266_executable_sha256':_handoff_public(role,256*1024*1024)[0],
-        'canary_executable_sha256':_handoff_public('/opt/Synergy/bin/synergy-node',256*1024*1024)[0],
+    legacy={'canary_executable_sha256':_handoff_public('/opt/Synergy/bin/synergy-node',256*1024*1024)[0],
         'canary_unit_sha256':canary_pin,'vpn_unit_sha256':vpn_pin,
         'canary_active':canary_active,'vpn_active':vpn_active,
         'lower_root_entries_sha256':lower,'upper_root_entries_sha256':upper}
+    if not canary_only:
+        legacy['chain1266_executable_sha256']=_handoff_public(role,256*1024*1024)[0]
+    else:
+        # Observe protected 1266 registrations/processes only. Do not authenticate
+        # or alter its independently owned binary tree as part of old Canary scope.
+        legacy['old_network'],legacy['vpn_binding']=_legacy_canary_identity()
+        legacy['canary_pid']=int(canary_pid);legacy['vpn_pid']=int(vpn_pid)
+        preserved['rpc_tunnel_pid']=int(pid);preserved['metrics_pid']=int(role_pid)
+        preserved['files']['canary_frontend']=_handoff_public('/etc/nginx/conf.d/synergy-canary-rpc.conf')[0]
+        blockers.discard('metrics_resolution_required')
+        blockers.add('legacy_peer_retirement_required')
     return {'preserved':preserved,'metrics':metrics,'legacy':legacy,
-            'candidate_units':list(HANDOFF_UNITS),'blockers':sorted(blockers)}
+            'candidate_units':list(HANDOFF_UNITS[1:] if canary_only else HANDOFF_UNITS),'blockers':sorted(blockers)}
+
+
+def _legacy_canary_identity():
+    base=Path('/opt/Synergy')
+    node_pin,node_raw=_handoff_public(base/'config/node.json')
+    relay_pin,relay_raw=_handoff_public(base/'config/canary-rpc-relay.json')
+    node=json.loads(node_raw);relay=json.loads(relay_raw)
+    require(node.get('network_id')=='posy-apqe-canary-process-49028' and node.get('chain_id')==99999
+            and type(node['chain_id']) is int and node.get('role')=='rpc_gateway'
+            and node.get('genesis_path')==str(base/'network/genesis.json')
+            and relay.get('node_config_path')==str(base/'config/node.json')
+            and relay.get('listen_address')=='127.0.0.1:8552','Exact obsolete Canary identity required')
+    genesis_pin,_=_handoff_public(base/'network/genesis.json',1024*1024)
+    require(genesis_pin=='d28ab09b6857f670482580a786edd939b090e88aa9378cdd0ad91379a724a9d7',
+            'Obsolete Canary Genesis differs')
+    enrollment_pin,enrollment_raw=_handoff_public(base/'evidence/vpn-enrollment.json',16384)
+    binding_pin,binding_raw=_handoff_public(base/'evidence/vpn-server-binding.json',16384)
+    local=json.loads(enrollment_raw);remote=json.loads(binding_raw)
+    key='EhHDd/L7fXX+c8x2nyJx8wWUwGRij3AmioVZKiH4/2M='
+    require(enrollment_pin=='f27a0e0031ba00f2a234e77e55449ca5f4b9a15dec7e2c8da3da5bde6ea37573'
+            and binding_pin=='1629d857606c040ecbd7ed9d5dc692ac697dda3b129cc1f8b2bb9834e594d5f2'
+            and local.get('native_enrollment_verified') is True
+            and remote.get('server_binding_verified') is True
+            and local.get('hostname')==remote.get('peer_name')=='synergy-canary-rpc-99999'
+            and local.get('overlay_address')=='10.69.51.205/16' and remote.get('ip')=='10.69.51.205'
+            and local.get('management_url')=='https://vpn-coordinator.synergy-network.io:443'
+            and remote.get('peer_id')=='dboqb9if611ohpqo0e1g' and remote.get('hostname')=='vmi3381382'
+            and local.get('wireguard_public_key')==remote.get('wireguard_public_key')==key,
+            'Exact obsolete Canary VPN binding required')
+    # This reader cannot authenticate provider-side absence or execute retirement.
+    # A receipt appearing later must be independently reconciled, never adopted.
+    receipt=base/'evidence/vpn-retirement.json'
+    require(not receipt.exists() and not receipt.is_symlink(),'Legacy peer retirement requires separate reconciliation')
+    return ({'network_id':node['network_id'],'chain_id':99999,'genesis_sha256':genesis_pin,
+             'node_config_sha256':node_pin,'relay_config_sha256':relay_pin},
+            {'enrollment_sha256':enrollment_pin,'binding_sha256':binding_pin,
+             'peer_id':remote['peer_id'],'peer_name':remote['peer_name'],'hostname':remote['hostname'],
+             'ip':remote['ip'],'wireguard_public_key':key,'management_origin':'https://vpn-coordinator.synergy-network.io',
+             'retirement_verified':False})
 
 
 def _handoff_machine():
@@ -2276,7 +2325,7 @@ def _handoff_machine():
     return hashlib.sha256(raw).hexdigest()
 
 
-def gateway_handoff_plan(wire):
+def gateway_handoff_plan(wire, *, canary_only=False):
     import time
     require(os.geteuid()==0 and isinstance(wire,dict) and set(wire)=={'context','challenge'},'Exact handoff read required')
     context=wire['context'];challenge=wire['challenge']
@@ -2288,12 +2337,12 @@ def gateway_handoff_plan(wire):
             'Exact short-lived handoff context required')
     machine=_handoff_machine()
     require(machine==context['machine_id_sha256'],'Handoff machine differs')
-    facts=_gateway_handoff_snapshot()
-    require(_gateway_handoff_snapshot()==facts and _handoff_machine()==machine
+    facts=_gateway_handoff_snapshot(canary_only=canary_only)
+    require(_gateway_handoff_snapshot(canary_only=canary_only)==facts and _handoff_machine()==machine
             and int(time.time())<context['expires_at'],'Handoff scope changed')
     committed={'target':context['target'],'machine_id_sha256':machine,**facts}
     pin=hashlib.sha256(json.dumps(committed,sort_keys=True,separators=(',',':')).encode()).hexdigest()
-    return {'schema':'nodenetwork-legacy-gateway-handoff-plan-v1','challenge':challenge,
+    return {'schema':'nodenetwork-legacy-canary-retirement-plan-v1' if canary_only else 'nodenetwork-legacy-gateway-handoff-plan-v1','challenge':challenge,
         **committed,'plan_sha256':pin,'mutation_performed':False,'removal_authorized':False,'automatic_retry':False}
 
 
@@ -2301,9 +2350,9 @@ def main():
     global _UPDATE_PHASE,_UPGRADE_PROOF_PHASE
     _UPDATE_PHASE=None;_UPGRADE_PROOF_PHASE=None
     try:
-        if sys.argv[1:]==['--gateway-handoff-plan']:
+        if sys.argv[1:] in (['--gateway-handoff-plan'],['--legacy-canary-retirement-plan']):
             raw=sys.stdin.buffer.read(4097);require(len(raw)<=4096,'Handoff context exceeds bound')
-            operation=gateway_handoff_plan(json.loads(raw))
+            operation=gateway_handoff_plan(json.loads(raw),canary_only=sys.argv[1:]==['--legacy-canary-retirement-plan'])
         elif len(sys.argv)==2 and sys.argv[1]=='--inspect-update-commission-grant':
             raw=sys.stdin.buffer.read(65537);require(len(raw)<=65536,'Preservation proof exceeds bound')
             operation=inspect_update_commission_grant(json.loads(raw))
@@ -2328,7 +2377,7 @@ def main():
             operation=bootstrap(sys.stdin.buffer)
         result={'version':1,'ok':True,'result':operation}
     except Exception:
-        if sys.argv[1:]==['--gateway-handoff-plan']:
+        if sys.argv[1:] in (['--gateway-handoff-plan'],['--legacy-canary-retirement-plan']):
             result={'version':1,'ok':False,'error':{'code':'gateway_handoff_refused','message':'Legacy gateway handoff observation refused; no resources changed'}}
         elif sys.argv[1:]==['--upgrade-not-applied-proof'] and _UPGRADE_PROOF_PHASE in UPGRADE_PROOF_PHASES:
             result={'version':1,'ok':False,'error':{'code':'upgrade_proof_'+_UPGRADE_PROOF_PHASE+'_refused','message':'Read-only upgrade proof refused'}}

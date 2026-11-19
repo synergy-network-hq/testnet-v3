@@ -137,7 +137,7 @@ class GatewayHandoffTests(unittest.TestCase):
         for raw in (b'FOREIGN',b'A'*32,b'0'*31,b'0'*33):
             with patch.object(b,'_handoff_public',return_value=('a'*64,raw)),self.assertRaises(ValueError):b._handoff_machine()
 
-    def snapshot_fixture(self,foreign_route=False,foreign_process=False,foreign_forward=False,foreign_listener=False,foreign_consumer=False,commented_consumer=False,reversed_acl=False):
+    def snapshot_fixture(self,foreign_route=False,foreign_process=False,foreign_forward=False,foreign_listener=False,foreign_consumer=False,commented_consumer=False,reversed_acl=False,canary_only=False,insecure_protected_binary=False):
         from types import SimpleNamespace
         enabled=Path('/etc/nginx/sites-enabled/testnet-core-rpc.synergy-network.io')
         fragments={
@@ -170,16 +170,19 @@ class GatewayHandoffTests(unittest.TestCase):
         args=[b'/usr/bin/ssh',b'-N',b'-L',b'127.0.0.1:5640:127.0.0.1:5640',b'-L',b'127.0.0.1:5660:127.0.0.1:5660']
         if foreign_forward:args.extend([b'-R',b'foreign'])
         args.append(b'root@62.146.182.207')
-        def public(path,*unused):return 'a'*64,routes if str(path)==b.HANDOFF_FILES['nginx_rpc'] else b'public'
+        def public(path,*unused):
+            if insecure_protected_binary and str(path)==executables['11']:raise ValueError('Unsafe protected binary parent')
+            return 'a'*64,routes if str(path)==b.HANDOFF_FILES['nginx_rpc'] else b'public'
         with patch.object(b,'_handoff_public',side_effect=public),patch.object(b,'_handoff_command',side_effect=command),\
              patch.object(b,'_handoff_unit_pin',side_effect=lambda fragment:public(fragment)[0]),\
              patch.object(b,'_handoff_root_entries',return_value=('b'*64,set())),\
+             patch.object(b,'_legacy_canary_identity',return_value=({'network_id':'posy-apqe-canary-process-49028'},{'retirement_verified':False})),\
              patch.object(Path,'is_symlink',side_effect=lambda:True),\
              patch.object(Path,'lstat',return_value=SimpleNamespace(st_uid=0)),\
              patch.object(Path,'resolve',return_value=Path(b.HANDOFF_FILES['nginx_rpc'])),\
              patch.object(Path,'open',side_effect=lambda *a,**k:io.BytesIO(b'\0'.join(args)+b'\0')),\
              patch.object(b.os,'readlink',side_effect=lambda p:'/foreign/process' if foreign_process else executables[p.split('/')[2]]):
-            return b._gateway_handoff_snapshot()
+            return b._gateway_handoff_snapshot(canary_only=canary_only)
 
     def test_real_snapshot_projection_preserves_routes_and_blocks_foreign_ownership(self):
         out=self.snapshot_fixture()
