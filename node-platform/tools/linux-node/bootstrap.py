@@ -2351,11 +2351,147 @@ def gateway_handoff_plan(wire, *, canary_only=False):
         **committed,'plan_sha256':pin,'mutation_performed':False,'removal_authorized':False,'automatic_retry':False}
 
 
+LEGACY_PEER_KEY_BINARY = Path('/opt/synergy/netbird/bin/netbird-combined')
+LEGACY_PEER_KEY_STORE = Path('/opt/synergy/netbird/lib/store.db')
+LEGACY_PEER_KEY_BINARY_SHA256 = 'e01941ced937e0a5dff7b02b8ae2be38b6efa6b3be03ec9b89d0b7f52a16c292'
+LEGACY_PEER_KEY_REVISION = '79a06720b684768b421f0a54f3bb14f22704994f'
+LEGACY_PEER_KEY_ACCOUNT = 'da99e12f611ghl16dvjg'
+LEGACY_PEER_KEY_ID = 'dboqb9if611ohpqo0e1g'
+LEGACY_PEER_KEY_SHA256 = '5e781088b3b0a7cd2862ee1010b5f84ce4f91ebc1abbbce92a10a0dc8563159f'
+
+
+def _legacy_peer_key_inode(info):
+    return info.st_dev,info.st_ino,info.st_uid,info.st_gid,info.st_mode,info.st_nlink
+
+
+def _legacy_peer_key_file(path,limit):
+    require(path.is_absolute() and path.resolve()==path,'Noncanonical peer store member')
+    _handoff_secure_parents(path)
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+    try:
+        info=os.fstat(fd)
+        require(stat.S_ISREG(info.st_mode) and info.st_uid==0 and info.st_nlink==1
+                and not info.st_mode&0o022 and 0<=info.st_size<=limit
+                and _legacy_peer_key_inode(info)==_legacy_peer_key_inode(path.lstat()),'Unsafe peer store member')
+        return fd,info
+    except BaseException:
+        os.close(fd);raise
+
+
+def _legacy_peer_key_process(binary,store,proc=Path('/proc')):
+    # No caller-selected PID/command. Exactly one current root owner must open
+    # this exact store inode using the exact pinned executable image.
+    candidates=[]
+    with os.scandir(proc) as stream:
+        for count,entry in enumerate(stream):
+            require(count<32768,'Process inventory exceeds bound')
+            if not re.fullmatch('[1-9][0-9]{0,9}',entry.name):continue
+            base=proc/entry.name
+            try:exe=os.readlink(base/'exe')
+            except (FileNotFoundError,PermissionError,ProcessLookupError):continue
+            if exe!=str(LEGACY_PEER_KEY_BINARY):continue
+            require(_legacy_peer_key_inode((base/'exe').stat())==_legacy_peer_key_inode(binary),'Peer process executable differs')
+            raw=(base/'status').read_bytes();require(len(raw)<=16384,'Peer process status exceeds bound')
+            uid=re.findall(rb'^Uid:\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s*$',raw,re.M)
+            require(uid==[(b'0',b'0',b'0',b'0')],'Peer process owner differs')
+            raw=(base/'stat').read_bytes();require(len(raw)<=8192,'Peer process identity exceeds bound')
+            suffix=raw.rsplit(b')',1)[-1].split()
+            require(len(suffix)>=20 and suffix[0]!=b'Z' and suffix[19].isdigit(),'Peer process start identity unavailable')
+            opened=[]
+            with os.scandir(base/'fd') as descriptors:
+                for n,entryfd in enumerate(descriptors):
+                    require(n<4096,'Peer process descriptor inventory exceeds bound')
+                    try:link=os.readlink(entryfd.path)
+                    except FileNotFoundError:continue
+                    if link==str(LEGACY_PEER_KEY_STORE):
+                        require(_legacy_peer_key_inode(Path(entryfd.path).stat())==_legacy_peer_key_inode(store),'Peer process store inode differs')
+                        opened.append(entryfd.name)
+            require(opened,'Peer process does not own exact store')
+            candidates.append((entry.name,suffix[19].decode(),tuple(sorted(opened))))
+    require(len(candidates)==1,'Unique current peer store owner required')
+    return candidates[0]
+
+
+def legacy_peer_key_proof(wire):
+    import base64
+    import sqlite3
+    import time
+    require(os.geteuid()==0 and sys.platform=='linux','Linux root peer owner observation required')
+    require(isinstance(wire,dict) and set(wire)=={'context','challenge'},'Exact peer proof request required')
+    context=wire['context'];challenge=wire['challenge']
+    require(isinstance(context,dict) and set(context)=={'account_id','peer_id','wireguard_public_key_sha256','expires_at'}
+            and context['account_id']==LEGACY_PEER_KEY_ACCOUNT and context['peer_id']==LEGACY_PEER_KEY_ID
+            and context['wireguard_public_key_sha256']==LEGACY_PEER_KEY_SHA256
+            and isinstance(challenge,str) and re.fullmatch('[a-f0-9]{64}',challenge)
+            and type(context['expires_at']) is int and int(time.time())<context['expires_at']<=int(time.time())+120,
+            'Exact short-lived peer proof context required')
+    deadline=time.monotonic()+8;fds=[];connection=None
+    try:
+        binary_fd,binary=_legacy_peer_key_file(LEGACY_PEER_KEY_BINARY,256*1024*1024);fds.append(binary_fd)
+        require(_handoff_public(LEGACY_PEER_KEY_BINARY,256*1024*1024)[0]==LEGACY_PEER_KEY_BINARY_SHA256,'Peer owner binary differs')
+        store_fd,store=_legacy_peer_key_file(LEGACY_PEER_KEY_STORE,2*1024*1024*1024);fds.append(store_fd)
+        header=os.pread(store_fd,100,0)
+        require(len(header)==100 and header[:16]==b'SQLite format 3\0' and header[18:20]==b'\1\1','Unsupported peer store journal mode')
+        members=[(LEGACY_PEER_KEY_BINARY,binary_fd,binary),(LEGACY_PEER_KEY_STORE,store_fd,store)]
+        # Deployed owner uses DELETE journal mode. Refuse every recovery/WAL
+        # companion; WAL read marks would write SHM even with mode=ro. Never
+        # immutable=1 on a live store, and never create/copy any database files.
+        sidecars=[Path(str(LEGACY_PEER_KEY_STORE)+tail) for tail in ('-wal','-shm','-journal')]
+        require(all(not p.exists() and not p.is_symlink() for p in sidecars),'Unsupported peer store companion')
+        owner=_legacy_peer_key_process(binary,store)
+        connection=sqlite3.connect(LEGACY_PEER_KEY_STORE.as_uri()+'?mode=ro',uri=True,timeout=0.25)
+        require(connection.execute('PRAGMA journal_mode').fetchone()==('delete',),'Unsupported peer store journal profile')
+        connection.execute('PRAGMA query_only=ON')
+        connection.execute('PRAGMA trusted_schema=OFF')
+        connection.set_progress_handler(lambda:1 if time.monotonic()>deadline else 0,1000)
+        def authorize(action,table,column,database,trigger):
+            if action==sqlite3.SQLITE_SELECT:return sqlite3.SQLITE_OK
+            if action==sqlite3.SQLITE_FUNCTION and column in ('length','typeof'):return sqlite3.SQLITE_OK
+            if action==sqlite3.SQLITE_READ and table=='peers' and column in ('account_id','id','key','name','ip') and database=='main':return sqlite3.SQLITE_OK
+            return sqlite3.SQLITE_DENY
+        connection.set_authorizer(authorize)
+        rows=connection.execute("SELECT account_id,id,CASE WHEN typeof(key)='text' AND length(CAST(key AS BLOB))=44 THEN key END,CASE WHEN typeof(name)='text' AND length(CAST(name AS BLOB))=24 THEN name END,CASE WHEN typeof(ip)='text' AND length(CAST(ip AS BLOB))=14 THEN ip END FROM peers WHERE account_id=? AND id=? LIMIT 2",
+                                (LEGACY_PEER_KEY_ACCOUNT,LEGACY_PEER_KEY_ID)).fetchall()
+        require(len(rows)==1,'Unique exact peer row required')
+        account,peer,key,name,ip=rows[0]
+        require(account==LEGACY_PEER_KEY_ACCOUNT and peer==LEGACY_PEER_KEY_ID
+                and name=='synergy-canary-rpc-99999' and type(ip) is str
+                and ip=='"10.69.51.205"','Peer row identity differs')
+        require(type(key) is str and re.fullmatch('[A-Za-z0-9+/]{43}=',key),'Canonical peer public key required')
+        decoded=base64.b64decode(key,validate=True)
+        require(len(decoded)==32 and base64.b64encode(decoded).decode()==key
+                and hashlib.sha256(decoded).hexdigest()==LEGACY_PEER_KEY_SHA256,'Peer public key differs')
+        connection.close();connection=None
+        require(_legacy_peer_key_process(binary,store)==owner,'Peer store owner changed')
+        for path,fd,info in members:
+            require(_legacy_peer_key_inode(os.fstat(fd))==_legacy_peer_key_inode(info)==_legacy_peer_key_inode(path.lstat()),'Peer owner path changed')
+        require(_handoff_file_stamp(os.fstat(binary_fd))==_handoff_file_stamp(binary)
+                and _handoff_public(LEGACY_PEER_KEY_BINARY,256*1024*1024)[0]==LEGACY_PEER_KEY_BINARY_SHA256
+                and all(not p.exists() and not p.is_symlink() for p in sidecars)
+                and os.pread(store_fd,20,0)[18:20]==b'\1\1'
+                and int(time.time())<context['expires_at'] and time.monotonic()<deadline,'Peer proof scope changed')
+        return {'schema':'nodenetwork-legacy-peer-key-proof-v1','challenge':challenge,
+                'account_id':account,'peer_id':peer,'wireguard_public_key_sha256':LEGACY_PEER_KEY_SHA256,
+                'ip':'10.69.51.205','peer_name':name,'provider_binary_sha256':LEGACY_PEER_KEY_BINARY_SHA256,
+                'provider_revision':LEGACY_PEER_KEY_REVISION,'verified':True,'mutation_performed':False}
+    finally:
+        if connection is not None:connection.close()
+        for fd in reversed(fds):os.close(fd)
+
+
 def main():
     global _UPDATE_PHASE,_UPGRADE_PROOF_PHASE
     _UPDATE_PHASE=None;_UPGRADE_PROOF_PHASE=None
     try:
-        if sys.argv[1:] in (['--gateway-handoff-plan'],['--legacy-canary-retirement-plan']):
+        if sys.argv[1:]==['--legacy-peer-key-proof']:
+            raw=sys.stdin.buffer.read(4097);require(len(raw)<=4096,'Peer proof input exceeds bound')
+            def unique_peer_fields(pairs):
+                value={}
+                for name,item in pairs:
+                    require(name not in value,'Duplicate peer proof field');value[name]=item
+                return value
+            operation=legacy_peer_key_proof(json.loads(raw,object_pairs_hook=unique_peer_fields))
+        elif sys.argv[1:] in (['--gateway-handoff-plan'],['--legacy-canary-retirement-plan']):
             raw=sys.stdin.buffer.read(4097);require(len(raw)<=4096,'Handoff context exceeds bound')
             operation=gateway_handoff_plan(json.loads(raw),canary_only=sys.argv[1:]==['--legacy-canary-retirement-plan'])
         elif len(sys.argv)==2 and sys.argv[1]=='--inspect-update-commission-grant':
@@ -2382,7 +2518,9 @@ def main():
             operation=bootstrap(sys.stdin.buffer)
         result={'version':1,'ok':True,'result':operation}
     except Exception:
-        if sys.argv[1:] in (['--gateway-handoff-plan'],['--legacy-canary-retirement-plan']):
+        if sys.argv[1:]==['--legacy-peer-key-proof']:
+            result={'version':1,'ok':False,'error':{'code':'legacy_peer_key_proof_refused','message':'Exact legacy peer key observation refused; no resources changed'}}
+        elif sys.argv[1:] in (['--gateway-handoff-plan'],['--legacy-canary-retirement-plan']):
             result={'version':1,'ok':False,'error':{'code':'gateway_handoff_refused','message':'Legacy gateway handoff observation refused; no resources changed'}}
         elif sys.argv[1:]==['--upgrade-not-applied-proof'] and _UPGRADE_PROOF_PHASE in UPGRADE_PROOF_PHASES:
             result={'version':1,'ok':False,'error':{'code':'upgrade_proof_'+_UPGRADE_PROOF_PHASE+'_refused','message':'Read-only upgrade proof refused'}}
