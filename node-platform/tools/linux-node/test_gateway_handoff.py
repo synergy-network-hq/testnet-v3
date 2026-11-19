@@ -137,7 +137,7 @@ class GatewayHandoffTests(unittest.TestCase):
         for raw in (b'FOREIGN',b'A'*32,b'0'*31,b'0'*33):
             with patch.object(b,'_handoff_public',return_value=('a'*64,raw)),self.assertRaises(ValueError):b._handoff_machine()
 
-    def snapshot_fixture(self,foreign_route=False,foreign_process=False,foreign_forward=False,foreign_listener=False,foreign_consumer=False,commented_consumer=False,reversed_acl=False,canary_only=False,insecure_protected_binary=False):
+    def snapshot_fixture(self,foreign_route=False,foreign_process=False,foreign_forward=False,foreign_listener=False,foreign_consumer=False,commented_consumer=False,reversed_acl=False,canary_only=False,insecure_protected_binary=False,lower_foreign=False,upper_foreign=False):
         from types import SimpleNamespace
         enabled=Path('/etc/nginx/sites-enabled/testnet-core-rpc.synergy-network.io')
         fragments={
@@ -175,7 +175,7 @@ class GatewayHandoffTests(unittest.TestCase):
             return 'a'*64,routes if str(path)==b.HANDOFF_FILES['nginx_rpc'] else b'public'
         with patch.object(b,'_handoff_public',side_effect=public),patch.object(b,'_handoff_command',side_effect=command),\
              patch.object(b,'_handoff_unit_pin',side_effect=lambda fragment:public(fragment)[0]),\
-             patch.object(b,'_handoff_root_entries',return_value=('b'*64,set())),\
+             patch.object(b,'_handoff_root_entries',side_effect=lambda root,allowed:('b'*64,{'foreign_resources'} if (root=='/opt/synergy' and lower_foreign) or (root=='/opt/Synergy' and upper_foreign) else set())),\
              patch.object(b,'_legacy_canary_identity',return_value=({'network_id':'posy-apqe-canary-process-49028'},{'retirement_verified':False})),\
              patch.object(Path,'is_symlink',side_effect=lambda:True),\
              patch.object(Path,'lstat',return_value=SimpleNamespace(st_uid=0)),\

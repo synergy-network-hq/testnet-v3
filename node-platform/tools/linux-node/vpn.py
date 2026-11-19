@@ -592,6 +592,138 @@ def retire_peer(work, management, account, enrollment_pin, binding_pin):
                                   lambda method, path: _management_request(origin, token, method, path))
 
 
+def legacy_canary_retirement_scope(enrollment, binding, provider_raw, expected, ca, now):
+    """Coordinator library only; expected pins/account come from native review.
+
+    This does not grant provider access. The caller must independently admit the
+    ORIGINAL old-network provider and credential, never a fresh-network policy.
+    No credential, setup key, or renderer-supplied authority is accepted here.
+    """
+    from vpn_authorization import provider_policy, CONTROLLED_PROFILE
+    require(isinstance(expected, dict) and set(expected) == {
+        'provider_sha256', 'account_id', 'enrollment_sha256', 'binding_sha256'},
+        'Exact native-reviewed legacy peer commitments required')
+    for key in ('provider_sha256', 'enrollment_sha256', 'binding_sha256'):
+        require(isinstance(expected[key], str) and re.fullmatch('[a-f0-9]{64}', expected[key]),
+                'Independent legacy retirement pin required')
+    policy = provider_policy(provider_raw, expected['provider_sha256'], ca, now, cleanup_action='retire')
+    require(policy['profile'] == CONTROLLED_PROFILE
+            and policy['network_binding']['network_id'] == 'posy-apqe-canary-process-49028'
+            and policy['network_binding']['chain_id'] == 99999
+            and policy['account_id'] == expected['account_id'],
+            'Original obsolete Canary provider account approval required')
+    identity = retirement_binding(enrollment, binding)
+    require(identity['enrollment_sha256'] == expected['enrollment_sha256']
+            and identity['binding_sha256'] == expected['binding_sha256']
+            and identity['management_origin'] == management_origin(policy['management_origin'])
+            and identity['management_origin'] == 'https://vpn-coordinator.synergy-network.io'
+            and retirement_json(enrollment).get('wireguard_public_key') == 'EhHDd/L7fXX+c8x2nyJx8wWUwGRij3AmioVZKiH4/2M='
+            and identity['peer_id'] == 'dboqb9if611ohpqo0e1g'
+            and identity['peer_name'] == 'synergy-canary-rpc-99999'
+            and identity['hostname'] == 'vmi3381382' and identity['ip'] == '10.69.51.205',
+            'Exact obsolete Canary peer binding required')
+    return policy, identity
+
+
+def legacy_canary_peer_preflight(enrollment, binding, provider_raw, expected_provider_sha256,
+                                ca, review, expected_plan_sha256, now, request):
+    """NEW retirement-only native purpose, never expired issuance authority.
+
+    Transport policy/pin and CA are existing independently approved coordinator
+    trust. `review` must be created by native explicit consent for this purpose,
+    with expected_plan_sha256 from its fresh authenticated legacy-plan read.
+    No CLI/native route admits renderer-created reviews or loads credentials here.
+    Standard NetBird REST omits the WG key, so this preflight cannot authorize
+    deletion. It provides useful account/peer checks without inventing key proof.
+    """
+    from vpn_authorization import provider_policy
+    fields = {'purpose','plan_sha256','provider_sha256','account_id','enrollment_sha256',
+              'binding_sha256','expires_at','network_id','genesis_sha256','machine_id_sha256','target'}
+    require(isinstance(review,dict) and set(review)==fields
+            and review['purpose']=='nodenetwork-legacy-peer-retirement-v1'
+            and review['network_id']=='posy-apqe-canary-process-49028'
+            and review['genesis_sha256']=='d28ab09b6857f670482580a786edd939b090e88aa9378cdd0ad91379a724a9d7'
+            and review['machine_id_sha256']=='8683ea9f4da9e9c05c26b6d8070cc13c0f5f75b0cd4a4de863492164f4c1e26d'
+            and review['target']=={'kind':'remote','host':'167.86.83.83','port':22,'root':'/opt/Synergy'}
+            and type(review['target']['port']) is int,'Exact legacy retirement native purpose required')
+    for value in (expected_plan_sha256,expected_provider_sha256,review['enrollment_sha256'],review['binding_sha256']):
+        require(isinstance(value,str) and re.fullmatch('[a-f0-9]{64}',value),'Independent retirement commitment required')
+    require(review['plan_sha256']==expected_plan_sha256 and review['provider_sha256']==expected_provider_sha256,
+            'Retirement review differs from authenticated plan or provider')
+    require(type(now) is int and type(review['expires_at']) is int
+            and 0<now<review['expires_at']<=now+120,'Fresh native retirement-purpose review required')
+    # cleanup_action permits parsing the pinned transport identity after its old
+    # issuance deadline. ONLY the separate fresh purpose authorizes these GETs.
+    transport=provider_policy(provider_raw,expected_provider_sha256,ca,now,cleanup_action='retire')
+    require(transport['account_id']==review['account_id'],'Reviewed coordinator account differs')
+    identity=retirement_binding(enrollment,binding)
+    require(identity['enrollment_sha256']==review['enrollment_sha256']
+            and identity['binding_sha256']==review['binding_sha256']
+            and identity['management_origin']==management_origin(transport['management_origin'])
+            and identity['management_origin']=='https://vpn-coordinator.synergy-network.io'
+            and identity['peer_id']=='dboqb9if611ohpqo0e1g' and identity['peer_name']=='synergy-canary-rpc-99999'
+            and identity['hostname']=='vmi3381382' and identity['ip']=='10.69.51.205'
+            and retirement_json(enrollment).get('wireguard_public_key')=='EhHDd/L7fXX+c8x2nyJx8wWUwGRij3AmioVZKiH4/2M=',
+            'Reviewed obsolete peer differs')
+    def get(path):
+        require(now<=int(time.time())<review['expires_at'],'Native retirement-purpose review expired')
+        code,value=request('GET',path)
+        require(code==200,'Authenticated legacy peer read refused')
+        return value
+    accounts=get('/api/accounts')
+    require(isinstance(accounts,list) and len(accounts)==1 and isinstance(accounts[0],dict)
+            and accounts[0].get('id')==review['account_id'],'Authenticated account differs')
+    peer=get('/api/peers/'+identity['peer_id'])
+    matches=lambda p:isinstance(p,dict) and all(p.get(remote)==identity[local] for remote,local in
+        (('id','peer_id'),('name','peer_name'),('hostname','hostname'),('ip','ip')))
+    require(matches(peer),'Authenticated peer differs')
+    peers=get('/api/peers')
+    require(isinstance(peers,list) and len(peers)<=8192 and all(isinstance(p,dict)
+            and isinstance(p.get('id'),str) for p in peers) and len({p['id'] for p in peers})==len(peers),
+            'Bounded unique peer inventory required')
+    selected=[p for p in peers if p.get('id')==identity['peer_id'] or p.get('name')==identity['peer_name'] or p.get('ip')==identity['ip']]
+    require(len(selected)==1 and matches(selected[0]),'Legacy peer inventory ambiguous')
+    return {'schema':'nodenetwork-legacy-peer-retirement-preflight-v1','ready':False,
+            'plan_sha256':expected_plan_sha256,'provider_sha256':expected_provider_sha256,
+            'account_id':review['account_id'],'peer_id':identity['peer_id'],
+            'account_verified':True,'peer_verified':True,'public_key_verified':False,
+            'blocker':'independent_peer_key_binding_unavailable','mutation_performed':False,
+            'retirement_authorized':False}
+
+
+def retire_legacy_canary_peer(work, enrollment, binding, provider_raw, expected, ca, now, request, *, review_expires_at):
+    """Exact-peer adapter to the existing durable retirement, not enrollment.
+
+    No CLI or current native route exposes this function. A native-approved
+    original provider/credential and explicit per-peer consent remain required.
+    The supplied request is the existing authenticated provider transport.
+    """
+    from lifecycle import _require_operator
+    _require_operator()
+    require(type(now) is int and type(review_expires_at) is int and 0 < now < review_expires_at <= now + 120,
+            'Fresh exact-peer native review required')
+    require(now <= int(time.time()) < review_expires_at, 'Exact-peer native review expired')
+    policy, identity = legacy_canary_retirement_scope(
+        enrollment, binding, provider_raw, expected, ca, now)
+    work = Path(work)
+    require(work.is_absolute() and Path('/opt') not in (work, *work.parents),
+            'Native coordinator workspace required, never an installation root')
+    for parent in (work, *work.parents):
+        meta = parent.lstat()
+        require(stat.S_ISDIR(meta.st_mode) and meta.st_uid == os.geteuid()
+                and not meta.st_mode & 0o022, 'Unsafe coordinator workspace ancestry')
+    require(not work.stat().st_mode & 0o077, 'Private coordinator workspace required')
+    from lifecycle import _lifecycle_lock
+    with _lifecycle_lock(work):
+        # Existing helper persists the exact intent before DELETE and only
+        # receipts GET404 plus account inventory absence. Lost replies reconcile.
+        def bounded_request(method, path):
+            if method == 'DELETE':
+                require(int(time.time()) < review_expires_at, 'Exact-peer native review expired before deletion')
+            return request(method, path)
+        return _retire_bound_peer(work, identity, policy['account_id'], bounded_request)
+
+
 def validate_retirement_receipt(raw, enrollment, binding):
     identity = retirement_binding(enrollment, binding)
     receipt = retirement_json(raw)

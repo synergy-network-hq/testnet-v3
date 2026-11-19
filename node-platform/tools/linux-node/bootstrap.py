@@ -2209,7 +2209,7 @@ def _handoff_root_entries(root,allowed):
             item=entry.stat(follow_symlinks=False)
             kind='directory' if stat.S_ISDIR(item.st_mode) else 'file' if stat.S_ISREG(item.st_mode) else 'other'
             entries.append([entry.name,kind,stat.S_IMODE(item.st_mode),item.st_uid,item.st_gid])
-            if entry.name not in allowed or kind=='other' or item.st_uid!=0 or item.st_mode&0o022:
+            if entry.name not in allowed or kind=='other' or item.st_uid!=0 or item.st_mode&0o022 or (entry.name=='README.md' and (kind!='file' or stat.S_IMODE(item.st_mode)!=0o600 or item.st_nlink!=1)):
                 blockers.add('foreign_resources')
     raw=json.dumps(sorted(entries),sort_keys=True,separators=(',',':')).encode()
     return hashlib.sha256(raw).hexdigest(),blockers
@@ -2252,8 +2252,8 @@ def _gateway_handoff_snapshot(*, canary_only=False):
     canary_pin,canary_active,canary_pid=_handoff_unit(HANDOFF_UNITS[1],'/etc/systemd/system/'+HANDOFF_UNITS[1],'/opt/Synergy/bin/synergy-node')
     vpn_pin,vpn_active,vpn_pid=_handoff_unit(HANDOFF_UNITS[2],'/etc/systemd/system/'+HANDOFF_UNITS[2],'/opt/Synergy/bin/netbird')
     lower,lower_blockers=_handoff_root_entries('/opt/synergy',{'chain1266'})
-    upper,upper_blockers=_handoff_root_entries('/opt/Synergy',DIRECTORIES|{'package.json','installation.json'})
-    blockers={'metrics_resolution_required','explicit_retirement_approval_required','legacy_inventory_requires_attribution'}|lower_blockers|upper_blockers
+    upper,upper_blockers=_handoff_root_entries('/opt/Synergy',DIRECTORIES|{'package.json','installation.json'}|({'README.md'} if canary_only else set()))
+    blockers={'metrics_resolution_required','explicit_retirement_approval_required','legacy_inventory_requires_attribution'}|(set() if canary_only else lower_blockers)|upper_blockers
     if not all(preserved[k] for k in ('tunnel_active','rpc_listener_owned','ws_listener_owned')):
         blockers.add('protected_attribution_failed')
     metrics={'unit_sha256':role_pin,'service_active':role_active,
@@ -2280,6 +2280,11 @@ def _gateway_handoff_snapshot(*, canary_only=False):
 
 def _legacy_canary_identity():
     base=Path('/opt/Synergy')
+    package_pin,package_raw=_handoff_public(base/'package.json')
+    require(package_pin=='ef491eddd06e4145abc1f396b3c363cb2a7f2ec2d582d1d05cf5d28c6dfc679f','Independently attributed legacy package required')
+    package=json.loads(package_raw);readme_pin,_=_handoff_public(base/'README.md')
+    require(isinstance(package.get('files'),dict) and package['files'].get('README.md')==readme_pin,
+            'Legacy README must match attributed package')
     node_pin,node_raw=_handoff_public(base/'config/node.json')
     relay_pin,relay_raw=_handoff_public(base/'config/canary-rpc-relay.json')
     node=json.loads(node_raw);relay=json.loads(relay_raw)
