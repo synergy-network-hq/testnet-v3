@@ -1,5 +1,15 @@
 # Migration map
 
+## Current replacement scope — 2026-11-19
+
+Immediate qualification uses **Val2, Val3, Val4 and Val6**; Val5/the temporary
+guest and future Val1 admission are not prerequisites. The signed five-member
+roster and strict count/weight quorum remain unchanged; minimum cluster size
+three is a separate architectural requirement. Apply the current acceptance
+conditions in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md). Earlier
+five-host/process checkpoints below remain historical evidence, not a requirement
+for five operational validators or a claim that current acceptance has passed.
+
 ## Integrated offline recovery checkpoint — 2026-10-27
 
 Current isolated engineering acceptance and actual five-host stopped-state evidence

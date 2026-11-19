@@ -1,3 +1,41 @@
+<!-- Current replacement qualification scope: 2026-11-19 -->
+## Current four-validator PoSy replacement qualification
+
+The immediate single-authority replacement qualification set is **Val2, Val3,
+Val4 and Val6**, operated through Portal → dApp Hub → NodeNetwork. Val5 and the
+temporary guest are postponed; neither is a qualification prerequisite. Val1
+remains on the single-authority chain until an independently accepted successor
+and approved identity/client-route transition permit its retirement; fresh Val1
+admission follows that retirement through the authenticated membership procedure.
+
+Keep the existing signed five-member Genesis roster, identities, weights and
+finalized history. The current four-participant subset must satisfy the runtime's
+unchanged strict greater-than-two-thirds **count and frozen-weight** quorum
+against that full signed roster. Four equal-weight members out of five pass;
+three out of five do not. The architectural minimum of three members per cluster
+is separate from this quorum and from the four independently hosted qualification
+target. Future clustering/admission work does not block this valid current
+single-cluster topology and is not claimed complete here.
+
+Qualification remains unchecked until the exact uniform release demonstrates
+matching authenticated identity, APQE authority, peer connectivity, three-QC
+finality, sustained production, autonomous epochs, encrypted execution, exact
+fees/nonces/balances and durable receipts, restart/rejoin and duplicate rejection,
+bounded resources under meaningful workload, authenticated public RPC and native
+monitoring/lifecycle controls. For this signed five-member roster, losing one of
+the four online members leaves three: require below-quorum halt, then recovery
+when four return; do not require a fifth member to rejoin. No current live result
+is asserted or acceptance box closed by this scope correction.
+
+Earlier five-process fixtures, five-host observations, immutable ratification
+artifacts and dated release campaigns below retain their historical scope.
+`qualify-posy-process-fleet.py`, `aggregate-qualification.py`,
+`prepare-stability-launch.py`, `qualify-apqe-vpn-fleet.py` and
+`accept-processing-once.py` describe those earlier fixture/operator workflows;
+they are not the current NodeNetwork replacement acceptance route. Their fixed
+five-member inputs do not create an operational fifth-validator prerequisite.
+Do not invoke their direct host mutation paths instead of the application.
+
 <!-- Current fleet replacement authorization: 2026-11-02 -->
 Operator explicitly requires replacing obsolete Val2–Val6 applications via the canonical Linux node setup architecture, using actual validator VPN. All5 node services inactive; VPN active, all20 pair reachability checks pass. Canonical package APQE provisioning/commissioning/replacement support is being completed before deployment. Fresh APQE inputs generated; no installed replacement yet. Runtime provider-context regression and strict Clippy pass; actual fleet encrypted execution/recovery remains OPEN. Refer to current fleet section of `../../APQE_COMPLETION_AND_POSY_UNBLOCK_TRACKER.md`; older unchanged-fleet statements below are historical and superseded for this authorized replacement.
 

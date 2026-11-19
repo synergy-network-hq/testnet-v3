@@ -1,5 +1,17 @@
 # Synergy Node Architecture — Expanded Production Completion Checklist (Canonical 20-Role Taxonomy)
 
+## Current replacement gate — 2026-11-19
+
+Qualify **Val2, Val3, Val4 and Val6** through NodeNetwork. Val5/the temporary
+guest is postponed; Val1 joins only after accepted replacement and safe legacy
+retirement. Minimum cluster membership three is separate from qualification and
+quorum: preserve the signed five-member roster and strict count/frozen-weight
+thresholds. Four equal-weight members pass; three do not. Earlier five-process
+fixtures and recorded five-host results remain historical. Their fifth-member
+requirements do not apply to the active replacement gates. See
+[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the current scope and
+remaining acceptance conditions; all unchecked gates remain unchecked.
+
 ## Integrated offline recovery checkpoint — 2026-10-27
 
 Current isolated engineering acceptance and actual five-host stopped-state evidence
@@ -656,10 +668,10 @@ Owners: architecture lead owns design and review; scoped source owners implement
   - [ ] Qualify the exact resulting bytes in isolated full-process validators with real networking, storage and production signing/admission paths; identify any missing facility before implementation.
   - [ ] Pin artifact digest and signed release identity only after qualification; review journal compatibility and explicit rollback safety.
   - Evidence: `node-platform/tools/release/build-linux.sh`, canonical signed release metadata and full-process logs. In-process socket tests alone do not satisfy this gate.
-- [ ] **E — Five-host qualification** (fleet operator).
-  - [ ] Verify all five exact signed artifacts, configuration and membership; prove advancing common finalized block/state commitments and funded transfers with identical applied receipts and wallet effects.
-  - [ ] Qualify three-validator halt, four-validator automatic recovery, fifth rejoin and individual restarts with retained journals and zero unexplained automatic retries.
-  - Evidence: `node-platform/tools/validator/test-posy-live-quorum-recovery.py`, canonical live observations, journal cursors and exact RPC/durable proofs. Historical seq18 recovery PASS is prior evidence, not approval of a new architecture release.
+- [ ] **E — Four-host replacement qualification** (fleet operator).
+  - [ ] Verify Val2/Val3/Val4/Val6 use the exact uniform approved release and signed five-member network/membership inputs; prove advancing common finalized block/state commitments and funded transfers with identical applied receipts and wallet effects on all four.
+  - [ ] Qualify three-of-five below-quorum halt and four-of-five automatic recovery, plus individual restart/rejoin within the four-member operating set, with retained journals and zero unexplained automatic retries. A fifth online validator is not required.
+  - Evidence: actual NodeNetwork current-network observations and complete verified finality evidence, exact RPC/durable receipts, lifecycle results and resource observations across the four selected hosts. Historical five-process/live harness and seq18 recovery results remain prior evidence, not approval of the current release.
 - [ ] **F — TPS baseline and measured capacity** (load qualification owner and fleet operator).
   - [ ] Capture the initial canary baseline before tuning, preserve its exact artifact/configuration, workload and host/resource context, then repeat the same workload after stabilization for a direct comparison (operator direction2026-10-19). Memory qualification remains a prerequisite.
   - [ ] Finalize the first funded transfer, then 1 TPS / 30 transactions / 30 seconds; then 1 TPS for 10 minutes.
@@ -713,13 +725,13 @@ A checked launch item requires the stated evidence, not merely a source file.
 - [x] L12 — Recheck all target hosts, trusted SSH access, time synchronization, resources, transport addresses, service ownership, custody permissions and port/firewall reachability; record exact current deployment targets.
 - [x] L13 — Build and validate the native Linux release from this canonical source without Docker or source mirrors; verify binary architecture, version and hashes.
 - [x] L14 — Produce one internally consistent signed fresh-network artifact set and per-node configuration for val2–val6; verify chain/genesis/parameter roots, unique identities and all key possession before starting.
-- [ ] L15 — Deploy identical verified release/artifacts and supervised services to val2–val6; verify installed hashes/configuration and startup health.
-- [ ] L16 — Prove live startup: all five agree on advancing finalized height and hash, normal protected H3+ execution, QC progression, and no signing/consensus conflicts.
+- [ ] L15 — Deploy identical verified release/artifacts and supervised services to Val2/Val3/Val4/Val6; verify installed hashes/configuration and startup health.
+- [ ] L16 — Prove live startup: Val2/Val3/Val4/Val6 agree on advancing finalized height and hash, normal protected H3+ execution, QC progression, and no signing/consensus conflicts.
 - [ ] L17 — Prove live resilience: sustained finality across proposer leases, sequential process restarts, one validator offline/rejoin, and controlled below-quorum halt/recovery; inspect memory/disk/log growth and stalls.
 - [ ] L18 — Move RPC/observer/indexer/Atlas to the fresh chain and verify matching finalized hashes and bounded lag; confirm bootseed/VPN management outages do not stop the established validator mesh.
 - [ ] L19 — Replace Val1 authority only after L16–L18 pass; prepare/join val1 using the governed membership transition, verify catch-up, repeat quorum and restart checks for the resulting membership, and verify public routing no longer uses the old authority.
 - [ ] L20 — Update changed host/configuration/passphrase/custody information only in /Users/jhutzler/Desktop/node-machine-credentials.xlsx, in place, without a copy or backup; validate unchanged workbook structure and secret-free reporting.
-- [ ] L22 — First establish a genuine signed-transaction baseline after allfive match the advancing tip, then measure maximum sustainable ETDAG ordered TPS under progressive genuine signed transaction load; separately report accepted, ordered and finalized TPS, latency, backlog, errors and resource saturation with reproducible load windows.
+- [ ] L22 — First establish a genuine signed-transaction baseline after Val2/Val3/Val4/Val6 match the advancing tip, then measure maximum sustainable ETDAG ordered TPS under progressive genuine signed transaction load; separately report accepted, ordered and finalized TPS, latency, backlog, errors and resource saturation with reproducible load windows.
 - [ ] L23 — TPS statistics and animated chart bundle deployed to protected Atlas PoSy (Pages b18cc3e6); exact live asset and unauthenticated401 verified. Complete authenticated rendered-data verification and accepted/ordered instrumentation; keep explicit unavailable values until measured.
 - [ ] L21 — Final acceptance: record release/configuration identifiers, matching live finalized tips, elapsed stability window, recovery results and remaining limitations; leave no launch-critical unchecked item.
 
