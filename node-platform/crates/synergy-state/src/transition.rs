@@ -8,7 +8,23 @@ use synergy_storage::{
 use crate::state::{history_record, validate, DurableState, STATE_FORMAT, STATE_RECORD};
 use crate::world_history::{self, world_record, WorldHistoryTip};
 use crate::world_resources::{BudgetedWorld, WorldResourceBudget};
-use crate::{state_root, FinalizedState, WorldState};
+use crate::{state_root, FinalizedReceiptBatch, FinalizedReceiptEntry, FinalizedState, WorldState};
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ReceiptPointer { height: u64, block_id: String, batch_digest: String, row: usize }
+
+struct EncodedSize(usize);
+impl std::io::Write for EncodedSize {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.checked_add(bytes.len()).ok_or_else(|| std::io::Error::other("receipt size overflow"))?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+
+type ReceiptBatchRead = (FinalizedReceiptBatch, Option<crate::world_resources::WorldResourcePermit>);
+pub type FinalizedTransactionLookup = (FinalizedReceiptBatch, FinalizedReceiptEntry, Option<crate::world_resources::WorldResourcePermit>);
 
 const MAX_COMMITMENT_BYTES: usize = 64 * 1024;
 
@@ -201,8 +217,26 @@ impl FinalizedStateStore {
         base: &WorldState,
         world: &WorldState,
     ) -> Result<bool, StateError> {
+        self.commit_verified_world_transition_with_receipts(next, base, world, None)
+    }
+
+    /// Execution supplies only the exact PoSy-verified candidate's public rows.
+    /// One nonempty batch joins the SAME guarded transaction as the World/tip.
+    pub fn commit_verified_world_transition_with_receipts(
+        &mut self,
+        next: FinalizedState,
+        base: &WorldState,
+        world: &WorldState,
+        receipts: Option<&FinalizedReceiptBatch>,
+    ) -> Result<bool, StateError> {
+        if let Some(batch) = receipts { batch.validate(&next)?; }
         let _write_scratch = self.reserve_write(world, Some(base))?;
         if self.check_world_commit(&next, world)? {
+            if let Some(batch) = receipts {
+                if self.finalized_receipts_at(next.finalized_height)?.as_ref().map(|(value, _)| value) != Some(batch) {
+                    return Err(StateError::ConflictingReplay);
+                }
+            }
             return Ok(false);
         }
         let encoded = if let Some(current) = self.current() {
@@ -224,7 +258,7 @@ impl FinalizedStateStore {
         } else {
             world_history::checkpoint(next.finalized_height, world)?
         };
-        self.commit_world_record(next, encoded)
+        self.commit_world_record_with_receipts(next, encoded, receipts)
     }
 
     fn reserve_write(
@@ -302,10 +336,30 @@ impl FinalizedStateStore {
         next: FinalizedState,
         (world_bytes, tip): (Vec<u8>, WorldHistoryTip),
     ) -> Result<bool, StateError> {
+        self.commit_world_record_with_receipts(next, (world_bytes, tip), None)
+    }
+
+    fn commit_world_record_with_receipts(
+        &mut self,
+        next: FinalizedState,
+        (world_bytes, tip): (Vec<u8>, WorldHistoryTip),
+        receipts: Option<&FinalizedReceiptBatch>,
+    ) -> Result<bool, StateError> {
+        let mut measured = EncodedSize(0);
+        if let Some(batch) = receipts { serde_json::to_writer(&mut measured, batch).map_err(|e| StateError::Corrupt(e.to_string()))?; }
+        // Same fixed record ceiling as existing candidate/World storage. A
+        // pressure refusal is not a new transaction/consensus validity rule.
+        if measured.0 > 64 * 1024 * 1024 { return Err(StateError::ResourcePressure { requested: measured.0, limit: 64 * 1024 * 1024 }); }
+        let _receipt_scratch = self.budget.as_ref().map(|budget| budget.reserve(measured.0.saturating_mul(4)))
+            .transpose().map_err(crate::world_resources::resource_state_error)?;
+        let receipt_bytes = receipts.map(serde_json::to_vec).transpose().map_err(|e| StateError::Corrupt(e.to_string()))?;
+        if let (Some(batch), Some(bytes)) = (receipts, receipt_bytes.as_ref()) {
+            self.prepare_receipt_pointers(batch, &synergy_storage::IntegrityDigest::of("SYNERGY_FINALIZED_RECEIPTS_V1", bytes).0)?;
+        }
         let world_path = world_record(next.finalized_height);
         let history_path = history_record(next.finalized_height);
         let durable = durable_bytes(&next)?;
-        let preconditions = [
+        let mut preconditions = vec![
             self.current_precondition()?,
             StoragePrecondition {
                 relative_path: world_path.clone().into(),
@@ -317,7 +371,12 @@ impl FinalizedStateStore {
             },
         ];
         let mut transaction =
-            StorageTransaction::new(MAX_STATE_TRANSACTION_BYTES).map_err(storage_error)?;
+            StorageTransaction::new(MAX_STATE_TRANSACTION_BYTES + receipt_bytes.as_ref().map_or(0, Vec::len)).map_err(storage_error)?;
+        if let Some(bytes) = receipt_bytes {
+            let path = finalized_receipts_record(next.finalized_height);
+            preconditions.push(StoragePrecondition { relative_path: path.clone().into(), required: RequiredRecord::MissingOrSameWrite });
+            transaction.put(path, bytes).map_err(storage_error)?;
+        }
         transaction
             .put(world_path, world_bytes)
             .and_then(|()| transaction.put(history_path, durable.clone()))
@@ -329,6 +388,84 @@ impl FinalizedStateStore {
         self.current = Some(next);
         *self.world_tip.borrow_mut() = Some(tip);
         Ok(true)
+    }
+
+    fn receipt_pointer(&self, transaction_id: &str) -> Result<Option<ReceiptPointer>, StateError> {
+        if transaction_id.len() != 64 || !transaction_id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+            return Err(StateError::InvalidCommitment);
+        }
+        self.store.inspect_consistent(|reader| reader.with_maximum_bytes(1024).read_optional_bounded(receipt_pointer_record(transaction_id)))
+            .map_err(storage_error)?.map_err(storage_error)?
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(|e| StateError::Corrupt(e.to_string()))).transpose()
+    }
+
+    // Publish bounded lookup pointers first. They NEVER attest execution. A
+    // crash here leaves a detectable provisional pointer; sequential replay
+    // completes the authoritative batch+World transaction before exposing it.
+    fn prepare_receipt_pointers(&mut self, batch: &FinalizedReceiptBatch, batch_digest: &str) -> Result<(), StateError> {
+        fn flush(store: &mut AtomicStore, writes: &mut Vec<(String, Vec<u8>)>) -> Result<(), StateError> {
+            if writes.is_empty() { return Ok(()); }
+            let mut transaction = StorageTransaction::new(1024 * 1024).map_err(storage_error)?;
+            let mut guards = Vec::with_capacity(writes.len());
+            for (path, bytes) in writes.drain(..) {
+                guards.push(StoragePrecondition { relative_path: path.clone().into(), required: RequiredRecord::MissingOrSameWrite });
+                transaction.put(path, bytes).map_err(storage_error)?;
+            }
+            transaction.commit_guarded(store, &guards).map_err(storage_error)
+        }
+        let mut writes = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for (row, entry) in batch.transactions.iter().enumerate() {
+            let id = &entry.receipt.transaction_id;
+            if !seen.insert(id) { continue; }
+            let pointer = ReceiptPointer { height: batch.finalized.finalized_height, block_id: batch.finalized.finalized_block_id.clone(), batch_digest: batch_digest.into(), row };
+            if let Some(old) = self.receipt_pointer(id)? {
+                if old == pointer { continue; }
+                if old.height < pointer.height {
+                    self.finalized_transaction(id)?.ok_or(StateError::ConflictingReplay)?;
+                    continue; // A later replay cannot overwrite the first outcome.
+                }
+                return Err(StateError::ConflictingReplay);
+            }
+            writes.push((receipt_pointer_record(id), serde_json::to_vec(&pointer).map_err(|e| StateError::Corrupt(e.to_string()))?));
+            // Bound each auxiliary write set, never the number of transactions
+            // in a consensus block. All chunks precede the atomic state commit.
+            if writes.len() == 512 { flush(&mut self.store, &mut writes)?; }
+        }
+        flush(&mut self.store, &mut writes)
+    }
+
+    /// Direct bounded lookup. The pointer alone is not a receipt: it must name
+    /// an exact row in the batch atomically committed with executed state.
+    pub fn finalized_transaction(&self, transaction_id: &str) -> Result<Option<FinalizedTransactionLookup>, StateError> {
+        let Some(pointer) = self.receipt_pointer(transaction_id)? else { return Ok(None) };
+        let (batch, permit) = self.finalized_receipts_at(pointer.height)?.ok_or_else(|| StateError::Corrupt("transaction index is not committed".into()))?;
+        if batch.finalized.finalized_block_id != pointer.block_id { return Err(StateError::ConflictingReplay); }
+        synergy_storage::IntegrityDigest(pointer.batch_digest).verify("SYNERGY_FINALIZED_RECEIPTS_V1", &serde_json::to_vec(&batch).map_err(|e| StateError::Corrupt(e.to_string()))?).map_err(storage_error)?;
+        let entry = batch.transactions.get(pointer.row).filter(|entry| entry.receipt.transaction_id == transaction_id)
+            .ok_or(StateError::ConflictingReplay)?.clone();
+        Ok(Some((batch, entry, permit)))
+    }
+
+    /// Missing means unobserved: old software/snapshot restores may not have
+    /// receipts. No backfill, negative inclusion claim or World reconstruction.
+    fn finalized_receipts_at(&self, height: u64) -> Result<Option<ReceiptBatchRead>, StateError> {
+        let (bytes, scratch) = self.store.inspect_consistent(|reader| -> Result<_, StateError> {
+            let path = finalized_receipts_record(height);
+            let length = reader.optional_record_bytes(&path).map_err(storage_error)?.unwrap_or(0);
+            let scratch = self.budget.as_ref().map(|budget| budget.reserve(length.saturating_mul(4)))
+                .transpose().map_err(crate::world_resources::resource_state_error)?;
+            Ok((reader.read_optional_bounded(&path).map_err(storage_error)?, scratch))
+        }).map_err(storage_error)??;
+        let Some(bytes) = bytes else { return Ok(None) };
+        let batch: FinalizedReceiptBatch = serde_json::from_slice(&bytes).map_err(|e| StateError::Corrupt(e.to_string()))?;
+        batch.validate(&batch.finalized)?;
+        if batch.finalized.finalized_height != height
+            || self.current().is_none_or(|tip| tip.finalized_height < height
+                || (tip.finalized_height == height && tip != &batch.finalized)) {
+            return Err(StateError::ConflictingReplay);
+        }
+        Ok(Some((batch, scratch)))
     }
 
     /// Commits a finalized snapshot supplied by the authenticated Sync
@@ -606,6 +743,14 @@ impl FinalizedStateStore {
     }
 }
 
+fn receipt_pointer_record(id: &str) -> String {
+    format!("finalized-transaction-index/{id}.json")
+}
+
+fn finalized_receipts_record(height: u64) -> String {
+    format!("finalized-receipts/{height:020}.json")
+}
+
 fn processing_history_pin(height: u64) -> String {
     format!("processing-pinned-history/{height:020}.json")
 }
@@ -643,6 +788,83 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    fn receipt_batch(height: u64, world: &WorldState) -> FinalizedReceiptBatch {
+        FinalizedReceiptBatch {
+            schema_version: 1,
+            finalized: FinalizedState { finalized_height: height, finalized_block_id: format!("{height:064x}"), state_root: state_root(world).unwrap() },
+            protected_execution_root: "c".repeat(64), finality_certificate_id: "d".repeat(64),
+            transactions: vec![FinalizedReceiptEntry { sender: "syna1sender".into(), receiver: "syna1receiver".into(), amount_nwei: 1000, nonce: 0, gas_limit: 100, max_fee_per_gas_nwei: 1, receipt: crate::FinalizedPublicReceipt {
+                transaction_id: "a".repeat(64), status: crate::FinalizedReceiptStatus::Applied,
+                gas_used: 21, state_root_after: state_root(world).unwrap(), error_code: None,
+            }}],
+        }
+    }
+
+    #[test]
+    fn durable_receipt_survives_64_block_pruning_restart_and_later_replay() {
+        let root = root(); let world = WorldState::default(); let original = receipt_batch(1, &world);
+        let mut store = FinalizedStateStore::load(&root).unwrap();
+        for height in 1..=66 {
+            let mut batch = receipt_batch(height, &world);
+            if height == 66 { batch.transactions[0].receipt.status = crate::FinalizedReceiptStatus::Reverted; batch.transactions[0].receipt.error_code = Some("nonce_mismatch".into()); }
+            store.commit_verified_world_transition_with_receipts(batch.finalized.clone(), &world, &world, if height == 1 || height == 66 { Some(&batch) } else { None }).unwrap();
+            store.prune_finalized_history(height, 64).unwrap();
+        }
+        assert!(store.history_at(1).unwrap().is_none());
+        assert!(store.world_state_at(1).unwrap().is_none());
+        drop(store);
+        let store = FinalizedStateStore::load(&root).unwrap();
+        let (batch, row, _permit) = store.finalized_transaction(&"a".repeat(64)).unwrap().unwrap();
+        assert_eq!(batch, original); assert_eq!(row, original.transactions[0]);
+        assert!(store.finalized_transaction(&"b".repeat(64)).unwrap().is_none());
+        let bytes = std::fs::read(root.join(finalized_receipts_record(1))).unwrap();
+        assert!(!String::from_utf8(bytes).unwrap().contains("payload"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn durable_receipt_batch_exceeds_storage_write_count_without_transaction_limit() {
+        let root = root(); let world = WorldState::default(); let mut batch = receipt_batch(1, &world);
+        let row = batch.transactions[0].clone();
+        batch.transactions = (0..1025).map(|n| { let mut row = row.clone(); row.receipt.transaction_id = format!("{n:064x}"); row }).collect();
+        let mut store = FinalizedStateStore::load(&root).unwrap();
+        store.commit_verified_world_transition_with_receipts(batch.finalized.clone(), &world, &world, Some(&batch)).unwrap();
+        drop(store);
+        let store = FinalizedStateStore::load(&root).unwrap();
+        assert_eq!(store.finalized_transaction(&format!("{:064x}",1024)).unwrap().unwrap().1, batch.transactions[1024]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn provisional_receipt_pointer_never_exposes_pre_state_crash_and_resumes() {
+        let root = root(); let world = WorldState::default(); let batch = receipt_batch(1, &world);
+        let mut store = FinalizedStateStore::load(&root).unwrap();
+        store.prepare_receipt_pointers(&batch, &synergy_storage::IntegrityDigest::of("SYNERGY_FINALIZED_RECEIPTS_V1", &serde_json::to_vec(&batch).unwrap()).0).unwrap(); // Deterministic crash seam before atomic state/batch.
+        assert!(store.finalized_transaction(&"a".repeat(64)).is_err());
+        assert!(store.current().is_none()); drop(store);
+        let mut store = FinalizedStateStore::load(&root).unwrap();
+        assert!(store.finalized_transaction(&"a".repeat(64)).is_err());
+        store.commit_verified_world_transition_with_receipts(batch.finalized.clone(), &world, &world, Some(&batch)).unwrap();
+        assert_eq!(store.finalized_transaction(&"a".repeat(64)).unwrap().unwrap().0, batch);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn durable_receipt_conflict_and_invalid_world_do_not_publish_or_overwrite() {
+        let root = root(); let world = WorldState::default(); let batch = receipt_batch(1, &world);
+        let mut store = FinalizedStateStore::load(&root).unwrap();
+        let mut wrong = batch.clone(); wrong.finalized.state_root = "b".repeat(64);
+        assert!(store.commit_verified_world_transition_with_receipts(wrong.finalized.clone(), &world, &world, Some(&wrong)).is_err());
+        assert!(store.receipt_pointer(&"a".repeat(64)).unwrap().is_none());
+        store.commit_verified_world_transition_with_receipts(batch.finalized.clone(), &world, &world, Some(&batch)).unwrap();
+        assert!(!store.commit_verified_world_transition_with_receipts(batch.finalized.clone(), &world, &world, Some(&batch)).unwrap());
+        let bytes = std::fs::read(root.join(finalized_receipts_record(1))).unwrap();
+        let mut conflict = batch.clone(); conflict.transactions[0].receipt.gas_used += 1;
+        assert_eq!(store.commit_verified_world_transition_with_receipts(batch.finalized.clone(), &world, &world, Some(&conflict)), Err(StateError::ConflictingReplay));
+        assert_eq!(std::fs::read(root.join(finalized_receipts_record(1))).unwrap(), bytes);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn processing_commitment_pin_survives_pruning_and_releases_after_restart() {

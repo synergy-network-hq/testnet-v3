@@ -2503,10 +2503,47 @@ impl ExecutionService {
                 .state_store
                 .as_mut()
                 .ok_or("execution finalized-state store unavailable")?;
-            match state_store.commit_verified_world_transition(
+            if candidate.transactions.len() != candidate.receipts.len() || candidate.transactions.iter().zip(&candidate.receipts).any(|(transaction, receipt)|
+                !receipt.validate() || transaction.id().ok().as_ref() != Some(&receipt.transaction_id)) {
+                return Err("finalized receipt differs from its transaction".into());
+            }
+            let receipt_metadata_bytes = candidate.transactions.iter().zip(&candidate.receipts).try_fold(0usize, |total, (transaction, receipt)| {
+                transaction.unsigned.sender.len().checked_add(transaction.unsigned.receiver.len())
+                    .and_then(|bytes| bytes.checked_add(receipt.error_code.as_ref().map_or(0, String::len)))
+                    .and_then(|bytes| bytes.checked_mul(4)).and_then(|bytes| bytes.checked_add(2048))
+                    .and_then(|bytes| total.checked_add(bytes)).ok_or("finalized receipt metadata overflow")
+            })?;
+            let _receipt_metadata = match self.ingress.world_budget().reserve(receipt_metadata_bytes) {
+                Ok(permit) => permit,
+                Err(synergy_state::world_resources::WorldResourceError::Capacity { .. }) => break,
+                Err(error) => return Err(format!("reserve finalized receipts: {error:?}")),
+            };
+            let public_receipts = (!candidate.transactions.is_empty()).then(|| synergy_state::FinalizedReceiptBatch {
+                schema_version: 1,
+                finalized: finalized.clone(),
+                protected_execution_root: record.protected_execution_root.clone(),
+                finality_certificate_id: record.finality_certificate_id.clone(),
+                transactions: candidate.transactions.iter().zip(&candidate.receipts).map(|(transaction, receipt)| synergy_state::FinalizedReceiptEntry {
+                    sender: transaction.unsigned.sender.clone(),
+                    receiver: transaction.unsigned.receiver.clone(),
+                    amount_nwei: transaction.unsigned.amount_nwei,
+                    nonce: transaction.unsigned.nonce,
+                    gas_limit: transaction.unsigned.fee_limit.gas_limit,
+                    max_fee_per_gas_nwei: transaction.unsigned.fee_limit.max_fee_per_gas_nwei,
+                    receipt: synergy_state::FinalizedPublicReceipt {
+                        transaction_id: receipt.transaction_id.0.clone(),
+                        status: match receipt.status { synergy_transaction::ReceiptStatus::Applied => synergy_state::FinalizedReceiptStatus::Applied, synergy_transaction::ReceiptStatus::Reverted => synergy_state::FinalizedReceiptStatus::Reverted },
+                        gas_used: receipt.gas_used,
+                        state_root_after: receipt.state_root_after.clone(),
+                        error_code: receipt.error_code.clone(),
+                    },
+                }).collect(),
+            });
+            match state_store.commit_verified_world_transition_with_receipts(
                 finalized,
                 &self.finalized_state,
                 &candidate.state,
+                public_receipts.as_ref(),
             ) {
                 Ok(_) => {}
                 Err(synergy_state::StateError::ResourcePressure { .. }) => break,

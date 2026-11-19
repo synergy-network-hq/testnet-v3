@@ -412,6 +412,31 @@ impl CanonicalReadProvider for CanonicalQueryStore {
         query: &TransactionQuery,
     ) -> Result<Option<FinalizedTransactionView>, RpcError> {
         query.validate()?;
+        // Public receipts survive bulky execution/World retirement. They were
+        // committed in the same state transaction, not inferred from a live tip.
+        let state = self.state_store()?;
+        if let Some((batch, row, _receipt_permit)) = state.finalized_transaction(&query.transaction_id)
+            .map_err(|_| RpcError::unavailable("finalized transaction index unavailable"))? {
+            let height = batch.finalized.finalized_height;
+            let finality = self.finality_store()?.get(height)
+                .map_err(|_| RpcError::unavailable("read finalized receipt finality"))?
+                .ok_or_else(|| RpcError::unavailable("finalized receipt lacks canonical finality"))?;
+            if finality.height != height || finality.block_id != batch.finalized.finalized_block_id
+                || finality.protected_execution_root != batch.protected_execution_root
+                || finality.finality_certificate_id != batch.finality_certificate_id {
+                return Err(RpcError::unavailable("finalized receipt conflicts with canonical finality"));
+            }
+            return Ok(Some(FinalizedTransactionView {
+                transaction_id: row.receipt.transaction_id.clone(),
+                block_height: height,
+                block_hash: batch.finalized.finalized_block_id,
+                finality_certificate_id: batch.finality_certificate_id,
+                status: match row.receipt.status { synergy_state::FinalizedReceiptStatus::Applied => "applied", synergy_state::FinalizedReceiptStatus::Reverted => "reverted" }.into(),
+                transaction: json!({"unsigned":{"sender":row.sender,"receiver":row.receiver,"amount_nwei":row.amount_nwei.to_string(),"nonce":row.nonce,"fee_limit":{"gas_limit":row.gas_limit,"max_fee_per_gas_nwei":row.max_fee_per_gas_nwei}}}),
+                receipt: serde_json::to_value(&row.receipt).map_err(|_| RpcError::unavailable("encode finalized receipt"))?,
+            }));
+        }
+        // Compatibility only: never reconstruct receipts for pruned old heights.
         for height in self.candidate_heights()?.into_iter().rev() {
             // Most finalized blocks are empty. Bind their compact metadata to
             // durable state/finality before deciding whether transaction payload
@@ -1897,6 +1922,37 @@ mod nonblocking_http_tests {
         let reset = samples.observe([Some(1), Some(1), None, None]);
         assert!(reset["accepted_tps"].is_null());
         assert!(reset["ordered_tps"].is_null());
+    }
+
+    #[test]
+    fn durable_receipt_rpc_survives_pruning_restart_and_rejects_foreign_finality() {
+        for mismatch in [false, true] {
+            let root = std::env::temp_dir().join(format!("rpc-durable-receipt-{}-{}-{mismatch}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+            let layout = NodeStorageLayout::new(root.clone()).unwrap();
+            let mut state = FinalizedStateStore::load(layout.state().join("execution")).unwrap();
+            let finality = FinalityStore::new(layout.consensus().join("posy")).unwrap();
+            let world = synergy_state::WorldState::default();
+            let mut prior = None;
+            for height in 1..=66 {
+                let next = synergy_state::FinalizedState { finalized_height: height, finalized_block_id: format!("{height:064x}"), state_root: synergy_state::state_root(&world).unwrap() };
+                let record = FinalizedBlockRecord { height, block_id: next.finalized_block_id.clone(), finality_certificate_id: "d".repeat(64), protected_execution_root: "c".repeat(64) };
+                finality.commit_exactly_once(&record, prior.as_ref()).unwrap(); prior = Some(record);
+                let batch = synergy_state::FinalizedReceiptBatch { schema_version: 1, finalized: next.clone(), protected_execution_root: "c".repeat(64), finality_certificate_id: if mismatch { "e".repeat(64) } else { "d".repeat(64) }, transactions: vec![synergy_state::FinalizedReceiptEntry { sender: "syna1sender".into(), receiver: "syna1receiver".into(), amount_nwei: 1000, nonce: 0, gas_limit: 100, max_fee_per_gas_nwei: 1, receipt: synergy_state::FinalizedPublicReceipt { transaction_id: "a".repeat(64), status: synergy_state::FinalizedReceiptStatus::Applied, gas_used: 12, state_root_after: next.state_root.clone(), error_code: None } }] };
+                state.commit_verified_world_transition_with_receipts(next, &world, &world, if height == 1 { Some(&batch) } else { None }).unwrap();
+                state.prune_finalized_history(height, 64).unwrap();
+            }
+            assert!(state.history_at(1).unwrap().is_none()); drop(state);
+            let query = CanonicalQueryStore::load(&root).unwrap();
+            let result = query.transaction(&TransactionQuery { transaction_id: "a".repeat(64) });
+            if mismatch { assert!(result.is_err()); } else {
+                let receipt = result.unwrap().unwrap();
+                assert_eq!(receipt.block_height,1); assert_eq!(receipt.status,"applied");
+                assert_eq!(receipt.transaction,json!({"unsigned":{"sender":"syna1sender","receiver":"syna1receiver","amount_nwei":"1000","nonce":0,"fee_limit":{"gas_limit":100,"max_fee_per_gas_nwei":1}}}));
+                assert!(query.transaction(&TransactionQuery { transaction_id: "b".repeat(64) }).unwrap().is_none());
+                assert!(query.account(&AccountQuery { address:"syna1sender".into(), at_height:Some(1) }).unwrap().is_none());
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

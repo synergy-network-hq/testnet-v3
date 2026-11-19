@@ -5,6 +5,7 @@
 
 mod account;
 mod diff;
+mod finalized_receipts;
 mod overlay;
 mod proof;
 mod pruning;
@@ -15,10 +16,11 @@ pub mod world_history;
 pub mod world_resources;
 
 pub use account::AccountState;
+pub use finalized_receipts::{FinalizedPublicReceipt, FinalizedReceiptBatch, FinalizedReceiptEntry, FinalizedReceiptStatus};
 pub use diff::{AccountChange, ProtocolChange, StateDiff};
 pub use overlay::StateOverlay;
 pub use proof::{verify_finalized_state_proof, StateProof, StateProofVerifier};
 pub use pruning::RetentionPolicy;
 pub use root::{state_root, state_root_with_size};
 pub use state::{FinalizedState, WorldState};
-pub use transition::{FinalizedStateStore, StateError};
+pub use transition::{FinalizedStateStore, FinalizedTransactionLookup, StateError};
