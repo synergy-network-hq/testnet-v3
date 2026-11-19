@@ -506,7 +506,7 @@ def bare_initial_authorization(root,policy,release_id,pin):
         operation=request['operation'];key=request['request_sha256']
         require(operation in ('install','commission','register','start','stop','restart','upgrade','uninstall',
             'identity_generate','formation_prepare','treasury_prepare','treasury_send_prepare','treasury_send_submit','genesis_stage','genesis_bind','network_formation_prepare',
-            'network_formation_sign','network_transport_prepare','network_transport_sign','vpn_enroll','vpn_bind','vpn_retire','vpn_cancel_unused','vpn_stop','vpn_resume','boot_policy',
+            'network_formation_sign','network_transport_prepare','network_transport_sign','gateway_admission_prepare','gateway_admission_sign','vpn_enroll','vpn_bind','vpn_retire','vpn_cancel_unused','vpn_stop','vpn_resume','boot_policy',
             'guest_create','guest_stop','guest_resume','guest_remove') and key not in grants,'Invalid initial grant inventory')
         relative='tmp/controller/grants/'+key+'.json';grant_raw=bare_file(root/relative,65536)
         grant=json.loads(grant_raw)
@@ -1070,7 +1070,7 @@ def stage_engineering_update(stream, release_id, pin, reconcile=False):
 # The document is not a public policy issuer, membership proof or credential API.
 AUTHORIZATION_PROFILE='nodenetwork-isolated-formation-authorization-v1'
 AUTHORIZATION_LIMIT=12*1024*1024
-AUTHORIZATION_FILES={'commissioning-readiness.json':128*1024,'managed-guest.json':16384,'formation-context.json':4096,'vpn-ca.pem':128*1024,'vpn-provider.json':16384,'vpn-enrollment.json':16384,'vpn-server-binding.json':16384,'vpn-retirement.json':16384,'vpn-unused-cancellation.json':16384,
+AUTHORIZATION_FILES={'gateway-purpose.json':16384,'commissioning-readiness.json':128*1024,'managed-guest.json':16384,'formation-context.json':4096,'vpn-ca.pem':128*1024,'vpn-provider.json':16384,'vpn-enrollment.json':16384,'vpn-server-binding.json':16384,'vpn-retirement.json':16384,'vpn-unused-cancellation.json':16384,
     'commissioning/config/node.json':1024*1024,'commissioning/config/start-authorized.json':65536,
     **{'commissioning/network/'+name:limit for name,limit in {
         'genesis.json':4*1024*1024,'authority.json':1024*1024,'authority-root.pub':8192,
@@ -1175,6 +1175,20 @@ def authorization_inputs(doc,encoded):
         require(0<len(data)<=limit and base64.b64encode(data).decode()==text
                 and hashlib.sha256(data).hexdigest()==pin,'Authorization artifact digest or encoding differs')
         result[name]=data
+    if 'gateway-purpose.json' in result:
+        require(set(result)=={'gateway-purpose.json'} and len(doc['requests'])==1
+                and doc['requests'][0]['operation']=='gateway_admission_prepare',
+                'Gateway purpose requires its one exact prepare grant only')
+        purpose=json.loads(result['gateway-purpose.json'])
+        fields={'format','purpose','formation_sha256','transport_review_sha256','issuer_root_sha256','gateway_enrollment_sha256',
+                'genesis_sha256','authority_sha256','registry_sha256','valid_from_unix','expires_at_unix'}
+        require(isinstance(purpose,dict) and set(purpose)==fields and purpose['format']=='synergy-engineering-gateway-purpose-v1'
+                and purpose['purpose']=='engineering-rpc-gateway-admission-v1' and doc['chain_id']==99999
+                and all(isinstance(purpose[k],str) and re.fullmatch('[a-f0-9]{64}',purpose[k]) for k in fields-{'format','purpose','valid_from_unix','expires_at_unix'})
+                and type(purpose['valid_from_unix']) is int and type(purpose['expires_at_unix']) is int
+                and 0<purpose['valid_from_unix']<purpose['expires_at_unix']<2**53
+                and purpose['expires_at_unix']-purpose['valid_from_unix']<=7*86400,
+                'Exact isolated gateway additional-purpose approval required')
     if 'commissioning-readiness.json' in result:
         # This public evidence cannot carry configuration or any other grant.
         expected=hashlib.sha256(json.dumps({'version':1,'operation':'commission','parameters':{}},
@@ -1274,6 +1288,24 @@ def active_guest_policy_only(continuation,inputs,doc,policy):
             and len(doc['requests'])==1 and doc['requests'][0]['operation']=='guest_create'
             and doc['genesis_pins']==policy.get('validator_identity_network')
             and 'guest' not in doc['target'])
+
+
+def gateway_issuer_policy_only(root,continuation,inputs,doc,policy):
+    if not (continuation and len(doc['requests'])==1 and doc['genesis_pins']==policy.get('validator_identity_network')):return False
+    op=doc['requests'][0]['operation']
+    if not (op=='gateway_admission_prepare' and set(inputs)=={'gateway-purpose.json'} or op=='gateway_admission_sign' and not inputs):return False
+    from controller import Controller
+    from canary_rpc_relay import _gateway_scope,_gateway_approval
+    c=Controller(root);_,scope,review,_,_=_gateway_scope(c)
+    if op=='gateway_admission_sign':_gateway_approval(c,policy,scope,review)
+    else:
+        a=json.loads(inputs['gateway-purpose.json'])
+        require(all(a[k]==scope[k] for k in ('formation_sha256','genesis_sha256','authority_sha256','registry_sha256'))
+                and a['transport_review_sha256']==review['review_sha256'] and a['issuer_root_sha256']==review['issuer_root_sha256'],
+                'Gateway purpose changes the exact installed owner origin')
+    from lifecycle import _attributed_units
+    _attributed_units(root)
+    return True
 
 
 def transport_authorization(continuation,inputs,doc,policy):
@@ -1394,6 +1426,7 @@ def stage_engineering_authorization(stream):
                         and (doc['requests'][0]['operation'] in ('stop','restart','treasury_send_prepare','treasury_send_submit')
                              or len(doc['requests'])==1 and doc['requests'][0]['operation']=='boot_policy'))
         guest_policy_only=active_guest_policy_only(continuation,inputs,doc,policy)
+        gateway_policy_only=gateway_issuer_policy_only(ROOT,continuation,inputs,doc,policy)
         guest_lifecycle_only=(continuation and not inputs and len(doc['requests'])==1
             and doc['requests'][0]['operation'] in ('guest_stop','guest_resume','guest_remove')
             and doc['genesis_pins'] in (None,policy.get('validator_identity_network')))
@@ -1401,9 +1434,9 @@ def stage_engineering_authorization(stream):
         if guest_lifecycle_only:
             from guest_lifecycle import GuestManager
             guest_manager=GuestManager(ROOT,policy);guest_manager.verify_guard();guest_manager.status({'guest_id':guest_manager.spec['guest_id']})
-        require(not active or pure_lifecycle or guest_policy_only or guest_lifecycle_only,'Stop validator before artifact, formation or configuration authorization change')
+        require(not active or pure_lifecycle or guest_policy_only or guest_lifecycle_only or gateway_policy_only,'Stop validator before artifact, formation or configuration authorization change')
         vpn=_unit_state('synergy-vpn.service')
-        if not active:
+        if not active and not gateway_policy_only:
             if guest_lifecycle_only or transport_authorization(continuation,inputs,doc,policy):guest_management_quiescence(ROOT,policy,_assert_no_application_processes,vpn.get('MainPID'))
             else:_assert_no_application_processes(ROOT,vpn_pid=vpn.get('MainPID'))
         requests=[];seen=set()

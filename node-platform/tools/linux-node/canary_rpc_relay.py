@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 import sys
 from urllib.parse import urlsplit
 
@@ -496,3 +497,268 @@ if __name__ == '__main__':
     except (ValueError, OSError, KeyError, TypeError) as error:
         print('Canary relay refused: '+str(error), file=sys.stderr)
         sys.exit(1)
+
+# Prospective engineering-only formation-issuer management. This is admission
+# issuance, never gateway OS commissioning or validator/public RPC exposure.
+GATEWAY_PURPOSE = 'engineering-rpc-gateway-admission-v1'
+GATEWAY_PREPARE = {'formation_sha256','transport_review_sha256','gateway_enrollment_json',
+                   'purpose_approval_sha256','purpose_approval_json','valid_from_unix','expires_at_unix'}
+GATEWAY_RESULT = {'schema','pending','signed','request_sha256','review_sha256','purpose_approval_sha256',
+    'formation_sha256','network_id','chain_id','genesis_sha256','authority_sha256','registry_sha256',
+    'gateway_address','gateway_enrollment_sha256','valid_from_unix','expires_at_unix','admission_sha256',
+    'sign_request_sha256','gateway_commissioned','services_started','public_listener','production_qualified','automatic_retry'}
+GATEWAY_DIRECTORY = 'tmp/gateway-admission'
+GATEWAY_PREPARE_INTENT = 'tmp/gateway-admission-prepare-request.json'
+GATEWAY_SIGN_INTENT = 'tmp/gateway-admission-sign-request.json'
+GATEWAY_APPROVAL = 'gateway-purpose.json'
+
+
+def gateway_parameters(operation, parameters):
+    expected = GATEWAY_PREPARE if operation in ('gateway_admission_prepare','gateway_admission_preflight') else {'review_sha256','purpose_approval_sha256'} if operation=='gateway_admission_sign' else {'request_sha256'} if operation=='gateway_admission_reconcile' else set()
+    require(operation in {'gateway_admission_preflight','gateway_admission_prepare','gateway_admission_sign','gateway_admission_status','gateway_admission_export','gateway_admission_reconcile'}
+            and isinstance(parameters,dict) and set(parameters)==expected,'Exact gateway admission parameters required')
+    for key in expected-{'gateway_enrollment_json','purpose_approval_json','valid_from_unix','expires_at_unix'}:
+        require(_is_digest(parameters[key]),'Exact gateway admission pin required')
+    if operation in ('gateway_admission_prepare','gateway_admission_preflight'):
+        require(all(type(parameters[k]) is int and 0<parameters[k]<2**53 for k in ('valid_from_unix','expires_at_unix'))
+                and 0<parameters['expires_at_unix']-parameters['valid_from_unix']<=7*86400,'Bounded engineering gateway validity required')
+        for key,limit in (('gateway_enrollment_json',128*1024),('purpose_approval_json',16384)):
+            require(isinstance(parameters[key],str) and 0<len(parameters[key].encode('utf-8'))<=limit,'Bounded public gateway artifact required')
+        require(_sha(parameters['purpose_approval_json'].encode())==parameters['purpose_approval_sha256'],'Exact gateway purpose bytes required')
+
+
+def _gateway_request_bytes(request):
+    return json.dumps(request,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode('utf-8')
+
+
+def _gateway_empty(blocker,scope=None):
+    result={k:None for k in GATEWAY_RESULT}
+    result.update(schema='nodenetwork-gateway-admission-v1',pending=False,signed=False,available=blocker is None,blocker=blocker,
+                  gateway_commissioned=False,services_started=False,public_listener=False,production_qualified=False,automatic_retry=False)
+    return result
+
+
+def _gateway_authority_root(c,policy):
+    pins=policy.get('validator_identity_network',{})
+    pin=pins.get('authority-root.pub')
+    require(_is_digest(pin),'Exact approved gateway authority root required')
+    installed=c.direct(c.root/'network/authority-root.pub',True,8192).read_bytes()
+    source=c.direct(c.root/'tmp/network-formation/authority-root.pub',True,8192).read_bytes()
+    require(_sha(installed)==pin and installed==source,'Gateway authority root differs from approved signed formation')
+
+
+def _gateway_scope(c,historical=False):
+    import lifecycle as life
+    receipt,manifest=life._sealed_receipt(c.root)
+    policy=c.policy()
+    require(_is_digest(policy.get('engineering_initial_authorization_sha256')) and receipt['role']=='validator'
+            and receipt['chain_id']==99999 and policy.get('engineering_target',{}).get('guest') is None,
+            'Engineering formation issuer on the exact physical Canary required')
+    from controller import engineering_effective_selection
+    selected=engineering_effective_selection(c.root,policy)
+    require(selected is not None and all(selected[k]==receipt[k] for k in ('network_id','chain_id','node_name')),
+            'Gateway issuer installed selection differs')
+    for name in ('bin/synergy-node','bin/synergy-keytool','bin/synergy-genesis','lib/apqe/build-report.json'):
+        require(_is_digest(manifest['files'].get(name)),'Qualified native gateway owner is absent')
+    capability=json.loads(native([c.root/'bin/synergy-keytool','gateway-admission-capability'],maximum_stdout=4096))
+    require(capability=={'capability':GATEWAY_PURPOSE,'custody_role':'formation-transport-issuer-ml-dsa-87-v1',
+                         'additional_purpose_required':True,'production_qualified':False},'Qualified gateway issuer capability unavailable')
+    selection,flags=c.formation_context()
+    require(selection['network_id']==receipt['network_id'] and selection['chain_id']=='99999','Gateway formation differs from installed scope')
+    args=[c.formation_context_path(),selection['formation_sha256'],c.root/'tmp/network-formation',c.root/'tmp/network-transport']
+    review=json.loads(native([c.root/'bin/synergy-keytool','review-gateway-issuer' if historical else 'review-network-transport',*args,*flags],maximum_stdout=128*1024))
+    require(review.get('signed') is True and review.get('formation_sha256')==selection['formation_sha256'],
+            'Exact signed transport owner required')
+    public={'genesis_sha256':'network/genesis.json','authority_sha256':'network/authority.json',
+            'registry_sha256':'network/transport-registry.json','issuer_root_sha256':'network/transport-root.pub'}
+    pins=policy.get('validator_commissioning_files',{})
+    for key,name in public.items():
+        require(_is_digest(review.get(key)) and pins.get(name)==review[key]
+                and _sha(c.direct(c.root/name,True,4*1024*1024).read_bytes())==review[key],
+                'Gateway origin differs from exact approved installed public files')
+    _gateway_authority_root(c,policy)
+    scope={k:selection[k] for k in ('formation_sha256','network_id','chain_id')}
+    scope.update({k:review[k] for k in ('genesis_sha256','authority_sha256','registry_sha256')})
+    return policy,scope,review,args,flags
+
+
+def _gateway_approval(c,policy,scope,review,historical=False):
+    pin=policy.get('authorization_files',{}).get(GATEWAY_APPROVAL)
+    require(_is_digest(pin),'Exact additional gateway purpose approval is required')
+    path=c.control/'authorization/inputs'/GATEWAY_APPROVAL
+    raw=c.direct(path,True,16384).read_bytes()
+    require(_sha(raw)==pin,'Gateway purpose artifact changed')
+    a=json.loads(raw,object_pairs_hook=_unique_fields)
+    expected={'format','purpose','formation_sha256','transport_review_sha256','issuer_root_sha256','gateway_enrollment_sha256',
+              'genesis_sha256','authority_sha256','registry_sha256','valid_from_unix','expires_at_unix'}
+    import time
+    require(isinstance(a,dict) and set(a)==expected and a['format']=='synergy-engineering-gateway-purpose-v1'
+            and a['purpose']==GATEWAY_PURPOSE and all(_is_digest(a[k]) for k in expected-{'format','purpose','valid_from_unix','expires_at_unix'})
+            and all(a[k]==scope[k] for k in ('formation_sha256','genesis_sha256','authority_sha256','registry_sha256'))
+            and a['transport_review_sha256']==review['review_sha256'] and a['issuer_root_sha256']==review['issuer_root_sha256']
+            and type(a['valid_from_unix']) is int and type(a['expires_at_unix']) is int
+            and 0<a['valid_from_unix']<a['expires_at_unix']<2**53
+            and (historical or a['valid_from_unix']<=int(time.time())<a['expires_at_unix'])
+            and a['expires_at_unix']-a['valid_from_unix']<=7*86400
+            and review['valid_from_unix']<=a['valid_from_unix'] and a['expires_at_unix']<=review['expires_at_unix'],
+            'Gateway purpose differs from the exact current formation owner')
+    return path,pin,raw,a
+
+
+def gateway_owner_available(c):
+    try:_gateway_scope(c);return True
+    except (ValueError,OSError,KeyError,TypeError,subprocess.SubprocessError):return False
+
+
+def _gateway_attributed(c):
+    import lifecycle as life
+    life._attributed_units(c.root)
+    # The isolated issuer is read-only; no validator/VPN service is changed.
+
+
+def _gateway_preflight(c,p,args,flags,scope,review,policy):
+    from controller import canonical,request_digest
+    _gateway_attributed(c)
+    require(not any((c.root/name).exists() or (c.root/name).is_symlink() for name in
+                    (GATEWAY_DIRECTORY,GATEWAY_PREPARE_INTENT,GATEWAY_SIGN_INTENT)),
+            'Gateway prepare exists or is uncertain; reconcile original request')
+    path=c.control/'authorization/inputs'/GATEWAY_APPROVAL
+    existing=policy.get('authorization_files',{}).get(GATEWAY_APPROVAL)
+    if existing is None:
+        require(not path.exists() and not path.is_symlink(),'Unapproved gateway purpose file requires reconciliation')
+    else:
+        require(existing==p['purpose_approval_sha256'] and c.direct(path,True,16384).read_bytes()==p['purpose_approval_json'].encode(),
+                'Existing gateway purpose differs; no new authorization may replace it')
+    prepared={'version':1,'operation':'gateway_admission_prepare','parameters':p}
+    value=json.loads(native([c.root/'bin/synergy-keytool','check-gateway-admission',*args,*flags],data=_gateway_request_bytes(prepared),maximum_stdout=16384))
+    expected={'schema','ready','request_sha256','formation_sha256','transport_review_sha256','issuer_root_sha256','purpose_approval_sha256',
+              'genesis_sha256','authority_sha256','registry_sha256','gateway_enrollment_sha256','gateway_address','network_id','chain_id',
+              'valid_from_unix','expires_at_unix','mutation_performed','services_started','public_listener','production_qualified'}
+    require(isinstance(value,dict) and set(value)==expected and value['schema']=='nodenetwork-gateway-admission-preflight-v1'
+            and value['ready'] is True and value['request_sha256']==request_digest(prepared)
+            and all(value[k]==v for k,v in scope.items()) and value['transport_review_sha256']==review['review_sha256']
+            and value['issuer_root_sha256']==review['issuer_root_sha256'] and value['purpose_approval_sha256']==p['purpose_approval_sha256']
+            and value['gateway_enrollment_sha256']==_sha(p['gateway_enrollment_json'].encode())
+            and all(value[k]==p[k] for k in ('valid_from_unix','expires_at_unix'))
+            and all(value[k] is False for k in ('mutation_performed','services_started','public_listener','production_qualified')),
+            'Gateway owner preflight differs')
+    return value
+
+
+def gateway_admission(c,request):
+    """Fixed owner CLI only. No generic paths, secret export, grants or network I/O."""
+    import lifecycle as life
+    from controller import canonical,request_digest
+    op=request['operation'];p=request['parameters'];gateway_parameters(op,p)
+    with life._lifecycle_lock(c.root):
+        try:policy,scope,review,args,flags=_gateway_scope(c,historical=op not in ('gateway_admission_prepare','gateway_admission_preflight','gateway_admission_sign'))
+        except (ValueError,OSError,KeyError,TypeError,subprocess.SubprocessError):
+            if op=='gateway_admission_status':return _gateway_empty('gateway_runtime_or_origin_unavailable')
+            raise ValueError('Qualified gateway owner and exact installed origin required') from None
+        if op=='gateway_admission_preflight':return _gateway_preflight(c,p,args,flags,scope,review,policy)
+        try:approval,pin,approval_raw,approved=_gateway_approval(c,policy,scope,review,historical=op not in ('gateway_admission_prepare','gateway_admission_sign'))
+        except (ValueError,OSError,KeyError,TypeError):
+            if op=='gateway_admission_status':return _gateway_empty('gateway_purpose_approval_required',scope)
+            raise ValueError('Exact independently staged gateway purpose approval required') from None
+        directory=c.root/GATEWAY_DIRECTORY;prepare=c.root/GATEWAY_PREPARE_INTENT;sign=c.root/GATEWAY_SIGN_INTENT
+        prefix=[c.root/'bin/synergy-keytool'];owner=[*args,approval,pin]
+        if op in ('gateway_admission_prepare','gateway_admission_sign'):
+            _gateway_attributed(c)
+            if op=='gateway_admission_prepare':
+                require(not any(path.exists() or path.is_symlink() for path in (directory,prepare,sign)),
+                        'Gateway prepare exists or is uncertain; reconcile original request')
+                require(p['formation_sha256']==scope['formation_sha256'] and p['transport_review_sha256']==review['review_sha256']
+                        and p['purpose_approval_sha256']==pin and p['purpose_approval_json'].encode()==approval_raw
+                        and _sha(p['gateway_enrollment_json'].encode())==approved['gateway_enrollment_sha256']
+                        and all(p[k]==approved[k] for k in ('valid_from_unix','expires_at_unix')),
+                        'Gateway prepare differs from reviewed additional purpose')
+                _gateway_preflight(c,p,args,flags,scope,review,policy)
+                path=prepare;command='prepare-gateway-admission'
+            else:
+                current=_gateway_read(c,prefix,owner,flags,directory,prepare,sign,scope,pin)
+                require(current['signed'] is False and current['review_sha256']==p['review_sha256'] and p['purpose_approval_sha256']==pin
+                        and not sign.exists() and not sign.is_symlink(),'Gateway sign exists or exact review changed')
+                path=sign;command='sign-gateway-admission'
+            # The existing independently scoped one-use grant remains the only
+            # mutation authorization. Intent is fsynced before invoking owner.
+            c.authorize(request);raw=_gateway_request_bytes(request)
+            with path.open('xb') as stream:os.fchmod(stream.fileno(),0o600);stream.write(raw);stream.flush();os.fsync(stream.fileno())
+            life._sync_directory(path.parent)
+            tail=[path,request_digest(request),directory] if op=='gateway_admission_prepare' else [directory,path,request_digest(request)]
+            native([*prefix,command,*owner,*tail,*flags],maximum_stdout=128*1024)
+        if op=='gateway_admission_status' and not any(path.exists() or path.is_symlink() for path in (directory,prepare,sign)):
+            return _gateway_empty(None,scope)
+        result=_gateway_read(c,prefix,owner,flags,directory,prepare,sign,scope,pin,export=op=='gateway_admission_export')
+        if op=='gateway_admission_reconcile':require(p['request_sha256'] in (result['request_sha256'],result['sign_request_sha256']),
+            'Gateway reconciliation does not match the retained original request')
+        return result
+
+
+def _gateway_consumed(c,request):
+    from controller import MUTATIONS,request_digest
+    import time
+    key=request_digest(request);grant=c.control/'grants'/(key+'.json')
+    require(not grant.exists() and not grant.is_symlink(),'Gateway original grant is not consumed')
+    raw=c.direct(c.control/'audit.jsonl',True,1024*1024).read_bytes();rows=raw.splitlines()
+    require(0<len(rows)<=4096,'Gateway audit exceeds bound');matched=0
+    for line in rows:
+        row=json.loads(line,object_pairs_hook=_unique_fields)
+        require(isinstance(row,dict) and set(row)=={'request_sha256','operation','time'}
+                and _is_digest(row['request_sha256']) and row['operation'] in MUTATIONS
+                and type(row['time']) is int and 0<=row['time']<=int(time.time()),'Malformed gateway audit')
+        if row['request_sha256']==key:
+            require(row['operation']==request['operation'],'Gateway original audit differs');matched+=1
+    require(matched==1,'Exact consumed gateway request audit required')
+
+
+def _gateway_tree(c,directory,prepare,sign):
+    from apqe_layout import require_frozen_tree
+    require_frozen_tree(directory)
+    signed=directory/'signed';has_signed=signed.exists() or signed.is_symlink()
+    names={'request.json','review.json'}|({'signed/sign-request.json','signed/rpc-gateway-admission.json'} if has_signed else set())
+    children=list(directory.rglob('*'))
+    require({p.relative_to(directory).as_posix() for p in children if p.is_file()}==names
+            and {p.relative_to(directory).as_posix() for p in children if p.is_dir()}==({'signed'} if has_signed else set()),
+            'Gateway admission inventory is incomplete or unexpected')
+    for path in (directory,*children):
+        st=path.lstat()
+        require(st.st_uid==os.geteuid() and stat.S_IMODE(st.st_mode)==(0o700 if path.is_dir() else 0o600)
+                and (path.is_dir() or st.st_nlink==1),'Gateway admission private ownership or links differ')
+    require((directory/'request.json').read_bytes()==c.direct(prepare,True,2*1024*1024).read_bytes(),
+            'Gateway original prepare bytes changed')
+    if has_signed:
+        require((signed/'sign-request.json').read_bytes()==c.direct(sign,True).read_bytes(),
+                'Gateway original sign bytes changed')
+    else:require(not sign.exists() and not sign.is_symlink(),'Gateway signature outcome is uncertain')
+    return {p.relative_to(c.root).as_posix() for p in (directory,*children,prepare,*([sign] if has_signed else []))}
+
+
+def _gateway_read(c,prefix,owner,flags,directory,prepare,sign,scope,pin,export=False):
+    _gateway_tree(c,directory,prepare,sign)
+    from controller import parse_request,request_digest
+    original=parse_request(c.direct(prepare,True,2*1024*1024).read_bytes())
+    require(original['operation']=='gateway_admission_prepare','Gateway prepare intent differs')
+    _gateway_consumed(c,original)
+    result=json.loads(native([*prefix,'export-gateway-admission' if export else 'review-gateway-admission',*owner,directory,*flags],maximum_stdout=256*1024))
+    require(isinstance(result,dict) and set(result)==GATEWAY_RESULT|({'admission_json'} if export else set())
+            and result['schema']=='nodenetwork-gateway-admission-v1' and result['pending'] is True and type(result['signed']) is bool
+            and all(result[k]==v for k,v in scope.items()) and result['request_sha256']==request_digest(original)
+            and result['purpose_approval_sha256']==pin
+            and all(_is_digest(result[k]) for k in ('review_sha256','gateway_enrollment_sha256'))
+            and result['gateway_enrollment_sha256']==_sha(original['parameters']['gateway_enrollment_json'].encode())
+            and all(result[k]==original['parameters'][k] for k in ('valid_from_unix','expires_at_unix'))
+            and isinstance(result['gateway_address'],str) and len(result['gateway_address'])<=128 and re.fullmatch('synv5[0-9a-z]+',result['gateway_address'])
+            and all(result[k] is False for k in
+                ('gateway_commissioned','services_started','public_listener','production_qualified','automatic_retry')),
+            'Gateway owner public review differs')
+    if result['signed']:
+        require(_is_digest(result['admission_sha256']) and _is_digest(result['sign_request_sha256']),'Gateway signed public pin differs')
+        signed=parse_request(c.direct(sign,True).read_bytes())
+        _gateway_consumed(c,signed)
+        require(signed['operation']=='gateway_admission_sign' and request_digest(signed)==result['sign_request_sha256']
+                and signed['parameters']=={'review_sha256':result['review_sha256'],'purpose_approval_sha256':pin},'Gateway sign intent differs')
+    else:require(not sign.exists() and not sign.is_symlink() and result['sign_request_sha256'] is None and result['admission_sha256'] is None,
+                 'Gateway signature outcome is uncertain')
+    if export:require(result['signed'] and isinstance(result['admission_json'],str) and 0<len(result['admission_json'].encode())<=128*1024
+                      and _sha(result['admission_json'].encode())==result['admission_sha256'],'Gateway public export differs')
+    return {**result,'available':True,'blocker':None}

@@ -4,7 +4,6 @@ use super::{
     apqe_transport::{self as transport, Snapshot, Stamp, TransportEntry},
     authority,
 };
-use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::Path, sync::Arc};
 use synergy_address_engine::{
     apqe::{
@@ -12,63 +11,21 @@ use synergy_address_engine::{
         engineering_transport::{CurrentTransportTrust, SessionContext, SessionError},
         gateway_transport::{self, GatewayEnrollment},
         provider::{variants::Mldsa65, PublicKey, SignOptions},
-        HashAlgorithm, Primitives, SecretBytes,
+        Primitives, SecretBytes,
     },
-    canonical_json::to_canonical_json,
     encrypt::{decrypt_with_passphrase, EncryptedEnvelope},
     types::Algorithm,
 };
 use synergy_config::NodeConfiguration;
 use synergy_protocol_types::{NodeAddress, NodeClass};
 
-pub(crate) const PROTOCOL: &str = "synergy-rpc/1.0";
-const DOMAIN: &[u8] = b"SYNERGY/CANARY-RPC-GATEWAY-ADMISSION/v1";
-const SIGN_CONTEXT: &[u8] = b"SYNERGY.CANARY.RPC.GATEWAY.ADMISSION.V1";
 pub(crate) const MAX_BODY: usize = 1_000_000;
 const HEADER: usize = 22;
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct GatewayEntry {
-    pub node_address: String,
-    pub role: String,
-    pub transport_key_id: String,
-    pub transport_key_version: u64,
-    pub transport_public_key: Vec<u8>,
-    pub enrollment_sha256: String,
-    pub revoked: bool,
-}
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct AdmissionPayload {
-    pub schema_version: u16,
-    pub scope: String,
-    pub protocol: String,
-    pub chain_id: u64,
-    pub network_id: String,
-    pub genesis_artifact_sha256: String,
-    pub authority_binding_sha256: String,
-    pub validator_registry_sha256: String,
-    pub epoch: u64,
-    pub generation: u64,
-    pub valid_from_unix: u64,
-    pub expires_at_unix: u64,
-    pub gateways: Vec<GatewayEntry>,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct SignedAdmission {
-    pub payload: AdmissionPayload,
-    pub signature: Vec<u8>,
-}
-pub(crate) fn signing_bytes(payload: &AdmissionPayload) -> Result<Vec<u8>, String> {
-    let bytes = to_canonical_json(&serde_json::to_value(payload).map_err(|e| e.to_string())?)?;
-    let mut hash = Primitives
-        .hash_stream(HashAlgorithm::Sha3512)
-        .map_err(|e| e.to_string())?;
-    hash.update(DOMAIN);
-    hash.update(&bytes);
-    Ok(hash.finalize())
-}
+#[path = "apqe_rpc_wire.rs"]
+mod wire;
+pub(crate) use wire::{
+    signing_bytes, AdmissionPayload, GatewayEntry, SignedAdmission, PROTOCOL, SIGN_CONTEXT,
+};
 fn digest(value: &str) -> bool {
     value.len() == 64
         && value

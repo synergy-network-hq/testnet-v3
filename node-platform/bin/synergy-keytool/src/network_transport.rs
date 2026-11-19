@@ -1,5 +1,7 @@
 //! Reviewed, host-private engineering transport issuance. No node activation.
 //! The registry transcript is shared verbatim with the actual session verifier.
+#[path = "network_gateway.rs"]
+pub(crate) mod gateway;
 #[path = "../../synergy-node/src/services/apqe_registry_wire.rs"]
 mod wire;
 use crate::validator_formation::{
@@ -476,6 +478,17 @@ fn load(
     directory: &Path,
     engine: &crate::provider::Engine,
 ) -> Result<Loaded, String> {
+    load_at(context, pin, formation, directory, engine, None)
+}
+// Historical validation is read-only and never used by prepare/sign entrypoints.
+fn load_at(
+    context: &Path,
+    pin: &str,
+    formation: &Path,
+    directory: &Path,
+    engine: &crate::provider::Engine,
+    at: Option<u64>,
+) -> Result<Loaded, String> {
     private_dir(directory)?;
     let raw = read(&directory.join("review.json"), 128 * 1024, true)?;
     let review: Review = decode(&raw)?;
@@ -496,7 +509,16 @@ fn load(
         &review.request_sha256,
         "network_transport_prepare",
     )?;
-    let expected = payload(&req.parameters, &source, pin, engine, clock()?)?;
+    let expected = payload(
+        &req.parameters,
+        &source,
+        pin,
+        engine,
+        match at {
+            Some(v) => v,
+            None => clock()?,
+        },
+    )?;
     let raw_payload = read(&directory.join("registry-payload.json"), LIMIT, true)?;
     if digest(raw_payload.as_bytes()) != review.payload_sha256
         || serde_json::to_value(&expected).map_err(|_| "Invalid registry")?
@@ -618,8 +640,48 @@ pub fn status(
     engine: crate::provider::Engine,
     export: bool,
 ) -> Result<Value, String> {
+    status_at(context, pin, formation, directory, engine, export, None)
+}
+fn evidence_time(directory: &Path) -> Result<u64, String> {
+    let review: Review = decode(&read(&directory.join("review.json"), 128 * 1024, true)?)?;
+    let (q, _) = exact::<Prepare>(
+        &directory.join("request.json"),
+        &review.request_sha256,
+        "network_transport_prepare",
+    )?;
+    q.parameters
+        .expires_at_unix
+        .checked_sub(1)
+        .ok_or("Invalid historical transport window".into())
+}
+pub(super) fn status_evidence(
+    context: &Path,
+    pin: &str,
+    formation: &Path,
+    directory: &Path,
+    engine: crate::provider::Engine,
+) -> Result<Value, String> {
+    status_at(
+        context,
+        pin,
+        formation,
+        directory,
+        engine,
+        false,
+        Some(evidence_time(directory)?),
+    )
+}
+fn status_at(
+    context: &Path,
+    pin: &str,
+    formation: &Path,
+    directory: &Path,
+    engine: crate::provider::Engine,
+    export: bool,
+    at: Option<u64>,
+) -> Result<Value, String> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
-    let p = load(context, pin, formation, directory, &engine)?;
+    let p = load_at(context, pin, formation, directory, &engine, at)?;
     let mut result = receipt(&p);
     if directory.join("signed-pending").exists() {
         return Err("Interrupted transport signing requires reconciliation".into());
@@ -743,7 +805,7 @@ pub(crate) fn exercise_native_fixture(
 ) {
     let source = source(context, pin, formation, engine.clone()).unwrap();
     let now = clock().unwrap();
-    let members:Vec<_>=enrollments.iter().enumerate().map(|(i,e)|json!({"enrollment_json":e,"dial_address":format!("10.90.0.{}:5622",i+1),"transport_key_id":format!("transport-{}",i+1),"configuration_json":fixture_configuration(i).to_string()})).collect();
+    let members:Vec<_>=enrollments.iter().enumerate().map(|(i,e)|json!({"enrollment_json":e,"dial_address":format!("10.90.0.{}:5622",i+1),"transport_key_id":format!("transport-{}",i+1),"configuration_json":({let mut c=fixture_configuration(i);c["chain_id"]=json!(source.genesis.unsigned.network.chain_id);c.to_string()})})).collect();
     let request = json!({"version":1,"operation":"network_transport_prepare","parameters":{"formation_sha256":pin,"genesis_review_sha256":source.export["review_sha256"],"target_provider_report_sha256":"a".repeat(64),"valid_from_unix":now,"expires_at_unix":now+3600,"members":members}});
     let path = parent.join("transport-prepare-request.json");
     let raw = encode(&request).unwrap();
@@ -839,6 +901,9 @@ pub(crate) fn exercise_native_fixture(
                 .unwrap();
         assert_eq!(start["all_pairs_vpn_verified"], false);
         assert_eq!(start["all_validators_ready"], false);
+    }
+    if source.genesis.unsigned.network.chain_id == 99999 {
+        gateway::exercise_fixture(context, pin, formation, &directory, parent, engine.clone());
     }
     // Actual registry verification succeeds only for the signed exact payload/context.
     let registry_path = directory.join("signed/transport-registry.json");

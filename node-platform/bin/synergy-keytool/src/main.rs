@@ -6,6 +6,9 @@ mod consensus_keys;
 mod etdag_keys;
 #[cfg(unix)]
 mod formation_treasury;
+#[cfg(unix)]
+#[path = "../../synergy-node/src/services/apqe_rpc_wire.rs"]
+mod gateway_wire;
 mod import_consensus;
 mod inspect;
 #[cfg(unix)]
@@ -38,36 +41,234 @@ fn run() -> Result<(), String> {
     let (arguments, engine) = selected_arguments(&arguments)?;
     match arguments {
         #[cfg(unix)]
-        [command, context, pin, formation, request, request_pin, treasury] if command == "prepare-formation-treasury-send" => {
-            println!("{}",formation_treasury::prepare_send(Path::new(context),pin,Path::new(formation),Path::new(request),request_pin,Path::new(treasury),engine.ok_or("authenticated APQE provider required")?)?);
+        [command, context, pin, formation, transport] if command == "review-gateway-issuer" => {
+            println!(
+                "{}",
+                network_transport::status_evidence(
+                    Path::new(context),
+                    pin,
+                    Path::new(formation),
+                    Path::new(transport),
+                    engine.ok_or("authenticated APQE provider required")?
+                )?
+            );
+        }
+        #[cfg(unix)]
+        [command, context, pin, formation, transport] if command == "check-gateway-admission" => {
+            use std::io::Read;
+            let mut raw = Vec::new();
+            std::io::stdin()
+                .take(2 * 1024 * 1024 + 1)
+                .read_to_end(&mut raw)
+                .map_err(|_| "Cannot read gateway preflight")?;
+            println!(
+                "{}",
+                network_transport::gateway::preflight(
+                    Path::new(context),
+                    pin,
+                    Path::new(formation),
+                    Path::new(transport),
+                    &raw,
+                    engine.ok_or("authenticated APQE provider required")?
+                )?
+            );
+        }
+        #[cfg(unix)]
+        [command] if command == "gateway-admission-capability" => {
+            println!(
+                "{}",
+                serde_json::json!({"capability":"engineering-rpc-gateway-admission-v1","custody_role":"formation-transport-issuer-ml-dsa-87-v1","additional_purpose_required":true,"production_qualified":false})
+            );
+        }
+        #[cfg(unix)]
+        [command, context, pin, formation, transport, approval, approval_pin, request, request_pin, directory]
+            if command == "prepare-gateway-admission" =>
+        {
+            let inputs = network_transport::gateway::Inputs {
+                context: Path::new(context),
+                pin,
+                formation: Path::new(formation),
+                transport: Path::new(transport),
+                approval: Path::new(approval),
+                approval_pin,
+            };
+            println!(
+                "{}",
+                network_transport::gateway::prepare(
+                    &inputs,
+                    Path::new(request),
+                    request_pin,
+                    Path::new(directory),
+                    engine.ok_or("authenticated APQE provider required")?
+                )?
+            );
+        }
+        #[cfg(unix)]
+        [command, context, pin, formation, transport, approval, approval_pin, directory, request, request_pin]
+            if command == "sign-gateway-admission" =>
+        {
+            let inputs = network_transport::gateway::Inputs {
+                context: Path::new(context),
+                pin,
+                formation: Path::new(formation),
+                transport: Path::new(transport),
+                approval: Path::new(approval),
+                approval_pin,
+            };
+            println!(
+                "{}",
+                network_transport::gateway::sign(
+                    &inputs,
+                    Path::new(directory),
+                    Path::new(request),
+                    request_pin,
+                    engine.ok_or("authenticated APQE provider required")?
+                )?
+            );
+        }
+        #[cfg(unix)]
+        [command, context, pin, formation, transport, approval, approval_pin, directory]
+            if command == "review-gateway-admission" || command == "export-gateway-admission" =>
+        {
+            let inputs = network_transport::gateway::Inputs {
+                context: Path::new(context),
+                pin,
+                formation: Path::new(formation),
+                transport: Path::new(transport),
+                approval: Path::new(approval),
+                approval_pin,
+            };
+            println!(
+                "{}",
+                network_transport::gateway::status(
+                    &inputs,
+                    Path::new(directory),
+                    engine.ok_or("authenticated APQE provider required")?,
+                    command == "export-gateway-admission"
+                )?
+            );
+        }
+
+        #[cfg(unix)]
+        [command, context, pin, formation, request, request_pin, treasury]
+            if command == "prepare-formation-treasury-send" =>
+        {
+            println!(
+                "{}",
+                formation_treasury::prepare_send(
+                    Path::new(context),
+                    pin,
+                    Path::new(formation),
+                    Path::new(request),
+                    request_pin,
+                    Path::new(treasury),
+                    engine.ok_or("authenticated APQE provider required")?
+                )?
+            );
         }
         #[cfg(unix)]
         [command, treasury, nonce] if command == "review-formation-treasury-send" => {
-            println!("{}",formation_treasury::send_status(Path::new(treasury),nonce.parse().map_err(|_|"Exact treasury nonce required")?,engine.ok_or("authenticated APQE provider required")?)?);
+            println!(
+                "{}",
+                formation_treasury::send_status(
+                    Path::new(treasury),
+                    nonce.parse().map_err(|_| "Exact treasury nonce required")?,
+                    engine.ok_or("authenticated APQE provider required")?
+                )?
+            );
         }
         #[cfg(unix)]
         [command, treasury, nonce, request_pin] if command == "take-formation-treasury-send" => {
-            println!("{}",formation_treasury::take_send(Path::new(treasury),nonce.parse().map_err(|_|"Exact treasury nonce required")?,request_pin,engine.ok_or("authenticated APQE provider required")?)?);
+            println!(
+                "{}",
+                formation_treasury::take_send(
+                    Path::new(treasury),
+                    nonce.parse().map_err(|_| "Exact treasury nonce required")?,
+                    request_pin,
+                    engine.ok_or("authenticated APQE provider required")?
+                )?
+            );
         }
         #[cfg(unix)]
-        [command, context, pin, request, request_pin, directory] if command == "prepare-formation-treasury" => {
-            println!("{}",formation_treasury::prepare(Path::new(context),pin,Path::new(request),request_pin,Path::new(directory),engine.ok_or("authenticated APQE provider required")?)?);
+        [command, context, pin, request, request_pin, directory]
+            if command == "prepare-formation-treasury" =>
+        {
+            println!(
+                "{}",
+                formation_treasury::prepare(
+                    Path::new(context),
+                    pin,
+                    Path::new(request),
+                    request_pin,
+                    Path::new(directory),
+                    engine.ok_or("authenticated APQE provider required")?
+                )?
+            );
         }
         #[cfg(unix)]
-        [command, context, pin, directory] if command == "review-formation-treasury" || command == "export-formation-treasury" => {
-            println!("{}",formation_treasury::status(Path::new(context),pin,Path::new(directory),engine.ok_or("authenticated APQE provider required")?,command == "export-formation-treasury")?);
+        [command, context, pin, directory]
+            if command == "review-formation-treasury" || command == "export-formation-treasury" =>
+        {
+            println!(
+                "{}",
+                formation_treasury::status(
+                    Path::new(context),
+                    pin,
+                    Path::new(directory),
+                    engine.ok_or("authenticated APQE provider required")?,
+                    command == "export-formation-treasury"
+                )?
+            );
         }
         #[cfg(unix)]
-        [command, context, pin, formation, request, request_pin, directory] if command=="prepare-network-transport" => {
-            println!("{}",network_transport::prepare(Path::new(context),pin,Path::new(formation),Path::new(request),request_pin,Path::new(directory),engine.ok_or("authenticated APQE provider required")?)?);
+        [command, context, pin, formation, request, request_pin, directory]
+            if command == "prepare-network-transport" =>
+        {
+            println!(
+                "{}",
+                network_transport::prepare(
+                    Path::new(context),
+                    pin,
+                    Path::new(formation),
+                    Path::new(request),
+                    request_pin,
+                    Path::new(directory),
+                    engine.ok_or("authenticated APQE provider required")?
+                )?
+            );
         }
         #[cfg(unix)]
-        [command, context, pin, formation, directory, request, request_pin] if command=="sign-network-transport" => {
-            println!("{}",network_transport::sign(Path::new(context),pin,Path::new(formation),Path::new(directory),Path::new(request),request_pin,engine.ok_or("authenticated APQE provider required")?)?);
+        [command, context, pin, formation, directory, request, request_pin]
+            if command == "sign-network-transport" =>
+        {
+            println!(
+                "{}",
+                network_transport::sign(
+                    Path::new(context),
+                    pin,
+                    Path::new(formation),
+                    Path::new(directory),
+                    Path::new(request),
+                    request_pin,
+                    engine.ok_or("authenticated APQE provider required")?
+                )?
+            );
         }
         #[cfg(unix)]
-        [command, context, pin, formation, directory] if command=="review-network-transport"||command=="export-network-transport" => {
-            println!("{}",network_transport::status(Path::new(context),pin,Path::new(formation),Path::new(directory),engine.ok_or("authenticated APQE provider required")?,command=="export-network-transport")?);
+        [command, context, pin, formation, directory]
+            if command == "review-network-transport" || command == "export-network-transport" =>
+        {
+            println!(
+                "{}",
+                network_transport::status(
+                    Path::new(context),
+                    pin,
+                    Path::new(formation),
+                    Path::new(directory),
+                    engine.ok_or("authenticated APQE provider required")?,
+                    command == "export-network-transport"
+                )?
+            );
         }
         #[cfg(unix)]
         [command, context, pin, request, request_pin, directory]
@@ -509,16 +710,32 @@ fn selected_arguments(
     }
     if matches!(
         command,
-        "inspect" | "prepare-fresh-authority" | "prepare-fresh-genesis"
+        "gateway-admission-capability"
+            | "inspect"
+            | "prepare-fresh-authority"
+            | "prepare-fresh-genesis"
     ) {
         return Ok((arguments, None));
     }
     if !matches!(
         command,
-        "generate-authority-custody"
-            | "prepare-formation-treasury" | "review-formation-treasury" | "export-formation-treasury"
-            | "prepare-formation-treasury-send" | "review-formation-treasury-send" | "take-formation-treasury-send"
-            | "prepare-network-transport" | "review-network-transport" | "sign-network-transport" | "export-network-transport"
+        "check-gateway-admission"
+            | "review-gateway-issuer"
+            | "prepare-gateway-admission"
+            | "sign-gateway-admission"
+            | "review-gateway-admission"
+            | "export-gateway-admission"
+            | "generate-authority-custody"
+            | "prepare-formation-treasury"
+            | "review-formation-treasury"
+            | "export-formation-treasury"
+            | "prepare-formation-treasury-send"
+            | "review-formation-treasury-send"
+            | "take-formation-treasury-send"
+            | "prepare-network-transport"
+            | "review-network-transport"
+            | "sign-network-transport"
+            | "export-network-transport"
             | "prepare-network-formation"
             | "review-network-formation"
             | "sign-network-formation"
@@ -565,6 +782,32 @@ fn selected_arguments(
 #[cfg(test)]
 mod native_policy_tests {
     use super::*;
+    #[test]
+    fn gateway_commands_require_the_existing_authenticated_provider_route() {
+        let args = vec!["gateway-admission-capability".to_string()];
+        assert!(selected_arguments(&args).unwrap().1.is_none());
+        for command in [
+            "check-gateway-admission",
+            "review-gateway-issuer",
+            "prepare-gateway-admission",
+            "sign-gateway-admission",
+            "review-gateway-admission",
+            "export-gateway-admission",
+        ] {
+            let args = vec![command.to_string()];
+            let error = selected_arguments(&args).err().unwrap();
+            assert_eq!(
+                error,
+                "explicit APQE report and authenticated SHA256 flags required"
+            );
+        }
+        let args = vec!["sign-gateway-arbitrary".to_string()];
+        assert!(selected_arguments(&args)
+            .err()
+            .unwrap()
+            .contains("fail-closed"));
+    }
+
     #[test]
     #[ignore = "requires explicitly authenticated immutable APQE native artifacts"]
     fn native_apqe_generation_keeps_consensus_and_ingress_roles_distinct() {

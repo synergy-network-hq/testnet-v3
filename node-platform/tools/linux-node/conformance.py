@@ -658,7 +658,8 @@ def approved_network_transport_members(root):
             'Transport prepare request differs')
     source=json.loads(native([root/'bin/synergy-keytool','review-network-formation',c.formation_context_path(),selection['formation_sha256'],root/'tmp/network-formation',*flags]))
     require(source.get('signed') is True,'Signed Genesis formation required')
-    result=json.loads(native([root/'bin/synergy-keytool','review-network-transport',c.formation_context_path(),selection['formation_sha256'],root/'tmp/network-formation',directory,*flags]))
+    command='review-gateway-issuer' if (root/'tmp/gateway-admission').exists() else 'review-network-transport'
+    result=json.loads(native([root/'bin/synergy-keytool',command,c.formation_context_path(),selection['formation_sha256'],root/'tmp/network-formation',directory,*flags]))
     c.transport_receipt(result,selection,source,prepare,signing)
     require(result['signed']==has_signed,'Transport signing inventory differs')
     paths={p.relative_to(root).as_posix() for p in [directory,*children,prepare]}
@@ -666,6 +667,20 @@ def approved_network_transport_members(root):
         require(digest(directory/'signed/sign-request.json')==digest(signing),'Transport signed request differs')
         paths.add(signing.relative_to(root).as_posix())
     return paths
+
+
+def approved_gateway_admission_members(root):
+    """Only complete, role-owner verified public issuance state is attributable."""
+    from controller import Controller
+    from canary_rpc_relay import (_gateway_scope,_gateway_approval,_gateway_read,_gateway_tree,
+        GATEWAY_DIRECTORY,GATEWAY_PREPARE_INTENT,GATEWAY_SIGN_INTENT)
+    root=Path(root);directory=root/GATEWAY_DIRECTORY;prepare=root/GATEWAY_PREPARE_INTENT;sign=root/GATEWAY_SIGN_INTENT
+    if not any(p.exists() or p.is_symlink() for p in (directory,prepare,sign)):return set()
+    c=Controller(root);policy,scope,review,args,flags=_gateway_scope(c,historical=True)
+    approval,pin,_,_=_gateway_approval(c,policy,scope,review,historical=True)
+    members=_gateway_tree(c,directory,prepare,sign)
+    _gateway_read(c,[root/'bin/synergy-keytool'],[*args,approval,pin],flags,directory,prepare,sign,scope,pin)
+    return members
 
 
 def installed(root, expected_manifest=None, host=False, initialized=True, schema=None, stage=None, allow_legacy_integrations=False, pending_upgrade_sha256=None):
@@ -720,6 +735,7 @@ def installed(root, expected_manifest=None, host=False, initialized=True, schema
     pending_upgrade=approved_upgrade_members(root,pending_upgrade_sha256,stage) if pending_upgrade_sha256 is not None else set()
     pending_upgrade |= approved_network_formation_members(root)
     pending_upgrade |= approved_network_transport_members(root)
+    pending_upgrade |= approved_gateway_admission_members(root)
     treasury_members=approved_treasury_members(root)
     pending_upgrade |= treasury_members
     approved_vpn_attempt_members(root)
