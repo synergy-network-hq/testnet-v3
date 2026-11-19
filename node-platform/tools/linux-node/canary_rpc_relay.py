@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Opt-in Canary relay configuration within the sealed universal node package.
 
-This never provisions keys, edits admission, starts services or grants production
-qualification. The native check authenticates all actual selected artifacts.
+Explicit managed gateway operations use native custody and exact one-use host
+authorization. Native checks authenticate the selected artifacts; no operation
+grants production qualification.
 """
 import argparse
 import hashlib
@@ -14,6 +15,7 @@ import re
 import stat
 import subprocess
 import sys
+import time
 from urllib.parse import urlsplit
 
 sys.dont_write_bytecode = True
@@ -1127,3 +1129,120 @@ def approved_gateway_target_members(root):
     approved.update(str(Path('keys/apqe')/name) for name in GATEWAY_TARGET_KEYS)
     approved.update({GATEWAY_TARGET,'keys/apqe'})
     return approved
+
+
+def _gateway_selected_tcp(c):
+    """Selected endpoint from the already native-verified signed registry."""
+    role=c.public_json(c.root/CONFIG,True)['role']
+    require(role['kind']=='gateway' and role['validator_relay_port']==8551,'Exact gateway relay required')
+    registry=c.public_json(c.root/'network/transport-registry.json',True)['payload']['validators']
+    require(isinstance(registry,list) and 0<len(registry)<=128,'Bounded signed transport roster required')
+    matches=[entry for entry in registry if entry.get('node_address')==role['validator_address']]
+    require(len(matches)==1 and matches[0].get('revoked') is False,'Selected signed validator is not uniquely active')
+    address,port=matches[0]['dial_address'].rsplit(':',1);ip=ipaddress.ip_address(address.strip('[]'))
+    require(port.isdecimal() and 0<int(port)<65536 and not (ip.is_loopback or ip.is_unspecified or ip.is_multicast or ip.is_link_local),'Signed validator endpoint differs')
+    return {'ip':str(ip),'port':8551}
+
+
+def gateway_lifecycle(c,request):
+    """Existing host operations with an explicit relay-only gateway role branch."""
+    import lifecycle as life
+    from vpn import verify_gateway_route
+    life._require_operator(linux=False)
+    op=request['operation'];require(op in ('register','start','stop','restart','health') and not request['parameters'],'Exact gateway lifecycle operation required')
+    with life._lifecycle_lock(c.root):
+        receipt,_=life._sealed_receipt(c.root)
+        require(receipt.get('role')=='rpc_gateway' and receipt.get('chain_id')==99999,'Engineering gateway role required')
+        _gateway_target_services(c)
+        if op=='stop':
+            owned=life._attributed_units(c.root)
+            require(life.RELAY_UNIT in owned,'Attributed gateway relay registration required')
+        else:
+            require(receipt.get('gateway_commissioned') is True and _exists(c.root/GATEWAY_TARGET/'commissioned.json'),'Commission fresh gateway custody before service operations')
+            validate_gateway_layout(c.root)
+            owned=life._attributed_units(c.root) if life._integration_plan(c.root) is not None else {}
+            if op=='health':
+                relay=owned.get(life.RELAY_UNIT);current=c.vpn_status()
+                states={'active','inactive','failed','activating','deactivating','reloading','maintenance','refreshing'}
+                state='unregistered' if relay is None else relay.get('ActiveState')
+                require(state=='unregistered' or state in states,'Gateway relay state unavailable')
+                pid=None if relay is None else relay.get('MainPID')
+                require(pid is None or isinstance(pid,str) and pid.isdecimal() and int(pid)<=2**53-1,'Gateway relay PID unavailable')
+                return {'schema':'nodenetwork-gateway-health-v1','observed_at_ms':int(time.time()*1000),'role':'rpc_gateway',
+                        'relay':{'unit':life.RELAY_UNIT,'state':state,'pid':None if pid is None else int(pid)},
+                        'vpn':{'registered':current['service_registered'],'enrollment_recorded':current['enrollment_recorded'],
+                               'server_bound':current['server_bound'],'connected':current['connected']},
+                        'admission_custody_verified':True,'consensus_participant':False,'configured_loopback':True,'production_qualified':False}
+            if op in ('start','restart'):
+                node=owned.get('synergy-node.service',{})
+                require(node.get('ActiveState') in ('inactive','failed') and node.get('MainPID')=='0','Gateway must never run the validator service')
+                require(life.RELAY_UNIT in owned,'Register the exact gateway relay before starting')
+                current=c.vpn_status()
+                require(current['service_registered'] and current['enrollment_recorded'] and current['server_bound'] and current['connected']
+                        and not current['reconciliation_required'] and not current['retired'],'Existing bound gateway VPN must be connected')
+                local=c.public_json(c.root/'evidence/vpn-enrollment.json',True)
+                require(local.get('required_gateway_tcp')==_gateway_selected_tcp(c),'VPN target differs from selected signed validator')
+                verify_gateway_route(c.root,persist=False,locked=True)
+                life._relay_start_check_locked(c.root)
+        c.authorize(request)
+    # ExecStartPre acquires the same lifecycle lock in its own process. Never
+    # hold that lock across systemctl or registration's own locked transaction.
+    if op=='register':return life.register(c.root)
+    life.mutate_owned_service(c.root,op,life.RELAY_UNIT)
+    return {'requested':op,'healthNotInferred':True}
+
+
+def gateway_vpn_enrollment_scope(c,receipt,secret_input):
+    """Pure gateway-specific provider scope before a one-use enrollment grant."""
+    from vpn_authorization import provider_policy,GATEWAY_PROFILE,decode,network_scope
+    require(receipt.get('role')=='rpc_gateway' and receipt.get('gateway_commissioned') is True
+            and _exists(c.root/GATEWAY_TARGET/'commissioned.json'),'Commission gateway custody before VPN enrollment')
+    validate_gateway_layout(c.root)
+    path=c.control/'authorization/inputs/vpn-provider.json'
+    raw=c.direct(path,True,16384).read_bytes();ca=c.direct(c.control/'authorization/inputs/vpn-ca.pem',True,128*1024).read_bytes()
+    policy=provider_policy(raw,c.policy().get('authorization_files',{}).get('vpn-provider.json'),ca,int(time.time()))
+    require(policy['profile']==GATEWAY_PROFILE,'Gateway requires independently approved restricted VPN profile')
+    network_scope(policy,c.vpn_provider_binding())
+    target=_gateway_selected_tcp(c)
+    request=decode(secret_input)
+    require(policy['required_gateway_tcp']==target and isinstance(request,dict)
+            and set(request)=={'setup_key','management_url','hostname','required_gateway_tcp'}
+            and request['required_gateway_tcp']==target and request['management_url']==policy['management_origin'],
+            'Enrollment differs from exact signed gateway TCP/provider scope')
+    return target
+
+
+def gateway_vpn_parameters(parameters):
+    require(isinstance(parameters,dict) and set(parameters)=={'required_gateway_tcp'},'Exact gateway TCP parameter required')
+    target=parameters['required_gateway_tcp']
+    require(isinstance(target,dict) and set(target)=={'ip','port'} and isinstance(target['ip'],str)
+            and type(target['port']) is int and target['port']==8551,'Exact gateway TCP 8551 required')
+    ip=ipaddress.ip_address(target['ip'])
+    require(str(ip)==target['ip'] and not(ip.is_loopback or ip.is_unspecified or ip.is_multicast or ip.is_link_local),'Literal gateway overlay target required')
+    return target
+
+
+def gateway_vpn_preflight(c,parameters):
+    import lifecycle as life
+    target=gateway_vpn_parameters(parameters)
+    with life._lifecycle_lock(c.root):
+        receipt,_=life._sealed_receipt(c.root)
+        require(receipt.get('role')=='rpc_gateway' and receipt.get('chain_id')==99999 and receipt.get('gateway_commissioned') is True
+                and _exists(c.root/GATEWAY_TARGET/'commissioned.json'),'Commission gateway custody before VPN provider use')
+        validate_gateway_layout(c.root)
+        require(target==_gateway_selected_tcp(c),'Provider target differs from selected signed validator')
+        genesis=_sha(c.direct(c.root/'network/genesis.json',True,4*1024*1024).read_bytes())
+        require(c.policy().get('validator_identity_network',{}).get('genesis.json')==genesis,'Independent gateway Genesis differs')
+        return {'schema':'nodenetwork-gateway-vpn-preflight-v1','required_gateway_tcp':target,
+                'network_id':receipt['network_id'],'chain_id':'99999','genesis_sha256':genesis,
+                'mutation_performed':False,'production_qualified':False}
+
+
+def gateway_vpn_recovery_scope(c,receipt,provider):
+    from vpn_authorization import GATEWAY_PROFILE,network_scope
+    require(receipt.get('role')=='rpc_gateway' and receipt.get('gateway_commissioned') is True
+            and _exists(c.root/GATEWAY_TARGET/'commissioned.json'),'Existing gateway custody required for VPN recovery')
+    validate_gateway_layout(c.root)
+    require(provider.get('profile')==GATEWAY_PROFILE,'Original restricted gateway VPN provider required')
+    network_scope(provider,c.vpn_provider_binding())
+    require(provider.get('required_gateway_tcp')==_gateway_selected_tcp(c),'Original gateway VPN target differs')

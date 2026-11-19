@@ -70,6 +70,19 @@ class GatewayVpnTests(unittest.TestCase):
             with self.assertRaises(ConnectionRefusedError):vpn.verify_gateway_route(self.root)
         self.assertFalse((self.root/vpn.GATEWAY_RECEIPT).exists())
 
+    def test_managed_start_probe_is_read_only_and_reuses_held_lifecycle_lock(self):
+        self.enrollment();self.bind()
+        before={p:p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        sock=MagicMock();sock.__enter__.return_value=sock
+        with patch.object(lifecycle,'_require_operator'),patch.object(lifecycle,'_sealed_receipt'), \
+                patch.object(lifecycle,'_lifecycle_lock',side_effect=AssertionError('nested lifecycle lock')), \
+                patch.object(vpn,'status',return_value=self.live),patch.object(vpn,'native',return_value=b'[{"dev":"wt0"}]'), \
+                patch.object(vpn.socket,'SO_BINDTODEVICE',25,create=True),patch.object(vpn.socket,'socket',return_value=sock):
+            result=vpn.verify_gateway_route(self.root,persist=False,locked=True)
+        self.assertTrue(result['tcp_verified']);self.assertFalse(result['apqe_verified'])
+        self.assertEqual({p:p.read_bytes() for p in self.root.rglob('*') if p.is_file()},before)
+        self.assertFalse((self.root/vpn.GATEWAY_RECEIPT).exists())
+
     def test_gateway_profile_disallows_unrestricted_ports_and_icmp(self):
         for target in ({'ip':'10.69.1.2','port':443},{'ip':'127.0.0.1','port':8551},
                        {'ip':'10.69.1.2','port':'8551'}):

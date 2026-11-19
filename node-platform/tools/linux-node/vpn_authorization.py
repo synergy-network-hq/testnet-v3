@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 LIMIT = 2 * 1024 * 1024
 PROFILE = 'nodenetwork-debug-vpn-provider-v1'
 CONTROLLED_PROFILE = 'nodenetwork-controlled-canary-v1'
+GATEWAY_PROFILE = 'nodenetwork-controlled-gateway-v1'
 
 
 def require(condition, message):
@@ -52,7 +53,7 @@ def identifier(value):
 
 
 def network_scope(policy, binding=None):
-    require(type(policy.get('version')) is int and policy.get('version') == 1 and policy.get('profile') in (PROFILE, CONTROLLED_PROFILE),
+    require(type(policy.get('version')) is int and policy.get('version') == 1 and policy.get('profile') in (PROFILE, CONTROLLED_PROFILE, GATEWAY_PROFILE),
             'Unknown engineering provider profile')
     if policy['profile'] == PROFILE:
         require('network_binding' not in policy, 'Isolated profile cannot adopt controlled network scope')
@@ -63,6 +64,8 @@ def network_scope(policy, binding=None):
             and re.fullmatch('[a-z0-9][a-z0-9_-]{1,127}', scope['network_id'])
             and type(scope['chain_id']) is int and 0 < scope['chain_id'] < 2**64
             and pin(scope['formation_sha256']), 'Exact controlled Canary network scope required')
+    if policy['profile']==GATEWAY_PROFILE:
+        require(scope['chain_id']==99999,'Engineering gateway Canary scope required')
     if binding is not None:
         require(isinstance(binding, dict) and all(type(binding.get(k)) is type(value) and binding.get(k) == value for k, value in scope.items()),
                 'Controlled Canary network differs from approved scope')
@@ -75,9 +78,10 @@ def provider_policy(raw, expected_sha256, ca, now, *, cleanup_action=None):
     policy = decode(raw)
     require(isinstance(policy, dict), 'Exact provider policy required')
     network_scope(policy)
-    extra = {'network_binding'} if policy['profile'] == CONTROLLED_PROFILE else set()
+    extra = {'network_binding'} if policy['profile'] in (CONTROLLED_PROFILE,GATEWAY_PROFILE) else set()
+    connectivity = 'required_gateway_tcp' if policy['profile']==GATEWAY_PROFILE else 'required_peer_ips'
     require(set(policy) == extra | {'version', 'profile', 'management_origin',
-            'api_origin', 'account_id', 'ca_sha256', 'auto_groups', 'required_peer_ips', 'expires_at'}, 'Exact provider policy required')
+            'api_origin', 'account_id', 'ca_sha256', 'auto_groups', connectivity, 'expires_at'}, 'Exact provider policy required')
     require(type(policy['version']) is int, 'Exact engineering provider version required')
     for field in ('api_origin', 'management_origin'):
         origin = policy[field]
@@ -91,12 +95,18 @@ def provider_policy(raw, expected_sha256, ca, now, *, cleanup_action=None):
     require(identifier(policy['account_id']) and isinstance(policy['auto_groups'], list)
             and len(policy['auto_groups']) <= 16 and len(set(policy['auto_groups'])) == len(policy['auto_groups'])
             and all(identifier(group) for group in policy['auto_groups']), 'Exact account and groups required')
-    require(isinstance(policy['required_peer_ips'], list) and 0 < len(policy['required_peer_ips']) <= 5
-            and len(set(policy['required_peer_ips'])) == len(policy['required_peer_ips']), 'Independent VPN peer targets required')
-    for value in policy['required_peer_ips']:
-        address = ipaddress.ip_address(value)
-        require(str(address) == value and not (address.is_unspecified or address.is_loopback or address.is_multicast),
-                'Literal independent overlay peer required')
+    if policy['profile']==GATEWAY_PROFILE:
+        target=policy['required_gateway_tcp']
+        require(isinstance(target,dict) and set(target)=={'ip','port'} and isinstance(target['ip'],str) and type(target['port']) is int and target['port']==8551,'Exact restricted gateway TCP target required')
+        address=ipaddress.ip_address(target['ip'])
+        require(str(address)==target['ip'] and not(address.is_unspecified or address.is_loopback or address.is_multicast or address.is_link_local),'Literal signed gateway overlay target required')
+    else:
+        require(isinstance(policy['required_peer_ips'], list) and 0 < len(policy['required_peer_ips']) <= 5
+                and len(set(policy['required_peer_ips'])) == len(policy['required_peer_ips']), 'Independent VPN peer targets required')
+        for value in policy['required_peer_ips']:
+            address = ipaddress.ip_address(value)
+            require(str(address) == value and not (address.is_unspecified or address.is_loopback or address.is_multicast),
+                    'Literal independent overlay peer required')
     require(pin(policy['ca_sha256']) and isinstance(ca, bytes) and 0 < len(ca) <= 128 * 1024
             and hashlib.sha256(ca).hexdigest() == policy['ca_sha256'], 'Independent CA bytes differ')
     require(type(policy['expires_at']) is int and (now < policy['expires_at'] or cleanup_action is not None), 'Provider approval expired')
@@ -172,7 +182,7 @@ class Authorization:
         meta = self.directory.lstat()
         require(stat.S_ISDIR(meta.st_mode) and meta.st_uid == os.geteuid()
                 and not meta.st_mode & 0o077, 'Private native-owned VPN state required')
-        if policy['profile'] == CONTROLLED_PROFILE and (self.directory / 'intent.json').exists():
+        if policy['profile'] in (CONTROLLED_PROFILE,GATEWAY_PROFILE) and (self.directory / 'intent.json').exists():
             intent = self._read('intent.json')
             network_scope(policy, intent.get('binding'))
             require(intent.get('provider_sha256') == hashlib.sha256(encode(policy)).hexdigest()
@@ -210,7 +220,7 @@ class Authorization:
             os.close(fd)
 
     def _account(self, action=None):
-        if self.policy['profile'] == CONTROLLED_PROFILE and (self.directory / 'intent.json').exists():
+        if self.policy['profile'] in (CONTROLLED_PROFILE,GATEWAY_PROFILE) and (self.directory / 'intent.json').exists():
             network_scope(self.policy, self._read('intent.json').get('binding'))
         require(self.cleanup_action is None or action == self.cleanup_action, 'Cleanup capability cannot issue, bind or change action')
         require(self.now() < self.policy['expires_at'] or self.cleanup_action == action and action in ('revoke','retire'), 'Provider approval expired')

@@ -498,18 +498,22 @@ def verify_autonomous_epoch_pin(root,config,receipt,policy):
 def relay_start_check(root):
     _require_operator(linux=False)
     with _lifecycle_lock(root):
-        for name in (UPGRADE_INTENT,REPLACEMENT_INTENT,AUTHORITY_RECOVERY_INTENT,AUTONOMOUS_EPOCH_INTENT):
-            require(not (root/name).exists() and not (root/name).is_symlink(),
-                    'finish recorded lifecycle intent before relay startup')
-        receipt,_=_sealed_receipt(root)
-        _attributed_units(root)
-        config=read(root/'config/node.json')
-        policy=read(root/'config/start-authorized.json') if receipt.get('role')=='validator' else None
-        verify_authority_recovery_pin(root,config,receipt,policy)
-        if receipt.get('role') == 'rpc_gateway':
-            from canary_rpc_relay import verify_bootstrap_pin_record
-            verify_bootstrap_pin_record(root)
-        native([root/'bin/synergy-node','canary-rpc-relay','check',root/'config/canary-rpc-relay.json'])
+        return _relay_start_check_locked(root)
+
+
+def _relay_start_check_locked(root):
+    for name in (UPGRADE_INTENT,REPLACEMENT_INTENT,AUTHORITY_RECOVERY_INTENT,AUTONOMOUS_EPOCH_INTENT):
+        require(not (root/name).exists() and not (root/name).is_symlink(),
+                'finish recorded lifecycle intent before relay startup')
+    receipt,_=_sealed_receipt(root)
+    _attributed_units(root)
+    config=read(root/'config/node.json')
+    policy=read(root/'config/start-authorized.json') if receipt.get('role')=='validator' else None
+    verify_authority_recovery_pin(root,config,receipt,policy)
+    if receipt.get('role') == 'rpc_gateway':
+        from canary_rpc_relay import verify_bootstrap_pin_record
+        verify_bootstrap_pin_record(root)
+    native([root/'bin/synergy-node','canary-rpc-relay','check',root/'config/canary-rpc-relay.json'])
     return {'relay_startup_check_passed':True}
 
 

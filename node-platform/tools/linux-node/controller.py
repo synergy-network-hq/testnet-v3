@@ -29,7 +29,7 @@ MAX_GENESIS_STAGE_REQUEST = 12*1024*1024
 GENESIS_FILES = {'genesis.json':4*1024*1024,'authority.json':1024*1024,'authority-root.pub':8192}
 ENGINE_MODULES = frozenset(('controller.py','synergy_linux.py','lifecycle.py','conformance.py',
                             'apqe_layout.py','vpn.py','canary_rpc_relay.py','root_guard.py','guest_lifecycle.py','vpn_authorization.py','treasury_send.py'))
-READS = frozenset(('upgrade_native_preflight','gateway_install_preflight','gateway_install_status','gateway_target_preflight','gateway_target_status','gateway_target_export','gateway_target_reconcile','gateway_target_commission_preflight','gateway_admission_preflight','gateway_admission_status','gateway_admission_export','gateway_admission_reconcile','treasury_send_preflight','treasury_send_status','treasury_preflight','treasury_status','treasury_export','commissioning_observation','network_transport_status','network_transport_export','guest_resources','guest_preflight','guest_status','guest_boot_diagnostics','target','inventory','health','install_preflight','upgrade_preflight',
+READS = frozenset(('gateway_vpn_preflight','upgrade_native_preflight','gateway_install_preflight','gateway_install_status','gateway_target_preflight','gateway_target_status','gateway_target_export','gateway_target_reconcile','gateway_target_commission_preflight','gateway_admission_preflight','gateway_admission_status','gateway_admission_export','gateway_admission_reconcile','treasury_send_preflight','treasury_send_status','treasury_preflight','treasury_status','treasury_export','commissioning_observation','network_transport_status','network_transport_export','guest_resources','guest_preflight','guest_status','guest_boot_diagnostics','target','inventory','health','install_preflight','upgrade_preflight',
                   'recovery_preflight','uninstall_preflight','vpn_status','vpn_unused_preflight','vpn_stop_status','boot_policy_status','vpn_resume_status','vpn_diagnostics','diagnostics','identity_preflight','identity_status',
                   'formation_preflight','formation_status','formation_export','genesis_stage_preflight','genesis_binding_preflight','authorization_status','network_formation_status','network_formation_export'))
 MUTATIONS = frozenset(('gateway_install','gateway_target_generate','gateway_target_commission','gateway_admission_prepare','gateway_admission_sign','treasury_send_prepare','treasury_send_submit','treasury_prepare','network_transport_prepare','network_transport_sign','guest_create','guest_stop','guest_resume','guest_remove','install','commission','register','vpn_enroll','vpn_bind','vpn_retire','vpn_cancel_unused','vpn_stop','vpn_resume','boot_policy','start','stop','restart','upgrade','uninstall','identity_generate',
@@ -168,6 +168,11 @@ def parse_request(raw):
                 and ('attempt_sha256' not in parameters or isinstance(parameters['attempt_sha256'],str)
                      and re.fullmatch('[a-f0-9]{64}',parameters['attempt_sha256'])),
                 'Exact native VPN attempt parameters required','invalid_request')
+        return value
+    if operation=='gateway_vpn_preflight':
+        from canary_rpc_relay import gateway_vpn_parameters
+        try:gateway_vpn_parameters(parameters)
+        except (ValueError,KeyError,TypeError):raise Refused('invalid_request','Exact signed gateway TCP target required') from None
         return value
     if operation.startswith('gateway_target_'):
         from canary_rpc_relay import gateway_target_parameters
@@ -1451,7 +1456,7 @@ class Controller:
         from vpn import enroll,attempt_state,append_attempt_event
         with life._lifecycle_lock(self.root):
             receipt,_=life._sealed_receipt(self.root)
-            require(receipt['role']=='validator','VPN workflow requires an installed validator role')
+            require(receipt['role'] in ('validator','rpc_gateway'),'VPN workflow requires an installed supported role')
             current=self.vpn_status()
             require(current['service_registered'] and not current['enrollment_recorded'],
                     'Register the contained VPN service before fresh enrollment')
@@ -1466,6 +1471,9 @@ class Controller:
             require(path is not None,'No approved one-use VPN enrollment is staged','authorization_required')
             with path.open('rb') as stream: data=stream.read(MAX_VPN_ENROLLMENT+1)
             require(0<len(data)<=MAX_VPN_ENROLLMENT,'VPN enrollment input exceeds bound')
+            if receipt['role']=='rpc_gateway':
+                from canary_rpc_relay import gateway_vpn_enrollment_scope
+                gateway_vpn_enrollment_scope(self,receipt,data)
             self.authorize(request,hashlib.sha256(data).hexdigest())
             # Persist the fence before dispatch: the provider can consume the
             # key without returning a receipt or writing any local VPN state.
@@ -1486,7 +1494,7 @@ class Controller:
         import lifecycle as life
         from vpn import bind_server, recover_enrollment, client_environment
         with life._lifecycle_lock(self.root):
-            life._sealed_receipt(self.root)
+            receipt,_=life._sealed_receipt(self.root)
             policy=self.policy()
             path=self.control/'authorization/inputs/vpn-server-binding.json'
             server=self.public_json(path,True)
@@ -1512,6 +1520,9 @@ class Controller:
                 provider=self.public_json(provider_path,True)
                 require(hashlib.sha256(provider_path.read_bytes()).hexdigest()==policy.get('authorization_files',{}).get('vpn-provider.json'),
                         'Original VPN provider artifact differs')
+                if receipt.get('role')=='rpc_gateway':
+                    from canary_rpc_relay import gateway_vpn_recovery_scope
+                    gateway_vpn_recovery_scope(self,receipt,provider)
                 from vpn import attempt_state
                 expected=self.vpn_provider_binding(attempt_state(self.root)['scope_sha256'])
                 require(server['binding']==expected and server['name']=='nn-'+hashlib.sha256(canonical(expected)).hexdigest()[:60]
@@ -1782,6 +1793,13 @@ class Controller:
         except (Refused,OSError,ValueError): policy={}; qualified=set(); blocker='Host controller policy is not enrolled or valid'
         from canary_rpc_relay import gateway_target_available
         target_owner=gateway_target_available(self)
+        installed_role=None
+        if self.exists('installation.json'):
+            try:
+                from lifecycle import _sealed_receipt
+                role=_sealed_receipt(self.root)[0].get('role')
+                if role in ('validator','rpc_gateway'):installed_role=role
+            except (ValueError,OSError,KeyError,TypeError):pass
         operations=[]
         for op in sorted(READS | MUTATIONS):
             reason=None if op in READS else blocker or ('Operation has not passed host qualification' if op not in qualified else None)
@@ -1791,7 +1809,7 @@ class Controller:
                 reason='Commission the active validator before boot policy changes'
             if op.startswith('guest_') and op!='guest_resources' and not isinstance(policy.get('managed_guest'),dict):
                 reason='Independently approved guest image, toolchain and resources required'
-            if op.startswith(('gateway_target_','gateway_install')) and not target_owner:
+            if (op.startswith(('gateway_target_','gateway_install')) or op=='gateway_vpn_preflight') and not target_owner:
                 reason='Qualified gateway target owner and exact signed origin required'
             if op.startswith('gateway_admission_') and op in MUTATIONS:
                 from canary_rpc_relay import gateway_owner_available
@@ -1799,7 +1817,7 @@ class Controller:
             if not supported and op!='target': reason='Linux x86_64 target required'
             operations.append({'operation':op,'kind':'read' if op in READS else 'mutation','available':reason is None,'blocker':reason})
         return {'controllerVersion':1,'platform':platform.system().lower(),'architecture':platform.machine(),
-                'root':str(self.root),'installed':(self.root/'installation.json').exists(),
+                'root':str(self.root),'installed':(self.root/'installation.json').exists(),'installed_role':installed_role,
                 'localValidatorSupported':supported,'communityEnrollment':False,'operations':operations}
 
     def inventory(self):
@@ -1827,12 +1845,18 @@ class Controller:
             control_inventory(self.root)
             from runtime_probe import upgrade_native_preflight
             return upgrade_native_preflight(self,p)
+        if op in ('register','start','stop','restart','health') and self.exists('installation.json') and self.public_json(self.root/'installation.json').get('role')=='rpc_gateway':
+            from canary_rpc_relay import gateway_lifecycle
+            return gateway_lifecycle(self,request)
         if op=='inventory': return self.inventory()
         if op=='boot_policy_status':return self.boot_policy_status()
         if op=='boot_policy':return self.boot_policy(request)
         if op=='commissioning_observation':return self.commissioning_observation(online_addresses=p.get('online_addresses'))
         # Enrollment/grant readback is required before the first installation.
         # Its own exact engine/policy checks run without inventing a receipt.
+        if op=='gateway_vpn_preflight':
+            from canary_rpc_relay import gateway_vpn_preflight
+            return gateway_vpn_preflight(self,p)
         if op.startswith('gateway_target_'):
             from canary_rpc_relay import gateway_target
             return gateway_target(self,request)

@@ -41,6 +41,23 @@ class AuthorizationTests(unittest.TestCase):
     def unused(self):
         return {'schema':'nodenetwork-vpn-unused-preflight-v1','quiescent':True,
                 'attempt_sha256':'d'*64,'binding':self.b}
+    def test_gateway_policy_is_independent_exact_tcp_and_retained_network_scope(self):
+        self.b['chain_id']=99999
+        self.p={**self.p,'profile':v.GATEWAY_PROFILE,'network_binding':{k:self.b[k] for k in ('network_id','chain_id','formation_sha256')},'required_gateway_tcp':{'ip':'10.69.0.254','port':8551}}
+        del self.p['required_peer_ips']
+        raw=v.encode(self.p);sha=hashlib.sha256(raw).hexdigest()
+        self.assertEqual(v.provider_policy(raw,sha,self.ca,1000),self.p)
+        for changed in ({**self.p,'required_peer_ips':['10.69.0.254']},{**self.p,'required_gateway_tcp':{'ip':'10.69.0.254','port':443}},{**self.p,'required_gateway_tcp':{'ip':'127.0.0.1','port':8551}},{**self.p,'network_binding':{**self.p['network_binding'],'chain_id':999998}},{**self.p,'expires_at':999}):
+            data=v.encode(changed)
+            with self.assertRaises(ValueError):v.provider_policy(data,hashlib.sha256(data).hexdigest(),self.ca,1000)
+        with self.assertRaises(ValueError):v.provider_policy(raw,'0'*64,self.ca,1000)
+        self.name='nn-'+hashlib.sha256(v.encode(self.b)).hexdigest()[:60];self.key['name']=self.name
+        self.issue()
+        before={p:p.read_bytes() for p in self.root.iterdir()}
+        self.p['network_binding']['formation_sha256']='f'*64
+        with self.assertRaises(ValueError):self.flow([])
+        self.request.assert_not_called();self.assertEqual(before,{p:p.read_bytes() for p in self.root.iterdir()})
+
     def test_unused_cancellation_exact_zero_usage_and_absence_is_idempotent(self):
         self.issue()
         flow=self.flow([self.account,(200,[]),(200,[self.key]),(204,None),(404,None),(200,[]),(200,[])])
@@ -347,7 +364,7 @@ class AuthorizationTests(unittest.TestCase):
         owner.public_json=lambda p,private:server if p==path else self.local
         owner.vpn_status=lambda:{'connected':True,'server_bound':False}
         owner.authorize=Mock(side_effect=ValueError('grant missing'))
-        with patch.object(lifecycle,'_lifecycle_lock',return_value=nullcontext()),patch.object(lifecycle,'_sealed_receipt'),patch.object(vpn,'bind_server') as bind:
+        with patch.object(lifecycle,'_lifecycle_lock',return_value=nullcontext()),patch.object(lifecycle,'_sealed_receipt',return_value=({'role':'validator'},{})),patch.object(vpn,'bind_server') as bind:
             with self.assertRaisesRegex(ValueError,'grant missing'):owner.vpn_bind({'operation':'vpn_bind'})
             bind.assert_not_called()
             owner.authorize=Mock();owner.vpn_bind({'operation':'vpn_bind'})

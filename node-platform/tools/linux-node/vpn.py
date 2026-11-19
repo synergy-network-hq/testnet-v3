@@ -196,10 +196,11 @@ def gateway_target(root, value):
     return {'ip': str(peer), 'port': GATEWAY_PORT}
 
 
-def verify_gateway_route(root):
+def verify_gateway_route(root, *, persist=True, locked=False):
     from lifecycle import _lifecycle_lock, _require_operator, _sealed_receipt
     _require_operator()
-    with _lifecycle_lock(root):
+    import contextlib
+    with contextlib.nullcontext() if locked else _lifecycle_lock(root):
         _sealed_receipt(root)
         local = read(root/'evidence/vpn-enrollment.json')
         server = read(root/'evidence/vpn-server-binding.json')
@@ -231,7 +232,7 @@ def verify_gateway_route(root):
         path = root/GATEWAY_RECEIPT
         if path.exists() or path.is_symlink():
             require(not path.is_symlink() and read(path) == result, 'gateway VPN route receipt differs')
-        else:
+        elif persist:
             write_new(path, result)
         return result
 
@@ -387,6 +388,8 @@ def recover_enrollment(root, server_peer, provider):
               'hostname': server_peer['name'], 'management_url': provider['management_origin'],
               'verified_peer_ips': [], 'peer_id': None, 'server_binding_verified': False,
               'native_enrollment_verified': True, 'consensus_started': False}
+    if provider.get('profile')=='nodenetwork-controlled-gateway-v1':
+        result.update(required_gateway_tcp=gateway_target(root,provider['required_gateway_tcp']),gateway_tcp_verified=False)
     path = root / 'evidence/vpn-enrollment.json'
     if path.exists() or path.is_symlink():
         require(read(path) == result, 'Recovered native enrollment differs')

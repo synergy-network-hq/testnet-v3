@@ -49,7 +49,7 @@ class VpnReconciliationTests(unittest.TestCase):
             (self.root/'evidence/vpn-enrollment.json').exists(), 'enrollment_staged': False,
             'reconciliation_required': not (self.root/'evidence/vpn-enrollment.json').exists(),
             'server_bound': (self.root/'evidence/vpn-server-binding.json').exists(), 'connected': True}
-        for name, value in [('_lifecycle_lock', lambda root:nullcontext()), ('_sealed_receipt', lambda root:{}),
+        for name, value in [('_lifecycle_lock', lambda root:nullcontext()), ('_sealed_receipt', lambda root:({'role':'validator'},{})),
                             ('_integration_plan', lambda root:{}), ('_attributed_units',
                              lambda *args:{'synergy-vpn.service': {'ActiveState':'active'}})]:
             mock = patch.object(lifecycle,name,value); mock.start(); self.addCleanup(mock.stop)
@@ -63,6 +63,19 @@ class VpnReconciliationTests(unittest.TestCase):
 
     def bind(self):
         return self.owner.vpn_bind({'version':1,'operation':'vpn_bind','parameters':{}})
+
+    def test_gateway_recovery_checks_restricted_scope_before_grant_and_restores_no_probe_claim(self):
+        import synergy_linux
+        synergy_linux.write_new(self.root/'installation.json',{'role':'rpc_gateway','chain_id':99999})
+        self.provider.update(profile='nodenetwork-controlled-gateway-v1',required_gateway_tcp={'ip':'10.69.1.2','port':8551})
+        self.write_inputs()
+        with patch.object(lifecycle,'_sealed_receipt',return_value=({'role':'rpc_gateway'},{})),patch('canary_rpc_relay.gateway_vpn_recovery_scope',side_effect=ValueError('foreign signed target')):
+            with self.assertRaises(ValueError):self.bind()
+        self.owner.authorize.assert_not_called();self.assertFalse((self.root/'evidence/vpn-enrollment.json').exists())
+        with patch.object(lifecycle,'_sealed_receipt',return_value=({'role':'rpc_gateway'},{})),patch('canary_rpc_relay.gateway_vpn_recovery_scope') as guard,patch.object(vpn,'native') as native:
+            self.bind();native.assert_not_called();guard.assert_called_once()
+        local=json.loads((self.root/'evidence/vpn-enrollment.json').read_bytes())
+        self.assertEqual(local['required_gateway_tcp'],self.provider['required_gateway_tcp']);self.assertFalse(local['gateway_tcp_verified']);self.assertEqual(local['verified_peer_ips'],[])
 
     def test_recovers_only_identity_and_binding_without_enrollment_or_probe_claim(self):
         with patch.object(vpn,'native') as native, patch.object(vpn,'enroll') as enroll:
