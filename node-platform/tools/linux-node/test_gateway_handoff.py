@@ -176,6 +176,7 @@ class GatewayHandoffTests(unittest.TestCase):
         with patch.object(b,'_handoff_public',side_effect=public),patch.object(b,'_handoff_command',side_effect=command),\
              patch.object(b,'_handoff_unit_pin',side_effect=lambda fragment:public(fragment)[0]),\
              patch.object(b,'_handoff_root_entries',side_effect=lambda root,allowed:('b'*64,{'foreign_resources'} if (root=='/opt/synergy' and lower_foreign) or (root=='/opt/Synergy' and upper_foreign) else set())),\
+             patch.object(b,'_legacy_upper_inventory',return_value=('b'*64,{'foreign_resources'} if upper_foreign else set())),\
              patch.object(b,'_legacy_canary_identity',return_value=({'network_id':'posy-apqe-canary-process-49028'},{'retirement_verified':False})),\
              patch.object(Path,'is_symlink',side_effect=lambda:True),\
              patch.object(Path,'lstat',return_value=SimpleNamespace(st_uid=0)),\

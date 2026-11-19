@@ -2215,6 +2215,108 @@ def _handoff_root_entries(root,allowed):
     return hashlib.sha256(raw).hexdigest(),blockers
 
 
+def _legacy_upper_inventory(base=Path('/opt/Synergy')):
+    """Old-only opaque commitment v1: recursive metadata + sealed SOFTWARE.
+
+    The closed wire field stays upper_root_entries_sha256. Its old-only meaning
+    is now domain-separated below; it is NOT a digest of private contents or a
+    complete ownership/removal assertion. Unknown runtime is always unattributed.
+    The generic gateway handoff retains its original depth-one interpretation.
+    """
+    import time
+    base=Path(base)
+    package_pin,raw=_handoff_public(base/'package.json')
+    require(package_pin=='ef491eddd06e4145abc1f396b3c363cb2a7f2ec2d582d1d05cf5d28c6dfc679f','Exact old software manifest required')
+    def unique(pairs):
+        value={}
+        for key,item in pairs:
+            require(key not in value,'Duplicate legacy manifest field');value[key]=item
+        return value
+    package=json.loads(raw,object_pairs_hook=unique);files=package.get('files')
+    require(isinstance(files,dict) and 0<len(files)<=128,'Bounded legacy software map required')
+    software_dirs=set()
+    for name,pin in files.items():
+        require(isinstance(name,str) and len(name.encode())<=512 and isinstance(pin,str)
+                and re.fullmatch('[a-f0-9]{64}',pin),'Invalid legacy software commitment')
+        parts=PurePosixPath(name).parts
+        require(parts and len(parts)<=12 and '/'.join(parts)==name and not name.startswith('/')
+                and all(part not in ('.','..') and len(part.encode())<=128 for part in parts)
+                and (name=='README.md' or len(parts)>1 and parts[0] in {'bin','lib','assets','systemd','tools','roles'}),
+                'Manifest member is not attributable public software')
+        software_dirs.update('/'.join(parts[:i]) for i in range(1,len(parts)))
+    require(base.resolve()==base,'Noncanonical legacy inventory root')
+    _handoff_secure_parents(base)
+    bare_mounts(base) # also rejects same-device bind mounts; never unmounts.
+    opened=os.open(base,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    deadline=time.monotonic()+15;records=[];verified={};blockers=set();total_bytes=0
+    def metadata(info):
+        return [info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid,
+                info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns]
+    def walk(directory,prefix,depth):
+        nonlocal total_bytes
+        require(depth<=12 and time.monotonic()<deadline,'Legacy inventory bound exceeded')
+        before=os.fstat(directory)
+        with os.scandir(directory) as stream:
+            for entry in stream:
+                require(len(records)<512 and time.monotonic()<deadline,'Legacy inventory entry bound exceeded')
+                name=entry.name;relative=prefix+name
+                require(len(relative.encode())<=512 and len(name.encode())<=128,'Legacy inventory path bound exceeded')
+                info=os.stat(name,dir_fd=directory,follow_symlinks=False)
+                require(info.st_dev==root.st_dev,'Legacy inventory crosses a mount')
+                kind='directory' if stat.S_ISDIR(info.st_mode) else 'file' if stat.S_ISREG(info.st_mode) else 'socket' if stat.S_ISSOCK(info.st_mode) else 'other'
+                classification='software' if relative in files else 'software_directory' if relative in software_dirs else 'manifest' if relative=='package.json' else 'runtime_unattributed'
+                records.append([relative,kind,classification,metadata(info)])
+                if info.st_uid!=0 or info.st_mode&0o022 or kind=='file' and info.st_nlink!=1 or kind=='other':
+                    blockers.add('foreign_resources')
+                if not prefix and name not in DIRECTORIES|{'package.json','installation.json','README.md'}:
+                    blockers.add('foreign_resources')
+                if relative in files:
+                    require(kind=='file' and info.st_uid==0 and info.st_nlink==1 and not info.st_mode&0o022
+                            and 0<info.st_size<=256*1024*1024,'Unsafe declared legacy software')
+                    total_bytes+=info.st_size
+                    require(total_bytes<=512*1024*1024,'Legacy software byte bound exceeded')
+                    fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=directory)
+                    try:
+                        require(metadata(os.fstat(fd))==metadata(info),'Legacy software inode changed')
+                        digest=hashlib.sha256();size=0
+                        while True:
+                            require(time.monotonic()<deadline,'Legacy software read timed out')
+                            chunk=os.read(fd,1024*1024)
+                            if not chunk:break
+                            size+=len(chunk);require(size<=info.st_size,'Legacy software grew')
+                            digest.update(chunk)
+                        require(size==info.st_size and digest.hexdigest()==files[relative]
+                                and metadata(os.fstat(fd))==metadata(info)
+                                and metadata(os.stat(name,dir_fd=directory,follow_symlinks=False))==metadata(info),
+                                'Legacy software bytes or metadata differ')
+                        verified[relative]=files[relative]
+                    finally:os.close(fd)
+                elif relative in software_dirs:
+                    require(kind=='directory','Declared legacy software parent differs')
+                if kind=='directory':
+                    require(info.st_uid==0 and not info.st_mode&0o022,'Unsafe legacy subtree ownership or mode')
+                    fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=directory)
+                    try:
+                        require(metadata(os.fstat(fd))==metadata(info),'Legacy directory changed')
+                        walk(fd,relative+'/',depth+1)
+                    finally:os.close(fd)
+                require(metadata(os.stat(name,dir_fd=directory,follow_symlinks=False))==metadata(info),
+                        'Legacy entry changed during inventory')
+        require(metadata(os.fstat(directory))==metadata(before),'Legacy directory inventory changed')
+    try:
+        root=os.fstat(opened)
+        require(stat.S_ISDIR(root.st_mode) and root.st_uid==0 and not root.st_mode&0o022
+                and metadata(base.lstat())==metadata(root),'Unsafe legacy root')
+        walk(opened,'',0)
+        require(verified==files and metadata(base.lstat())==metadata(root),'Incomplete legacy software inventory')
+        bare_mounts(base)
+        require(_handoff_public(base/'package.json')==(package_pin,raw) and time.monotonic()<deadline,'Legacy manifest changed')
+        committed={'schema':'legacy-canary-upper-recursive-v1','package_sha256':package_pin,
+                   'root_metadata':metadata(root),'entries':sorted(records),'software_sha256':verified}
+        return hashlib.sha256(json.dumps(committed,sort_keys=True,separators=(',',':')).encode()).hexdigest(),blockers
+    finally:os.close(opened)
+
+
 def _gateway_handoff_snapshot(*, canary_only=False):
     files={key:_handoff_public(path)[0] for key,path in HANDOFF_FILES.items()}
     enabled=Path('/etc/nginx/sites-enabled/testnet-core-rpc.synergy-network.io')
@@ -2252,7 +2354,10 @@ def _gateway_handoff_snapshot(*, canary_only=False):
     canary_pin,canary_active,canary_pid=_handoff_unit(HANDOFF_UNITS[1],'/etc/systemd/system/'+HANDOFF_UNITS[1],'/opt/Synergy/bin/synergy-node')
     vpn_pin,vpn_active,vpn_pid=_handoff_unit(HANDOFF_UNITS[2],'/etc/systemd/system/'+HANDOFF_UNITS[2],'/opt/Synergy/bin/netbird')
     lower,lower_blockers=_handoff_root_entries('/opt/synergy',{'chain1266'})
-    upper,upper_blockers=_handoff_root_entries('/opt/Synergy',DIRECTORIES|{'package.json','installation.json'}|({'README.md'} if canary_only else set()))
+    upper,upper_blockers=(_legacy_upper_inventory() if canary_only else
+                          _handoff_root_entries('/opt/Synergy',DIRECTORIES|{'package.json','installation.json'}))
+    # A verified software map never attributes residual runtime or authorizes
+    # removal. Keep these blockers even for a complete recursive commitment.
     blockers={'metrics_resolution_required','explicit_retirement_approval_required','legacy_inventory_requires_attribution'}|(set() if canary_only else lower_blockers)|upper_blockers
     if not all(preserved[k] for k in ('tunnel_active','rpc_listener_owned','ws_listener_owned')):
         blockers.add('protected_attribution_failed')
