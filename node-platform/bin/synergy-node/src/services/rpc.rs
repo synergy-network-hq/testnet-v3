@@ -284,6 +284,51 @@ impl CanonicalQueryStore {
         Ok(Some((candidate, finality)))
     }
 
+    fn compact_block_at(&self, height: u64) -> Result<Option<FinalizedBlockView>, RpcError> {
+        let state = self.state_store()?;
+        let Some((batch, _permit)) = state.finalized_block_receipts(height)
+            .map_err(|_| RpcError::unavailable("compact finalized block unavailable"))? else { return Ok(None) };
+        let finality_store = self.finality_store()?;
+        let finality = finality_store.get(height).map_err(|_| RpcError::unavailable("read compact block finality"))?
+            .ok_or_else(|| RpcError::unavailable("compact block lacks canonical finality"))?;
+        if finality.height != height || finality.block_id != batch.finalized.finalized_block_id
+            || finality.protected_execution_root != batch.protected_execution_root
+            || finality.finality_certificate_id != batch.finality_certificate_id {
+            return Err(RpcError::unavailable("compact block conflicts with canonical finality"));
+        }
+        if height > 1 {
+            let parent = finality_store.get(height-1).map_err(|_| RpcError::unavailable("read compact block parent"))?
+                .ok_or_else(|| RpcError::unavailable("compact block parent unavailable"))?;
+            if parent.height != height-1 || parent.block_id != batch.parent_block_id {
+                return Err(RpcError::unavailable("compact block parent differs"));
+            }
+        }
+        // Missing retired history is not permission to hide a present corrupt
+        // or conflicting candidate. If full data survives, keep its full view.
+        if let Some(candidate) = self.candidate_at(height)? {
+            if candidate.block_id != batch.finalized.finalized_block_id || candidate.parent_block_id != batch.parent_block_id
+                || candidate.state_root != batch.finalized.state_root || candidate.protected_execution_root != batch.protected_execution_root
+                || candidate.transactions.len() != batch.transactions.len()
+                || candidate.transactions.iter().zip(&batch.transactions).any(|(transaction,row)|
+                    transaction.unsigned.sender != row.sender || transaction.unsigned.receiver != row.receiver
+                    || transaction.unsigned.amount_nwei != row.amount_nwei || transaction.unsigned.nonce != row.nonce
+                    || transaction.unsigned.fee_limit.gas_limit != row.gas_limit
+                    || transaction.unsigned.fee_limit.max_fee_per_gas_nwei != row.max_fee_per_gas_nwei)
+                || candidate.receipts.iter().zip(&batch.transactions).any(|(receipt,row)| serde_json::to_value(receipt).ok() != serde_json::to_value(&row.receipt).ok()) {
+                return Err(RpcError::unavailable("compact block conflicts with retained candidate"));
+            }
+            return Self::view(candidate, finality).map(Some);
+        }
+        let transactions = batch.transactions.iter().map(|row| json!({"unsigned":{"sender":row.sender,"receiver":row.receiver,
+            "amount_nwei":row.amount_nwei.to_string(),"nonce":row.nonce,"fee_limit":{"gas_limit":row.gas_limit,"max_fee_per_gas_nwei":row.max_fee_per_gas_nwei}}})).collect();
+        let receipts = batch.transactions.iter().map(|row| serde_json::to_value(&row.receipt))
+            .collect::<Result<Vec<_>,_>>().map_err(|_| RpcError::unavailable("encode compact receipts"))?;
+        Ok(Some(FinalizedBlockView { height, block_hash:batch.finalized.finalized_block_id, parent_block_hash:batch.parent_block_id,
+            state_root:batch.finalized.state_root, protected_execution_root:batch.protected_execution_root,
+            finality_certificate_id:batch.finality_certificate_id, transactions, receipts,
+            representation:Some("compact_public_v1".into()), payloads_available:Some(false) }))
+    }
+
     fn view(
         candidate: ExecutionCandidate,
         finality: FinalizedBlockRecord,
@@ -309,6 +354,8 @@ impl CanonicalQueryStore {
             finality_certificate_id: finality.finality_certificate_id,
             transactions,
             receipts,
+            representation: None,
+            payloads_available: None,
         })
     }
 }
@@ -335,10 +382,10 @@ impl CanonicalReadProvider for CanonicalQueryStore {
     fn block(&self, query: &BlockQuery) -> Result<Option<FinalizedBlockView>, RpcError> {
         query.validate()?;
         if let Some(height) = query.height {
-            return self
-                .finalized_at(height)?
-                .map(|(candidate, finality)| Self::view(candidate, finality))
-                .transpose();
+            if let Some((candidate, finality)) = self.finalized_at(height)? {
+                return Self::view(candidate, finality).map(Some);
+            }
+            return self.compact_block_at(height);
         }
         let requested_hash = query
             .hash
@@ -1937,19 +1984,56 @@ mod nonblocking_http_tests {
                 let next = synergy_state::FinalizedState { finalized_height: height, finalized_block_id: format!("{height:064x}"), state_root: synergy_state::state_root(&world).unwrap() };
                 let record = FinalizedBlockRecord { height, block_id: next.finalized_block_id.clone(), finality_certificate_id: "d".repeat(64), protected_execution_root: "c".repeat(64) };
                 finality.commit_exactly_once(&record, prior.as_ref()).unwrap(); prior = Some(record);
-                let batch = synergy_state::FinalizedReceiptBatch { schema_version: 1, finalized: next.clone(), protected_execution_root: "c".repeat(64), finality_certificate_id: if mismatch { "e".repeat(64) } else { "d".repeat(64) }, transactions: vec![synergy_state::FinalizedReceiptEntry { sender: "syna1sender".into(), receiver: "syna1receiver".into(), amount_nwei: 1000, nonce: 0, gas_limit: 100, max_fee_per_gas_nwei: 1, receipt: synergy_state::FinalizedPublicReceipt { transaction_id: "a".repeat(64), status: synergy_state::FinalizedReceiptStatus::Applied, gas_used: 12, state_root_after: next.state_root.clone(), error_code: None } }] };
-                state.commit_verified_world_transition_with_receipts(next, &world, &world, if height == 1 { Some(&batch) } else { None }).unwrap();
+                let mut batch = synergy_state::FinalizedReceiptBatch { schema_version: 1, finalized: next.clone(), parent_block_id: if height == 1 { "genesis".into() } else { format!("{:064x}",height-1) }, protected_execution_root: "c".repeat(64), finality_certificate_id: if mismatch { "e".repeat(64) } else { "d".repeat(64) }, transactions: vec![synergy_state::FinalizedReceiptEntry { sender: "syna1sender".into(), receiver: "syna1receiver".into(), amount_nwei: 1000, nonce: 0, gas_limit: 100, max_fee_per_gas_nwei: 1, receipt: synergy_state::FinalizedPublicReceipt { transaction_id: "a".repeat(64), status: synergy_state::FinalizedReceiptStatus::Applied, gas_used: 12, state_root_after: next.state_root.clone(), error_code: None } }] };
+                if height == 2 {
+                    batch.transactions[0].receipt.transaction_id = "b".repeat(64);
+                    let mut second = batch.transactions[0].clone(); second.receipt.transaction_id = "c".repeat(64);
+                    batch.transactions.push(second);
+                }
+                state.commit_verified_world_transition_with_receipts(next, &world, &world, if height <= 2 { Some(&batch) } else { None }).unwrap();
                 state.prune_finalized_history(height, 64).unwrap();
             }
             assert!(state.history_at(1).unwrap().is_none()); drop(state);
             let query = CanonicalQueryStore::load(&root).unwrap();
             let result = query.transaction(&TransactionQuery { transaction_id: "a".repeat(64) });
-            if mismatch { assert!(result.is_err()); } else {
+            if mismatch {
+                assert!(result.is_err());
+                assert!(query.block(&BlockQuery { height:Some(1),hash:None }).is_err());
+            } else {
                 let receipt = result.unwrap().unwrap();
                 assert_eq!(receipt.block_height,1); assert_eq!(receipt.status,"applied");
                 assert_eq!(receipt.transaction,json!({"unsigned":{"sender":"syna1sender","receiver":"syna1receiver","amount_nwei":"1000","nonce":0,"fee_limit":{"gas_limit":100,"max_fee_per_gas_nwei":1}}}));
-                assert!(query.transaction(&TransactionQuery { transaction_id: "b".repeat(64) }).unwrap().is_none());
+                assert!(query.transaction(&TransactionQuery { transaction_id: "f".repeat(64) }).unwrap().is_none());
                 assert!(query.account(&AccountQuery { address:"syna1sender".into(), at_height:Some(1) }).unwrap().is_none());
+                let block = query.block(&BlockQuery { height:Some(2),hash:None }).unwrap().unwrap();
+                assert_eq!(block.parent_block_hash,format!("{:064x}",1));
+                assert_eq!(block.block_hash,format!("{:064x}",2));
+                assert_eq!(block.representation.as_deref(),Some("compact_public_v1"));
+                assert_eq!(block.payloads_available,Some(false));
+                assert_eq!(block.transactions.len(),2); assert_eq!(block.receipts.len(),2);
+                assert_eq!(block.receipts[0]["transaction_id"],"b".repeat(64));
+                assert!(block.transactions[0].get("signature").is_none());
+                assert!(block.transactions[0]["unsigned"].get("payload").is_none());
+                assert!(query.block(&BlockQuery { height:None,hash:Some(format!("{:064x}",2)) }).unwrap().is_none());
+                let path = layout.state().join("execution/finalized-receipts/00000000000000000002.json");
+                let original = std::fs::read(&path).unwrap();
+                let mut changed: Value = serde_json::from_slice(&original).unwrap();
+                changed["batch"]["transactions"][0]["receipt"]["gas_used"] = json!(999);
+                std::fs::write(&path,serde_json::to_vec(&changed).unwrap()).unwrap();
+                assert!(query.block(&BlockQuery { height:Some(2),hash:None }).is_err()); // Bad checksum is not absence.
+                changed = serde_json::from_slice(&original).unwrap();
+                changed["batch"]["parent_block_id"] = json!("e".repeat(64));
+                // Valid internal checksum still cannot authorize a foreign parent.
+                let typed: synergy_state::FinalizedReceiptBatch = serde_json::from_value(changed["batch"].clone()).unwrap();
+                changed["integrity_digest"] = json!(synergy_storage::IntegrityDigest::of("SYNERGY_FINALIZED_RECEIPTS_V1",&serde_json::to_vec(&typed).unwrap()).0);
+                std::fs::write(&path,serde_json::to_vec(&changed).unwrap()).unwrap();
+                assert!(query.block(&BlockQuery { height:Some(2),hash:None }).is_err());
+                std::fs::write(&path,&original).unwrap();
+                let candidate = layout.blocks().join("execution-candidates/candidate/00000000000000000002.json");
+                std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+                std::fs::write(&candidate,b"corrupt present candidate").unwrap();
+                assert!(query.block(&BlockQuery { height:Some(2),hash:None }).is_err());
+
             }
             std::fs::remove_dir_all(root).unwrap();
         }
@@ -2024,6 +2108,10 @@ mod nonblocking_http_tests {
         }
         let query = CanonicalQueryStore::load(&root).unwrap();
         assert!(query.finalized_at(1).unwrap().is_some());
+        let full = serde_json::to_value(query.block(&BlockQuery { height:Some(1),hash:None }).unwrap().unwrap()).unwrap();
+        assert!(full.get("representation").is_none());
+        assert!(full.get("payloads_available").is_none());
+
         // Deterministically retire after RPC captured H1's commitment but before
         // it opens H1's candidate; this used to abort a transaction search.
         assert!(query

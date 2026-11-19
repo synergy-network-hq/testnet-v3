@@ -2521,6 +2521,7 @@ impl ExecutionService {
             let public_receipts = (!candidate.transactions.is_empty()).then(|| synergy_state::FinalizedReceiptBatch {
                 schema_version: 1,
                 finalized: finalized.clone(),
+                parent_block_id: candidate.parent_block_id.clone(),
                 protected_execution_root: record.protected_execution_root.clone(),
                 finality_certificate_id: record.finality_certificate_id.clone(),
                 transactions: candidate.transactions.iter().zip(&candidate.receipts).map(|(transaction, receipt)| synergy_state::FinalizedReceiptEntry {

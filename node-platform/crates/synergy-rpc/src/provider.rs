@@ -18,6 +18,11 @@ pub struct FinalizedBlockView {
     pub finality_certificate_id: String,
     pub transactions: Vec<Value>,
     pub receipts: Vec<Value>,
+    /// Omitted for full retained candidates. Compact data is not an inclusion proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub representation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payloads_available: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

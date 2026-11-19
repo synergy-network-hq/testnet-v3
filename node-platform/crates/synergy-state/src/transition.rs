@@ -14,6 +14,12 @@ use crate::{state_root, FinalizedReceiptBatch, FinalizedReceiptEntry, FinalizedS
 #[serde(deny_unknown_fields)]
 struct ReceiptPointer { height: u64, block_id: String, batch_digest: String, row: usize }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableReceiptBatch { batch: FinalizedReceiptBatch, integrity_digest: String }
+#[derive(serde::Serialize)]
+struct DurableReceiptBatchRef<'a> { batch: &'a FinalizedReceiptBatch, integrity_digest: &'a str }
+
 struct EncodedSize(usize);
 impl std::io::Write for EncodedSize {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -23,7 +29,7 @@ impl std::io::Write for EncodedSize {
     fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
 }
 
-type ReceiptBatchRead = (FinalizedReceiptBatch, Option<crate::world_resources::WorldResourcePermit>);
+pub type FinalizedReceiptBatchRead = (FinalizedReceiptBatch, Option<crate::world_resources::WorldResourcePermit>);
 pub type FinalizedTransactionLookup = (FinalizedReceiptBatch, FinalizedReceiptEntry, Option<crate::world_resources::WorldResourcePermit>);
 
 const MAX_COMMITMENT_BYTES: usize = 64 * 1024;
@@ -352,10 +358,15 @@ impl FinalizedStateStore {
         if measured.0 > 64 * 1024 * 1024 { return Err(StateError::ResourcePressure { requested: measured.0, limit: 64 * 1024 * 1024 }); }
         let _receipt_scratch = self.budget.as_ref().map(|budget| budget.reserve(measured.0.saturating_mul(4)))
             .transpose().map_err(crate::world_resources::resource_state_error)?;
-        let receipt_bytes = receipts.map(serde_json::to_vec).transpose().map_err(|e| StateError::Corrupt(e.to_string()))?;
-        if let (Some(batch), Some(bytes)) = (receipts, receipt_bytes.as_ref()) {
-            self.prepare_receipt_pointers(batch, &synergy_storage::IntegrityDigest::of("SYNERGY_FINALIZED_RECEIPTS_V1", bytes).0)?;
+        let raw_batch = receipts.map(serde_json::to_vec).transpose().map_err(|e| StateError::Corrupt(e.to_string()))?;
+        let digest = raw_batch.as_ref().map(|bytes| synergy_storage::IntegrityDigest::of("SYNERGY_FINALIZED_RECEIPTS_V1", bytes).0);
+        let receipt_bytes = receipts.zip(digest.as_deref()).map(|(batch, integrity_digest)| serde_json::to_vec(&DurableReceiptBatchRef { batch, integrity_digest }))
+            .transpose().map_err(|e| StateError::Corrupt(e.to_string()))?;
+        drop(raw_batch);
+        if receipt_bytes.as_ref().is_some_and(|bytes| bytes.len() > 64 * 1024 * 1024) {
+            return Err(StateError::ResourcePressure { requested: receipt_bytes.as_ref().unwrap().len(), limit: 64 * 1024 * 1024 });
         }
+        if let (Some(batch), Some(digest)) = (receipts, digest.as_deref()) { self.prepare_receipt_pointers(batch, digest)?; }
         let world_path = world_record(next.finalized_height);
         let history_path = history_record(next.finalized_height);
         let durable = durable_bytes(&next)?;
@@ -447,9 +458,14 @@ impl FinalizedStateStore {
         Ok(Some((batch, entry, permit)))
     }
 
+    /// Public compact block data only; no payloads, World or inclusion proof.
+    pub fn finalized_block_receipts(&self, height: u64) -> Result<Option<FinalizedReceiptBatchRead>, StateError> {
+        self.finalized_receipts_at(height)
+    }
+
     /// Missing means unobserved: old software/snapshot restores may not have
     /// receipts. No backfill, negative inclusion claim or World reconstruction.
-    fn finalized_receipts_at(&self, height: u64) -> Result<Option<ReceiptBatchRead>, StateError> {
+    fn finalized_receipts_at(&self, height: u64) -> Result<Option<FinalizedReceiptBatchRead>, StateError> {
         let (bytes, scratch) = self.store.inspect_consistent(|reader| -> Result<_, StateError> {
             let path = finalized_receipts_record(height);
             let length = reader.optional_record_bytes(&path).map_err(storage_error)?.unwrap_or(0);
@@ -458,8 +474,10 @@ impl FinalizedStateStore {
             Ok((reader.read_optional_bounded(&path).map_err(storage_error)?, scratch))
         }).map_err(storage_error)??;
         let Some(bytes) = bytes else { return Ok(None) };
-        let batch: FinalizedReceiptBatch = serde_json::from_slice(&bytes).map_err(|e| StateError::Corrupt(e.to_string()))?;
+        let record: DurableReceiptBatch = serde_json::from_slice(&bytes).map_err(|e| StateError::Corrupt(e.to_string()))?;
+        let batch = record.batch;
         batch.validate(&batch.finalized)?;
+        synergy_storage::IntegrityDigest(record.integrity_digest).verify("SYNERGY_FINALIZED_RECEIPTS_V1", &serde_json::to_vec(&batch).map_err(|e| StateError::Corrupt(e.to_string()))?).map_err(storage_error)?;
         if batch.finalized.finalized_height != height
             || self.current().is_none_or(|tip| tip.finalized_height < height
                 || (tip.finalized_height == height && tip != &batch.finalized)) {
@@ -792,6 +810,7 @@ mod tests {
     fn receipt_batch(height: u64, world: &WorldState) -> FinalizedReceiptBatch {
         FinalizedReceiptBatch {
             schema_version: 1,
+            parent_block_id: if height == 1 { "genesis".into() } else { format!("{:064x}", height - 1) },
             finalized: FinalizedState { finalized_height: height, finalized_block_id: format!("{height:064x}"), state_root: state_root(world).unwrap() },
             protected_execution_root: "c".repeat(64), finality_certificate_id: "d".repeat(64),
             transactions: vec![FinalizedReceiptEntry { sender: "syna1sender".into(), receiver: "syna1receiver".into(), amount_nwei: 1000, nonce: 0, gas_limit: 100, max_fee_per_gas_nwei: 1, receipt: crate::FinalizedPublicReceipt {

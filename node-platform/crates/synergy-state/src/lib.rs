@@ -23,4 +23,4 @@ pub use proof::{verify_finalized_state_proof, StateProof, StateProofVerifier};
 pub use pruning::RetentionPolicy;
 pub use root::{state_root, state_root_with_size};
 pub use state::{FinalizedState, WorldState};
-pub use transition::{FinalizedStateStore, FinalizedTransactionLookup, StateError};
+pub use transition::{FinalizedReceiptBatchRead, FinalizedStateStore, FinalizedTransactionLookup, StateError};

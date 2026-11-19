@@ -37,6 +37,7 @@ pub struct FinalizedReceiptEntry {
 pub struct FinalizedReceiptBatch {
     pub schema_version: u32,
     pub finalized: FinalizedState,
+    pub parent_block_id: String,
     pub protected_execution_root: String,
     pub finality_certificate_id: String,
     pub transactions: Vec<FinalizedReceiptEntry>,
@@ -54,6 +55,13 @@ impl FinalizedReceiptBatch {
             || next.finalized_height == 0
             || !hash(&next.finalized_block_id)
             || !hash(&next.state_root)
+            || self.parent_block_id.is_empty()
+            || self.parent_block_id.len() > 256
+            || !self
+                .parent_block_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            || (next.finalized_height > 1 && !hash(&self.parent_block_id))
             || !hash(&self.protected_execution_root)
             || !hash(&self.finality_certificate_id)
             || self.transactions.is_empty()
