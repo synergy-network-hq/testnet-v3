@@ -405,6 +405,45 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(start_check.call_count,2)
             self.assertEqual(mutate.call_count,2)
 
+    def test_start_checks_exact_grant_before_recovery_but_consumes_only_after_validation(self):
+        import lifecycle
+        import synergy_linux
+        self.policy['qualified_operations']=['start','restart']
+        self.save(self.control/'policy.json',self.policy)
+        with patch.object(c.platform,'system',return_value='Linux'), \
+             patch.object(c.platform,'machine',return_value='x86_64'), \
+             patch.object(synergy_linux,'safe_root'), \
+             patch.object(self.controller,'require_bound_validator_vpn'), \
+             patch('root_guard.check_registration'), \
+             patch.object(lifecycle,'start_check') as check, \
+             patch.object(lifecycle,'mutate_owned_service') as mutate:
+            for operation in ('start','restart'):
+                query=request(operation); key=c.request_digest(query)
+                grant=self.control/'grants'/(key+'.json')
+                with self.assertRaises(c.Refused): self.controller.dispatch(query)
+                check.assert_not_called(); mutate.assert_not_called()
+                self.save(grant,{'root':str(self.root),'request_sha256':key,'expires_at':int(time.time())+60})
+                original=grant.read_bytes()
+                check.side_effect=ValueError('unsafe startup inventory')
+                with self.assertRaisesRegex(ValueError,'unsafe startup inventory'): self.controller.dispatch(query)
+                self.assertEqual(grant.read_bytes(),original)
+                self.assertFalse((self.control/'audit.jsonl').exists()); mutate.assert_not_called()
+                check.reset_mock()
+                def expire(root,*,authorize):
+                    self.save(grant,{'root':str(self.root),'request_sha256':key,'expires_at':0})
+                    authorize()
+                check.side_effect=expire
+                with self.assertRaises(c.Refused): self.controller.dispatch(query)
+                self.assertTrue(grant.exists()); self.assertFalse((self.control/'audit.jsonl').exists())
+                mutate.assert_not_called()
+                self.save(grant,{'root':str(self.root),'request_sha256':key,'expires_at':int(time.time())+60})
+                check.side_effect=lambda root,*,authorize:authorize()
+                self.assertEqual(self.controller.dispatch(query)['requested'],operation)
+                self.assertFalse(grant.exists())
+                self.assertEqual(json.loads((self.control/'audit.jsonl').read_bytes())['request_sha256'],key)
+                (self.control/'audit.jsonl').unlink()
+                check.reset_mock(); mutate.reset_mock()
+
     def test_log_summary_keeps_only_bounded_complete_line_counts(self):
         logs=self.root/'logs'; logs.mkdir(mode=0o700)
         path=logs/'node.log'

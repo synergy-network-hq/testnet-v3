@@ -409,10 +409,42 @@ def register(root):
     return {'registered':[str(p) for p in paths],'services_started':False,'boot_enabled':False}
 
 
-def start_check(root):
+def start_check(root, *, authorize=None):
     _require_operator(linux=False)
     with _lifecycle_lock(root):
-        return _start_check_locked(root)
+        result = _start_check_locked(root)
+        if authorize is not None:
+            authorize()
+        return result
+
+
+def _startup_pending_upgrade(root):
+    """Only a reviewed successor may coexist with the still-installed runtime."""
+    pending = root/'tmp/update-master'
+    if not pending.exists() and not pending.is_symlink():
+        return None
+    # systemd repeats this check using sealed installed tools, rather than the
+    # adopted controller engine. Its complete dependency closure must agree.
+    from controller import Controller, ENGINE_MODULES, engineering_effective_selection
+    controller = Controller(root)
+    policy = controller.policy()
+    engines = policy.get('engine_files')
+    require(isinstance(engines, dict) and ENGINE_MODULES <= set(engines) <= ENGINE_MODULES | {'runtime_probe.py'}
+            and engines.get('lifecycle.py') == digest(Path(__file__)),
+            'startup engine closure lacks exact authenticated attribution')
+    for name, expected in engines.items():
+        installed = root/'tools'/name
+        require(installed.is_file() and not installed.is_symlink() and digest(installed) == expected,
+                'installed startup checker differs; finish the approved upgrade before startup')
+    current = engineering_effective_selection(root, policy)
+    update = policy.get('engineering_update')
+    require(current is not None and isinstance(update, dict)
+            and update.get('previous_selection') == current
+            and update.get('selection') != current,
+            'startup pending master lacks an exact unused native adoption')
+    selected = update['selection']
+    controller.approved_package({key:selected[key] for key in ('release_id','manifest_sha256')})
+    return selected['manifest_sha256']
 
 
 def _start_check_locked(root):
@@ -423,10 +455,11 @@ def _start_check_locked(root):
     require(not (root/AUTONOMOUS_EPOCH_INTENT).exists() and not (root/AUTONOMOUS_EPOCH_INTENT).is_symlink(),
             'finish autonomous epoch activation before startup')
     receipt, _ = _sealed_receipt(root)
+    pending_upgrade = _startup_pending_upgrade(root)
     _attributed_units(root)
     recover_consensus_archives(root)
     from conformance import installed
-    installed(root, host=True)
+    installed(root, host=True, **({'pending_upgrade_sha256':pending_upgrade} if pending_upgrade is not None else {}))
     policy = read(root/'config/start-authorized.json')
     identity = verify_identity(root)
     require(policy['network_id'] == receipt['network_id'] and policy['chain_id'] == receipt['chain_id'], 'wrong startup incarnation')

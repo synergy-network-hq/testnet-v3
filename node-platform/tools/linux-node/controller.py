@@ -384,7 +384,7 @@ class Controller:
         try: os.write(fd,record);os.fsync(fd)
         finally: os.close(fd)
 
-    def authorize(self, request, enrollment_pin=None):
+    def authorize(self, request, enrollment_pin=None, *, consume=True):
         require(request['operation']=='uninstall' or not (self.control/HOST_REMOVAL).exists(),
                 'Host retirement is in progress; finish removal before other changes')
         policy=self.policy()
@@ -414,6 +414,8 @@ class Controller:
         if request['operation'] in ('vpn_bind','vpn_retire','vpn_cancel_unused'):
             require(enrollment_pin is not None and grant.get('binding_sha256')==enrollment_pin,
                     'Exact native-verified VPN server binding required','authorization_required')
+        if not consume:
+            return key
         # Consume before executing. Ambiguous outcomes need observation and a
         # fresh operator grant, never blind resubmission or replay.
         self.audit(request)
@@ -1998,7 +2000,14 @@ class Controller:
                 self.require_bound_validator_vpn()
             from root_guard import check_registration
             check_registration(self.policy().get('root_guard_sha256'))
-        self.authorize(request)
+        if op in ('start','restart'):
+            # Archive recovery inside startup validation is not a pure read.
+            # Check the exact live grant first, then recheck and consume only
+            # after every startup invariant succeeds under the lifecycle lock.
+            self.authorize(request,consume=False)
+            life.start_check(self.root,authorize=lambda:self.authorize(request))
+        else:
+            self.authorize(request)
         if op=='install':
             # The canonical installer independently rejects nonempty roots.
             return install(package,self.root,'validator',p['network_id'],p['chain_id'],p['node_name'],staged_master_sha256=p['manifest_sha256'])
@@ -2006,7 +2015,6 @@ class Controller:
         if op=='commission': return life.commission(self.root,self.root/'tmp/commissioning')
         if op=='register': return life.register(self.root)
         if op in ('start','restart','stop'):
-            if op!='stop': life.start_check(self.root)
             life.mutate_owned_service(self.root,op,'synergy-node.service')
             return {'requested':op,'healthNotInferred':True}
         if op=='uninstall': return life.remove(self.root,str(self.root))
