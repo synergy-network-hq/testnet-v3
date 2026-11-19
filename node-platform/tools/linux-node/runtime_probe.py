@@ -5,9 +5,10 @@ commissioning, or production qualification. No custody is read or generated.
 """
 import hashlib
 import json
+import stat
 
 import lifecycle as life
-from controller import SELECT, engineering_effective_selection, require
+from controller import SELECT, engineering_effective_selection, require, Refused
 from synergy_linux import native
 
 
@@ -70,7 +71,27 @@ def _public_origin(c, policy, receipt, manifest, package):
     return pins, raw, formation, _gateway_request_bytes(config)
 
 
+FAILURES = {
+    'scope_refused': 'Installed runtime probe scope refused',
+    'package_refused': 'Authenticated candidate inventory refused',
+    'origin_refused': 'Approved public origin refused',
+    'not_executable': 'Authenticated candidate node is not executable',
+    'execution_refused': 'Candidate native origin verifier execution refused',
+    'response_refused': 'Candidate native origin response refused',
+    'changed': 'Runtime probe scope changed during verification',
+}
+
+
 def upgrade_native_preflight(c, parameters):
+    phase = ['scope_refused']
+    try:
+        return _upgrade_native_preflight(c, parameters, phase)
+    except Exception:
+        code = phase[0]
+        raise Refused('runtime_probe_'+code, FAILURES[code]) from None
+
+
+def _upgrade_native_preflight(c, parameters, phase):
     from apqe_layout import require_frozen_tree
     from canary_rpc_relay import _is_digest, _unique_fields
     require(isinstance(parameters, dict) and set(parameters) == SELECT
@@ -89,23 +110,34 @@ def upgrade_native_preflight(c, parameters):
                 and all(selection.get(k) == receipt.get(k)
                         for k in ('network_id', 'chain_id', 'node_name')),
                 'Installed engineering target differs')
+        phase[0] = 'package_refused'
         package, manifest, approval = c.approved_package(parameters)
         require_frozen_tree(package)
         require(approval.get('networks', {}).get(receipt['network_id']) == 99999,
                 'Candidate network is not approved')
+        phase[0] = 'origin_refused'
         pins, raw, formation, config = _public_origin(c, policy, receipt, manifest, package)
         expected = {'schema': 'nodenetwork-gateway-origin-v1',
                     'network_id': receipt['network_id'], 'chain_id': '99999',
                     'mutation_performed': False,
                     **{field: pins[name] for field, name in ORIGIN_FIELDS.items()}}
-        observed = json.loads(native(
+        phase[0] = 'not_executable'
+        info = (package/'bin/synergy-node').lstat()
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                and stat.S_IMODE(info.st_mode) == 0o700,
+                'Exact private executable candidate required')
+        phase[0] = 'execution_refused'
+        response = native(
             [package/'bin/synergy-node', 'canary-rpc-relay', 'inspect-origin'],
-            data=config, timeout=120, maximum_stdout=8192), object_pairs_hook=_unique_fields)
+            data=config, timeout=120, maximum_stdout=8192)
+        phase[0] = 'response_refused'
+        observed = json.loads(response, object_pairs_hook=_unique_fields)
         require(observed == expected and isinstance(observed, dict)
                 and observed.get('mutation_performed') is False,
                 'Candidate native signed origin differs')
         # Bind the successful execution to the same bytes and scope throughout
         # the read. A drifted package/origin never produces a success response.
+        phase[0] = 'changed'
         after_package, after_manifest, after_approval = c.approved_package(parameters)
         require_frozen_tree(after_package)
         require((after_package, after_manifest, after_approval) == (package, manifest, approval)

@@ -196,6 +196,29 @@ def extract(stream,stage,header):
     return manifest
 
 
+def verify_executable_stage(stage):
+    # Extraction stays non-executable until the complete inventory is verified.
+    from apqe_layout import require_frozen_tree
+    from synergy_linux import verify_package
+    manifest=verify_package(stage)
+    require_frozen_tree(stage)
+    for name in ('synergy-node','synergy-keytool','synergy-genesis','netbird'):
+        member='bin/'+name
+        if member not in manifest['files']:continue
+        fd=os.open(stage/member,os.O_RDONLY|os.O_NOFOLLOW)
+        try:
+            info=os.fstat(fd)
+            require(stat.S_ISREG(info.st_mode) and info.st_nlink==1,'Exact regular staged binary required')
+            with os.fdopen(os.dup(fd),'rb') as source:
+                digest=hashlib.sha256()
+                for chunk in iter(lambda:source.read(1024*1024),b''):digest.update(chunk)
+                require(digest.hexdigest()==manifest['files'][member],
+                        'Staged binary changed after verification')
+            os.fchmod(fd,0o700);os.fsync(fd)
+        finally:os.close(fd)
+    return manifest
+
+
 def host_contents(public_key):
     command='/usr/bin/sudo -n /usr/bin/python3 -I -B /opt/synergy/tmp/controller/controller.py'
     return {
@@ -1017,7 +1040,7 @@ def stage_engineering_update(stream, release_id, pin, reconcile=False):
         try:
             update_phase('package')
             manifest=extract(stream,pending,{'manifest_sha256':pin,'release_id':release_id})
-            require(verify_package(pending)==manifest,'Candidate verification differs')
+            require(verify_executable_stage(pending)==manifest,'Candidate verification differs')
             validate_guard_update(root,policy,receipt,manifest,pending)
             shutil.copytree(old,replacement)
             for name in engine_names(manifest['files']):

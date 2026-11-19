@@ -25,6 +25,8 @@ class RuntimeProbeTests(unittest.TestCase):
         self.c = controller.Controller(self.root)
         self.package = self.root/'tmp/update-master'
         self.package.mkdir(mode=0o700, parents=True)
+        self.save(self.package/'bin/synergy-node', b'authenticated fixture binary')
+        (self.package/'bin/synergy-node').chmod(0o700)
         self.p = {'release_id': 'qualified-candidate', 'manifest_sha256': 'a'*64}
         self.receipt = {'role': 'validator', 'chain_id': 99999,
                         'network_id': 'synergy-posy-canary-fixture', 'node_name': 'validator-02'}
@@ -190,5 +192,24 @@ class RuntimeProbeTests(unittest.TestCase):
                 probe.upgrade_native_preflight(self.c, parameters)
         self.assertEqual(self.calls, [])
 
+
+    def test_nonexecutable_candidate_is_read_only_fixed_refusal(self):
+        path = self.package/'bin/synergy-node'
+        for mode in (0o600, 0o755):
+            path.chmod(mode)
+            with self.assertRaises(controller.Refused) as error: self.run_probe()
+            self.assertEqual(error.exception.code, 'runtime_probe_not_executable')
+            self.assertEqual(str(error.exception), probe.FAILURES['not_executable'])
+            self.assertEqual(path.stat().st_mode & 0o777, mode)
+        self.assertEqual(self.calls, [])
+
+    def test_failures_expose_only_fixed_phase_not_private_exception(self):
+        cases = [('origin_refused', patch.object(probe, '_public_origin', side_effect=ValueError('PRIVATE'))),
+                 ('execution_refused', patch.object(probe, 'native', side_effect=OSError('PRIVATE'))),
+                 ('response_refused', patch.object(probe, 'native', return_value=b'PRIVATE'))]
+        for phase, manager in cases:
+            with manager, self.assertRaises(controller.Refused) as error: self.run_probe()
+            self.assertEqual(error.exception.code, 'runtime_probe_'+phase)
+            self.assertEqual(str(error.exception), probe.FAILURES[phase])
 
 if __name__ == '__main__': unittest.main()

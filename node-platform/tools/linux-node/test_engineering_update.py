@@ -7,6 +7,44 @@ import bootstrap as b
 import controller as c
 
 class EngineeringUpdateTests(unittest.TestCase):
+    def test_extracted_modes_change_only_after_full_verification(self):
+        import io
+        import tempfile
+        from test_bootstrap import BootstrapTests
+        with tempfile.TemporaryDirectory() as temporary:
+            stage=Path(temporary).resolve()
+            archive,header=BootstrapTests().archive()
+            manifest=b.extract(archive,stage,header)
+            binary=stage/'bin/synergy-node'
+            self.assertEqual(binary.stat().st_mode & 0o777,0o600)
+            with patch('synergy_linux.verify_package',side_effect=ValueError('unauthenticated')):
+                with self.assertRaises(ValueError):b.verify_executable_stage(stage)
+            self.assertEqual(binary.stat().st_mode & 0o777,0o600)
+            with patch('synergy_linux.verify_package',return_value=manifest):
+                self.assertEqual(b.verify_executable_stage(stage),manifest)
+            for name in ('synergy-node','synergy-keytool','synergy-genesis','netbird'):
+                self.assertEqual((stage/'bin'/name).stat().st_mode & 0o777,0o700)
+            self.assertEqual((stage/'tools/controller.py').stat().st_mode & 0o777,0o600)
+            self.assertEqual((stage/'package.json').stat().st_mode & 0o777,0o600)
+
+    def test_postverification_substitution_never_chmods_foreign_or_changed_file(self):
+        import tempfile
+        from test_bootstrap import BootstrapTests
+        for defect in ('changed','symlink','hardlink'):
+            with self.subTest(defect=defect),tempfile.TemporaryDirectory() as temporary:
+                stage=Path(temporary).resolve()/'stage';stage.mkdir(mode=0o700)
+                archive,header=BootstrapTests().archive();manifest=b.extract(archive,stage,header)
+                binary=stage/'bin/synergy-node'
+                outside=Path(temporary)/'outside';outside.write_bytes(binary.read_bytes());outside.chmod(0o600)
+                if defect=='changed':binary.write_bytes(b'changed')
+                else:
+                    binary.unlink()
+                    if defect=='symlink':binary.symlink_to(outside)
+                    else:__import__('os').link(outside,binary)
+                with patch('synergy_linux.verify_package',return_value=manifest):
+                    with self.assertRaises((ValueError,OSError)):b.verify_executable_stage(stage)
+                self.assertEqual(outside.stat().st_mode & 0o777,0o600)
+
     def fixture(self):
         selection={'release_id':'reviewed-old','manifest_sha256':'a'*64,'network_id':'synergy-posy-canary-20261117','chain_id':99999,'node_name':'validator-test'}
         policy={'engineering_selection':selection,'engineering_initial_authorization_sha256':'b'*64,

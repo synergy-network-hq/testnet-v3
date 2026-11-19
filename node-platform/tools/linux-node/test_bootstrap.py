@@ -15,6 +15,8 @@ class BootstrapTests(unittest.TestCase):
     def archive(self,change=None):
         roles=['validator']+[f'role-{i}' for i in range(19)]
         files={'roles/roles.json':json.dumps({'roles':roles}).encode()}
+        files.update({'bin/'+name:b'authenticated binary fixture' for name in
+                      ('synergy-node','synergy-keytool','synergy-genesis','netbird')})
         files.update({'tools/'+name:b'canonical engine' for name in b.ENGINE})
         manifest={'format':'synergy-universal-linux-v1','architecture':'x86_64','release_id':'qualified-test-only',
                   'files':{name:hashlib.sha256(data).hexdigest() for name,data in files.items()}}
