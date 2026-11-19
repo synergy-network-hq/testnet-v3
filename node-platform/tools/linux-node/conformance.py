@@ -736,6 +736,9 @@ def installed(root, expected_manifest=None, host=False, initialized=True, schema
     pending_upgrade |= approved_network_formation_members(root)
     pending_upgrade |= approved_network_transport_members(root)
     pending_upgrade |= approved_gateway_admission_members(root)
+    from canary_rpc_relay import approved_gateway_target_members
+    gateway_target_members=approved_gateway_target_members(root)
+    pending_upgrade |= gateway_target_members
     treasury_members=approved_treasury_members(root)
     pending_upgrade |= treasury_members
     approved_vpn_attempt_members(root)
@@ -786,7 +789,7 @@ def installed(root, expected_manifest=None, host=False, initialized=True, schema
                 and not (root/'config/start-authorized.json').exists(),
                 'uncommissioned stage contains selected network or startup authority')
         if stage=='fresh':
-            _require_fresh_keys(root,treasury_members)
+            _require_fresh_keys(root,treasury_members|gateway_target_members)
             require(not (root/'config/node.json').exists()
                     and not (root/'data/metadata/schema-version').exists(),
                     'fresh stage contains initialized state')

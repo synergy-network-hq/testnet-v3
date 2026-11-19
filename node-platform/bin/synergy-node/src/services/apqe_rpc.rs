@@ -97,12 +97,26 @@ pub(crate) struct Admission {
 impl Admission {
     pub(crate) fn load(config: &NodeConfiguration, path: &Path) -> Result<Self, String> {
         let before = Stamp::capture(path)?;
+        let bytes = transport::read(path, 128 * 1024, false)?;
+        let mut admission = Self::from_public_bytes(config, bytes)?;
+        if !before.unchanged() {
+            return Err("RPC authority artifacts changed".into());
+        }
+        admission.stamps.push(before);
+        Ok(admission)
+    }
+    pub(crate) fn from_public_bytes(
+        config: &NodeConfiguration,
+        bytes: Vec<u8>,
+    ) -> Result<Self, String> {
+        if bytes.is_empty() || bytes.len() > 128 * 1024 {
+            return Err("invalid bounded RPC admission".into());
+        }
         let base = snapshot(config)?;
         let selected = config
             .apqe_transport
             .as_ref()
             .ok_or("missing APQE configuration")?;
-        let bytes = transport::read(path, 128 * 1024, false)?;
         let signed: SignedAdmission =
             serde_json::from_slice(&bytes).map_err(|_| "invalid RPC admission encoding")?;
         let root = transport::read(&selected.registry_trust_key_path, 8192, false)?;
@@ -123,11 +137,11 @@ impl Admission {
             &consensus,
             transport::clock()?,
         )?;
-        if !before.unchanged() || !base.stamps.iter().all(Stamp::unchanged) {
+        if !base.stamps.iter().all(Stamp::unchanged) {
             return Err("RPC authority artifacts changed".into());
         }
         Ok(Self {
-            stamps: vec![before],
+            stamps: vec![],
             base,
             bytes,
             authority_bytes,
@@ -184,6 +198,68 @@ impl Admission {
         Ok((context, trust))
     }
 }
+pub(crate) fn inspect_gateway_origin(
+    config: &NodeConfiguration,
+) -> Result<serde_json::Value, String> {
+    if config.role != synergy_protocol_types::NodeRole::RpcGateway
+        || config.consensus.mode != synergy_config::ConsensusMode::Observe
+        || config.rpc.enabled
+        || config.etdag.enabled
+        || config.aegis_signing_key_path.is_some()
+        || config.consensus.signing_key_path.is_some()
+        || config.etdag.ingress_kem_secret_key_path.is_some()
+    {
+        return Err("gateway origin requires observer-only configuration".into());
+    }
+    config.validate().map_err(|e| e.to_string())?;
+    let base = snapshot(config)?;
+    let selected = config
+        .apqe_transport
+        .as_ref()
+        .ok_or("missing gateway origin transport")?;
+    let paths = [
+        (
+            "genesis_sha256",
+            config.genesis_path.as_deref().ok_or("missing Genesis")?,
+        ),
+        (
+            "authority_sha256",
+            config
+                .consensus
+                .authority_binding
+                .as_deref()
+                .ok_or("missing authority")?,
+        ),
+        (
+            "authority_root_sha256",
+            config
+                .consensus
+                .authority_trust_key_path
+                .as_deref()
+                .ok_or("missing authority root")?,
+        ),
+        ("registry_sha256", selected.registry_path.as_path()),
+        (
+            "issuer_root_sha256",
+            selected.registry_trust_key_path.as_path(),
+        ),
+        ("manifest_sha256", config.manifest_path.as_path()),
+    ];
+    let mut out = serde_json::json!({"schema":"nodenetwork-gateway-origin-v1","network_id":base.payload.network_id,
+        "chain_id":base.payload.chain_id.to_string(),"mutation_performed":false});
+    for (key, path) in paths {
+        out[key] = serde_json::json!(transport::sha256(&transport::read(
+            path,
+            16 * 1024 * 1024,
+            false
+        )?));
+    }
+    if !base.stamps.iter().all(Stamp::unchanged) {
+        return Err("gateway origin changed during review".into());
+    }
+    Ok(out)
+}
+
 fn snapshot(config: &NodeConfiguration) -> Result<Snapshot, String> {
     if config.chain_id != 99999 {
         return Err("RPC relay is restricted to isolated Canary 99999".into());

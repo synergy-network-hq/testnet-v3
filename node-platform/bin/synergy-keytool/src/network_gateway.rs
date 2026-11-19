@@ -490,16 +490,21 @@ pub(super) fn exercise_fixture(
     engine: crate::provider::Engine,
 ) {
     let o = owner(context, pin, formation, transport, &engine, false).unwrap();
-    let generated = synergy_address_engine::apqe::gateway_transport::provision(
-        &engine.lock().unwrap(),
-        99999,
-        o.payload.network_id.clone(),
-        o.review.genesis_sha256.clone(),
-        fixture_unlocks().0,
-        fixture_unlocks().1,
-    )
-    .unwrap();
-    let enrollment = serde_json::to_string(&generated.enrollment).unwrap();
+    let target = target_fixture_begin(context, pin, formation, transport, parent, &engine);
+    let enrollment = if let Some((_, _, _, enrollment)) = &target {
+        enrollment.clone()
+    } else {
+        let generated = synergy_address_engine::apqe::gateway_transport::provision(
+            &engine.lock().unwrap(),
+            99999,
+            o.payload.network_id.clone(),
+            o.review.genesis_sha256.clone(),
+            fixture_unlocks().0,
+            fixture_unlocks().1,
+        )
+        .unwrap();
+        serde_json::to_string(&generated.enrollment).unwrap()
+    };
     let approved = Approval {
         format: "synergy-engineering-gateway-purpose-v1".into(),
         purpose: PURPOSE.into(),
@@ -562,7 +567,10 @@ pub(super) fn exercise_fixture(
             serde_json::from_value(serde_json::to_value(&p).unwrap()).unwrap();
         proposed.purpose_approval_json = String::from_utf8(raw.clone()).unwrap();
         proposed.purpose_approval_sha256 = digest(&raw);
-        let request = encode(&json!({"version":1,"operation":"gateway_admission_prepare","parameters":proposed})).unwrap();
+        let request = encode(
+            &json!({"version":1,"operation":"gateway_admission_prepare","parameters":proposed}),
+        )
+        .unwrap();
         assert!(
             preflight(context, pin, formation, transport, &request, engine.clone()).is_err(),
             "public preflight accepted changed {field}"
@@ -647,6 +655,9 @@ pub(super) fn exercise_fixture(
     let admission: SignedAdmission =
         serde_json::from_str(exported["admission_json"].as_str().unwrap()).unwrap();
     verify_signature(&admission, &o.public, &engine.lock().unwrap()).unwrap();
+    if let Some((node, config, keys, enrollment)) = &target {
+        target_fixture_finish(node, config, keys, enrollment, &exported);
+    }
     // Neither signer custody nor gateway encrypted identity is included in public output.
     assert!(!exported.to_string().contains("envelope"));
     assert!(!exported.to_string().contains("secret"));
@@ -666,4 +677,245 @@ pub(super) fn exercise_fixture(
         status(&i, &directory, engine.clone(), false).unwrap(),
         signed
     );
+}
+
+// Explicit opt-in qualification invokes the actual CLI against this already
+// signed fixture; no copied host custody or second running chain is involved.
+#[cfg(test)]
+fn target_cli(
+    node: &Path,
+    operation: &str,
+    args: &[&Path],
+    input: Option<&Value>,
+    success: bool,
+) -> Vec<u8> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(node)
+        .arg("canary-rpc-relay")
+        .arg(operation)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    if let Some(value) = input {
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&serde_json::to_vec(value).unwrap())
+            .unwrap();
+    } else {
+        drop(child.stdin.take());
+    }
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(
+        output.status.success(),
+        success,
+        "target CLI {operation} refused: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.len() <= 2 * 1024 * 1024);
+    output.stdout
+}
+#[cfg(test)]
+fn target_fixture_begin(
+    context: &Path,
+    pin: &str,
+    formation: &Path,
+    transport: &Path,
+    parent: &Path,
+    engine: &crate::provider::Engine,
+) -> Option<(std::path::PathBuf, Value, std::path::PathBuf, String)> {
+    let node =
+        std::env::var_os("SYNERGY_GATEWAY_TARGET_FIXTURE_NODE").map(std::path::PathBuf::from)?;
+    let exported = super::status(context, pin, formation, transport, engine.clone(), true).unwrap();
+    let artifact = &exported["nodes"][0]["artifacts"];
+    let root = parent.join("target-gateway");
+    begin(&root).unwrap();
+    let network = root.join("network");
+    begin(&network).unwrap();
+    for name in [
+        "genesis.json",
+        "authority.json",
+        "authority-root.pub",
+        "network-manifest.json",
+        "transport-registry.json",
+        "transport-root.pub",
+    ] {
+        let text = artifact[format!("network/{name}")].as_str().unwrap();
+        let bytes = if name.ends_with(".pub") {
+            {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD
+                    .decode(text)
+                    .unwrap()
+            }
+        } else {
+            text.as_bytes().to_vec()
+        };
+        write(&network.join(name), &bytes).unwrap();
+    }
+    let mut config: Value =
+        serde_json::from_str(artifact["config/node.json"].as_str().unwrap()).unwrap();
+    let keys = root.join("keys");
+    config["node_name"] = json!("gateway-fixture");
+    config["role"] = json!("rpc_gateway");
+    config["public_identity_path"] = json!(keys.join("gateway-enrollment.json"));
+    config["manifest_path"] = json!(network.join("network-manifest.json"));
+    config["genesis_path"] = json!(network.join("genesis.json"));
+    config["aegis_signing_key_path"] = Value::Null;
+    config["aegis_key_bindings_path"] = Value::Null;
+    config["aegis_provider"] = json!({"report_path":std::env::var("APQE_TRUSTED_NATIVE_REPORT").unwrap(),"authenticated_report_sha256":std::env::var("APQE_AUTHENTICATED_REPORT_SHA256").unwrap()});
+    config["admin_socket_path"] = json!(root.join("run/admin.sock"));
+    config["storage"]["data_directory"] = json!(root.join("data"));
+    config["consensus"]["mode"] = json!("observe");
+    config["consensus"]["signing_key_path"] = Value::Null;
+    config["consensus"]["authority_binding"] = json!(network.join("authority.json"));
+    config["consensus"]["authority_trust_key_path"] = json!(network.join("authority-root.pub"));
+    config["etdag"]["enabled"] = json!(false);
+    config["etdag"]["ingress_kem_secret_key_path"] = Value::Null;
+    config["rpc"]["enabled"] = json!(false);
+    config["rpc"]["listen_address"] = Value::Null;
+    config["apqe_transport"]["registry_path"] = json!(network.join("transport-registry.json"));
+    config["apqe_transport"]["registry_trust_key_path"] = json!(network.join("transport-root.pub"));
+    for (field, name) in [
+        ("enrollment_path", "gateway-enrollment.json"),
+        ("custody_path", "gateway-transport.encrypted.json"),
+        ("custody_unlock_path", "gateway-transport.unlock"),
+    ] {
+        config["apqe_transport"][field] = json!(keys.join(name));
+    }
+    let transport_root = fs::read(network.join("transport-root.pub")).unwrap();
+    assert_eq!(
+        transport_root.len(),
+        2592,
+        "native ML-DSA-87 root is binary, never exported base64 text"
+    );
+    assert_eq!(
+        config["apqe_transport"]["registry_trust_key_sha256"],
+        json!(digest(&transport_root))
+    );
+    assert_eq!(
+        config["apqe_transport"]["genesis_trust_key_sha256"],
+        json!(digest(
+            &fs::read(network.join("authority-root.pub")).unwrap()
+        ))
+    );
+    serde_json::from_value::<synergy_config::NodeConfiguration>(config.clone())
+        .unwrap()
+        .validate()
+        .unwrap();
+    let origin: Value = serde_json::from_slice(&target_cli(
+        &node,
+        "inspect-origin",
+        &[],
+        Some(&config),
+        true,
+    ))
+    .unwrap();
+    assert_eq!(
+        origin["genesis_sha256"],
+        json!(digest(
+            fs::read(network.join("genesis.json")).unwrap().as_slice()
+        ))
+    );
+    assert_eq!(origin["mutation_performed"], false);
+    assert!(!keys.exists());
+    let cfg = root.join("origin.json");
+    write(&cfg, &serde_json::to_vec(&config).unwrap()).unwrap();
+    let t = root.join("transport.unlock");
+    let i = root.join("identity.unlock");
+    write(&t, fixture_unlocks().0.as_bytes()).unwrap();
+    write(&i, fixture_unlocks().1.as_bytes()).unwrap();
+    target_cli(&node, "provision", &[&cfg, &keys, &t, &i], None, true);
+    fs::rename(&t, keys.join("gateway-transport.unlock")).unwrap();
+    fs::rename(&i, keys.join("gateway-identity.unlock")).unwrap();
+    let enrollment = fs::read_to_string(keys.join("gateway-enrollment.json")).unwrap();
+    let result: Value = serde_json::from_slice(&target_cli(
+        &node,
+        "inspect-target-enrollment",
+        &[],
+        Some(&json!({"node_configuration":config,"enrollment_json":enrollment})),
+        true,
+    ))
+    .unwrap();
+    assert_eq!(
+        result["enrollment_sha256"],
+        json!(digest(enrollment.as_bytes()))
+    );
+    assert_eq!(result["mutation_performed"], false);
+    Some((node, config, keys, enrollment))
+}
+#[cfg(test)]
+fn target_fixture_finish(
+    node: &Path,
+    config: &Value,
+    keys: &Path,
+    enrollment: &str,
+    exported: &Value,
+) {
+    let files = fs::read_dir(keys)
+        .unwrap()
+        .map(|p| {
+            let p = p.unwrap().path();
+            let raw = fs::read(&p).unwrap();
+            (p, raw)
+        })
+        .collect::<Vec<_>>();
+    let registry: Value = serde_json::from_slice(
+        &fs::read(config["apqe_transport"]["registry_path"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    let validator = registry["payload"]["validators"][0]["node_address"]
+        .as_str()
+        .unwrap();
+    let address: GatewayEnrollment = serde_json::from_str(enrollment).unwrap();
+    let relay = json!({"schema_version":1,"node_config_path":keys.parent().unwrap().join("node.json"),"admission_path":keys.parent().unwrap().join("admission.json"),"listen_address":"127.0.0.1:9944","role":{"kind":"gateway","gateway_address":address.payload.node_address,"validator_address":validator,"validator_relay_port":8551,"enrollment_path":keys.join("gateway-enrollment.json"),"custody_path":keys.join("gateway-transport.encrypted.json"),"custody_unlock_path":keys.join("gateway-transport.unlock"),"allowed_origins":[]}});
+    let input = json!({"node_configuration":config,"relay_configuration":relay,"admission_json":exported["admission_json"]});
+    let result: Value = serde_json::from_slice(&target_cli(
+        node,
+        "inspect-target-candidate",
+        &[],
+        Some(&input),
+        true,
+    ))
+    .unwrap();
+    assert_eq!(
+        result,
+        json!({"transport_custody_verified":true,"mutation_performed":false})
+    );
+    for defect in [
+        "foreign_origin",
+        "wrong_gateway",
+        "tampered_admission",
+        "foreign_custody",
+    ] {
+        let mut bad = input.clone();
+        match defect {
+            "foreign_origin" => {
+                bad["node_configuration"]["network_id"] = json!("synergy-posy-canary-foreign")
+            }
+            "wrong_gateway" => {
+                bad["relay_configuration"]["role"]["gateway_address"] = json!(validator)
+            }
+            "tampered_admission" => {
+                let mut admission: Value =
+                    serde_json::from_str(exported["admission_json"].as_str().unwrap()).unwrap();
+                admission["payload"]["genesis_artifact_sha256"] = json!("0".repeat(64));
+                bad["admission_json"] = json!(admission.to_string());
+            }
+            _ => {
+                bad["relay_configuration"]["role"]["custody_path"] =
+                    json!(keys.join("gateway-identity.encrypted.json"))
+            }
+        }
+        target_cli(node, "inspect-target-candidate", &[], Some(&bad), false);
+    }
+    for (path, raw) in files {
+        assert_eq!(fs::read(path).unwrap(), raw);
+    }
+    assert!(!keys.parent().unwrap().join("data").exists());
 }

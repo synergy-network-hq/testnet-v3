@@ -429,6 +429,21 @@ mod tests {
     #[ignore = "requires the independently authenticated native APQE provider"]
     fn gateway_admission_owner_matches_exact_purpose_and_existing_verifier() {
         crate::network_transport::gateway::fixture_unlocks();
+        if let Some(node) = std::env::var_os("SYNERGY_GATEWAY_TARGET_FIXTURE_NODE") {
+            let output = std::process::Command::new(node)
+                .args(["canary-rpc-relay", "target-capability"])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "qualified target fixture binary required before custody setup"
+            );
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(
+                value,
+                serde_json::json!({"capability":"engineering-rpc-gateway-target-v1","local_custody_only":true,"production_qualified":false})
+            );
+        }
         formation_fixture(99999);
     }
 

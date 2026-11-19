@@ -29,10 +29,10 @@ MAX_GENESIS_STAGE_REQUEST = 12*1024*1024
 GENESIS_FILES = {'genesis.json':4*1024*1024,'authority.json':1024*1024,'authority-root.pub':8192}
 ENGINE_MODULES = frozenset(('controller.py','synergy_linux.py','lifecycle.py','conformance.py',
                             'apqe_layout.py','vpn.py','canary_rpc_relay.py','root_guard.py','guest_lifecycle.py','vpn_authorization.py','treasury_send.py'))
-READS = frozenset(('gateway_admission_preflight','gateway_admission_status','gateway_admission_export','gateway_admission_reconcile','treasury_send_preflight','treasury_send_status','treasury_preflight','treasury_status','treasury_export','commissioning_observation','network_transport_status','network_transport_export','guest_resources','guest_preflight','guest_status','guest_boot_diagnostics','target','inventory','health','install_preflight','upgrade_preflight',
+READS = frozenset(('upgrade_native_preflight','gateway_install_preflight','gateway_install_status','gateway_target_preflight','gateway_target_status','gateway_target_export','gateway_target_reconcile','gateway_target_commission_preflight','gateway_admission_preflight','gateway_admission_status','gateway_admission_export','gateway_admission_reconcile','treasury_send_preflight','treasury_send_status','treasury_preflight','treasury_status','treasury_export','commissioning_observation','network_transport_status','network_transport_export','guest_resources','guest_preflight','guest_status','guest_boot_diagnostics','target','inventory','health','install_preflight','upgrade_preflight',
                   'recovery_preflight','uninstall_preflight','vpn_status','vpn_unused_preflight','vpn_stop_status','boot_policy_status','vpn_resume_status','vpn_diagnostics','diagnostics','identity_preflight','identity_status',
                   'formation_preflight','formation_status','formation_export','genesis_stage_preflight','genesis_binding_preflight','authorization_status','network_formation_status','network_formation_export'))
-MUTATIONS = frozenset(('gateway_admission_prepare','gateway_admission_sign','treasury_send_prepare','treasury_send_submit','treasury_prepare','network_transport_prepare','network_transport_sign','guest_create','guest_stop','guest_resume','guest_remove','install','commission','register','vpn_enroll','vpn_bind','vpn_retire','vpn_cancel_unused','vpn_stop','vpn_resume','boot_policy','start','stop','restart','upgrade','uninstall','identity_generate',
+MUTATIONS = frozenset(('gateway_install','gateway_target_generate','gateway_target_commission','gateway_admission_prepare','gateway_admission_sign','treasury_send_prepare','treasury_send_submit','treasury_prepare','network_transport_prepare','network_transport_sign','guest_create','guest_stop','guest_resume','guest_remove','install','commission','register','vpn_enroll','vpn_bind','vpn_retire','vpn_cancel_unused','vpn_stop','vpn_resume','boot_policy','start','stop','restart','upgrade','uninstall','identity_generate',
                        'formation_prepare','genesis_stage','genesis_bind','network_formation_prepare','network_formation_sign'))
 FORMATION_CONTEXT = 'tmp/formation-context.json'
 FORMATION_CUSTODY = 'tmp/pre-genesis-validator'
@@ -71,7 +71,7 @@ def canonical(value):
 
 def request_digest(request):
     encoded=(json.dumps(request,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode('utf-8')
-             if request['operation'] in ('genesis_stage','network_formation_prepare','network_transport_prepare','treasury_send_prepare','gateway_admission_prepare','gateway_admission_preflight') else canonical(request))
+             if request['operation'] in ('genesis_stage','network_formation_prepare','network_transport_prepare','treasury_send_prepare','gateway_admission_prepare','gateway_admission_preflight','gateway_target_commission','gateway_target_commission_preflight') else canonical(request))
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -151,7 +151,7 @@ def parse_request(raw):
     operation, parameters = value['operation'], value['parameters']
     require(isinstance(operation,str) and operation in READS | MUTATIONS
             and isinstance(parameters,dict), 'Unsupported operation', 'invalid_request')
-    require(operation=='genesis_stage' or operation in ('network_formation_prepare','network_transport_prepare','treasury_send_prepare','gateway_admission_prepare','gateway_admission_preflight') and len(raw)<=2*1024*1024 or len(raw)<=MAX_REQUEST,'Request exceeds operation limit','invalid_request')
+    require(operation=='genesis_stage' or operation in ('network_formation_prepare','network_transport_prepare','treasury_send_prepare','gateway_admission_prepare','gateway_admission_preflight','gateway_target_commission','gateway_target_commission_preflight') and len(raw)<=2*1024*1024 or len(raw)<=MAX_REQUEST,'Request exceeds operation limit','invalid_request')
     if operation=='commissioning_observation' and parameters:
         require(set(parameters)=={'online_addresses'} and isinstance(parameters['online_addresses'],list)
                 and len(parameters['online_addresses'])<=5
@@ -168,6 +168,14 @@ def parse_request(raw):
                 and ('attempt_sha256' not in parameters or isinstance(parameters['attempt_sha256'],str)
                      and re.fullmatch('[a-f0-9]{64}',parameters['attempt_sha256'])),
                 'Exact native VPN attempt parameters required','invalid_request')
+        return value
+    if operation.startswith('gateway_target_'):
+        from canary_rpc_relay import gateway_target_parameters
+        try:gateway_target_parameters(operation,parameters)
+        except (ValueError,KeyError,TypeError):raise Refused('invalid_request','Invalid exact gateway target request') from None
+        return value
+    if operation=='gateway_install_status':
+        require(set(parameters)=={'request_sha256'} and isinstance(parameters['request_sha256'],str) and re.fullmatch('[a-f0-9]{64}',parameters['request_sha256']),'Exact original gateway installation digest required','invalid_request')
         return value
     if operation.startswith('gateway_admission_'):
         from canary_rpc_relay import gateway_parameters
@@ -198,7 +206,7 @@ def parse_request(raw):
         except (ValueError, KeyError, TypeError):
             raise Refused('invalid_request', 'Invalid bounded guest parameters') from None
         return value
-    expected = INSTALL if operation in ('install','install_preflight') else SELECT if operation in ('upgrade','upgrade_preflight') else {'confirmation'} if operation == 'uninstall' else {'genesis_sha256'} if operation in ('identity_generate','genesis_bind') else {'formation_sha256'} if operation=='formation_prepare' else {'artifacts'} if operation=='genesis_stage' else {'formation_sha256','recipe_json','registrations_json'} if operation=='network_formation_prepare' else {'review_sha256'} if operation=='network_formation_sign' else set()
+    expected = INSTALL if operation in ('install','install_preflight','gateway_install','gateway_install_preflight') else SELECT if operation in ('upgrade','upgrade_preflight','upgrade_native_preflight') else {'confirmation'} if operation == 'uninstall' else {'genesis_sha256'} if operation in ('identity_generate','genesis_bind') else {'formation_sha256'} if operation=='formation_prepare' else {'artifacts'} if operation=='genesis_stage' else {'formation_sha256','recipe_json','registrations_json'} if operation=='network_formation_prepare' else {'review_sha256'} if operation=='network_formation_sign' else set()
     require(set(parameters) == expected, 'Unexpected operation parameters', 'invalid_request')
     if operation=='network_formation_prepare':
         require(isinstance(parameters['recipe_json'],str) and 0<len(parameters['recipe_json'].encode('utf-8'))<=1024*1024
@@ -386,14 +394,14 @@ class Controller:
         if policy.get('engineering_authorization') is not None:
             require(grant.get('operation')==request['operation'] and grant.get('authorization_sha256')==policy['engineering_authorization']['sha256']
                     and grant.get('authorization_sequence')==policy['engineering_authorization']['sequence'],'Exact engineering grant operation or receipt differs','authorization_required')
-            if request['operation'] in ('install','upgrade'):
+            if request['operation'] in ('install','gateway_install','upgrade'):
                 selected=policy.get('engineering_selection',{})
                 if request['operation']=='upgrade':
                     current=engineering_effective_selection(self.root,policy)
                     update=policy.get('engineering_update',{})
                     require(update.get('previous_selection')==current,'Upgrade requires its exact not-yet-installed native adoption','authorization_required')
                     selected=update.get('selection',{})
-                expected=INSTALL if request['operation']=='install' else SELECT
+                expected=INSTALL if request['operation'] in ('install','gateway_install') else SELECT
                 require(request['parameters']=={key:selected.get(key) for key in expected},'Engineering installation selection differs','authorization_required')
         if request['operation']=='vpn_enroll':
             require(enrollment_pin is not None and grant.get('enrollment_sha256')==enrollment_pin,
@@ -1772,13 +1780,19 @@ class Controller:
         supported=platform.system()=='Linux' and platform.machine()=='x86_64'
         try: policy=self.policy(); qualified=set(policy['qualified_operations']); blocker=None
         except (Refused,OSError,ValueError): policy={}; qualified=set(); blocker='Host controller policy is not enrolled or valid'
+        from canary_rpc_relay import gateway_target_available
+        target_owner=gateway_target_available(self)
         operations=[]
         for op in sorted(READS | MUTATIONS):
             reason=None if op in READS else blocker or ('Operation has not passed host qualification' if op not in qualified else None)
+            if op=='upgrade_native_preflight' and 'runtime_probe.py' not in policy.get('engine_files',{}):
+                reason='Authenticated candidate runtime probe engine required'
             if op=='boot_policy' and (not (self.root/'data').is_dir() or (self.root/'data').is_symlink()):
                 reason='Commission the active validator before boot policy changes'
             if op.startswith('guest_') and op!='guest_resources' and not isinstance(policy.get('managed_guest'),dict):
                 reason='Independently approved guest image, toolchain and resources required'
+            if op.startswith(('gateway_target_','gateway_install')) and not target_owner:
+                reason='Qualified gateway target owner and exact signed origin required'
             if op.startswith('gateway_admission_') and op in MUTATIONS:
                 from canary_rpc_relay import gateway_owner_available
                 if not gateway_owner_available(self):reason='Qualified role-aware gateway issuer and installed signed formation required'
@@ -1808,12 +1822,23 @@ class Controller:
         op,p=request['operation'],request['parameters']
         if op=='target': return self.target()
         require(platform.system()=='Linux' and platform.machine()=='x86_64','Linux x86_64 target required','unsupported_target')
+        if op=='upgrade_native_preflight':
+            require('runtime_probe.py' in self.policy().get('engine_files',{}),'Authenticated runtime probe engine required','qualification_required')
+            control_inventory(self.root)
+            from runtime_probe import upgrade_native_preflight
+            return upgrade_native_preflight(self,p)
         if op=='inventory': return self.inventory()
         if op=='boot_policy_status':return self.boot_policy_status()
         if op=='boot_policy':return self.boot_policy(request)
         if op=='commissioning_observation':return self.commissioning_observation(online_addresses=p.get('online_addresses'))
         # Enrollment/grant readback is required before the first installation.
         # Its own exact engine/policy checks run without inventing a receipt.
+        if op.startswith('gateway_target_'):
+            from canary_rpc_relay import gateway_target
+            return gateway_target(self,request)
+        if op in ('gateway_install','gateway_install_preflight','gateway_install_status'):
+            from canary_rpc_relay import gateway_install
+            return gateway_install(self,request)
         if op.startswith('gateway_admission_'):
             from canary_rpc_relay import gateway_admission
             return gateway_admission(self,request)
@@ -1968,7 +1993,7 @@ def control_inventory(root):
     """Exact host-enrolled namespace. No input grants its own authority."""
     c=Controller(root); policy=c.policy()
     pins=policy.get('engine_files')
-    require(isinstance(pins,dict) and set(pins)==ENGINE_MODULES,
+    require(isinstance(pins,dict) and ENGINE_MODULES<=set(pins)<=ENGINE_MODULES|{'runtime_probe.py'},
             'Complete pinned controller engine required','qualification_required')
     approved={'tmp/controller/policy.json','tmp/controller/controller.py'}
     for name,expected in pins.items():
@@ -1977,6 +2002,12 @@ def control_inventory(root):
         c.direct(path)
         require(hashlib.sha256(path.read_bytes()).hexdigest()==expected,'Controller engine bytes differ')
         approved.add(path.relative_to(root).as_posix())
+    if (c.control/'gateway-install-request.json').exists() or (c.control/'gateway-install-request.json').is_symlink():
+        raw=c.direct(c.control/'gateway-install-request.json',True,16384).read_bytes();request=parse_request(raw)
+        require(request['operation']=='gateway_install','Unexpected gateway installation record')
+        from canary_rpc_relay import _gateway_target_consumed
+        _gateway_target_consumed(c,'gateway_install',request_digest(request))
+        approved.add('tmp/controller/gateway-install-request.json')
     if (c.control/'audit.jsonl').exists():
         c.direct(c.control/'audit.jsonl',True);approved.add('tmp/controller/audit.jsonl')
     if c.vpn_stage() is not None:

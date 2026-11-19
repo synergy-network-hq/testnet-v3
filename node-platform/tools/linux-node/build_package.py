@@ -16,7 +16,7 @@ sys.dont_write_bytecode = True
 SOURCE = Path(__file__).resolve().parents[2]
 MASTER = SOURCE.parents[1] / 'Node-Architecture/Linux/synergy'
 TOOLS = ('synergy_linux.py', 'lifecycle.py', 'vpn.py', 'conformance.py',
-         'test_cross_network.py', 'apqe_layout.py', 'canary_rpc_relay.py', 'controller.py', 'bootstrap.py', 'activate_authority_recovery.py', 'epoch_readiness.py', 'root_guard.py', 'guest_lifecycle.py', 'vpn_authorization.py', 'treasury_send.py')
+         'test_cross_network.py', 'apqe_layout.py', 'canary_rpc_relay.py', 'controller.py', 'bootstrap.py', 'activate_authority_recovery.py', 'epoch_readiness.py', 'root_guard.py', 'guest_lifecycle.py', 'vpn_authorization.py', 'treasury_send.py', 'runtime_probe.py')
 DIRECTORIES = ('bin', 'lib', 'assets', 'config', 'network', 'systemd', 'tools',
                'data', 'keys', 'logs', 'cache', 'tmp', 'run', 'vpn',
                'snapshots', 'recovery', 'evidence', 'roles')

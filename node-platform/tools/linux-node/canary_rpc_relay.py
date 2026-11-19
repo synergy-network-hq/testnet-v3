@@ -85,6 +85,9 @@ def validate_gateway_layout(root):
     require(not (root/'config/start-authorized.json').exists(), 'gateway cannot authorize PoSy startup')
     validate_observer_transition_layout(root,config,receipt)
     allowed_keys = {root/name for name in GATEWAY_INPUTS if name.startswith('keys/')}
+    if (root/'tmp/gateway-target/generated.json').exists():
+        approved_gateway_target_members(root)
+        allowed_keys|={root/'keys/apqe/gateway-identity.encrypted.json',root/'keys/apqe/gateway-identity.unlock'}
     require({p for p in (root/'keys').rglob('*') if p.is_file()} == allowed_keys,
             'gateway keys must contain only own transport custody and public enrollment')
     for name in GATEWAY_INPUTS:
@@ -368,7 +371,7 @@ def apply_bootstrap_pin(root, expected_config_sha256, bootstrap_sha256):
     with lifecycle._lifecycle_lock(root):
         receipt, _ = lifecycle._sealed_receipt(root)
         require(receipt.get('role') == 'rpc_gateway' and receipt.get('chain_id') == 99999
-                and receipt.get('gateway_commissioned') is True, 'commissioned Canary gateway required')
+               , 'commissioned Canary gateway required')
         for name in (lifecycle.UPGRADE_INTENT, lifecycle.REPLACEMENT_INTENT,
                      lifecycle.AUTHORITY_RECOVERY_INTENT, lifecycle.AUTONOMOUS_EPOCH_INTENT):
             require(not _exists(root/name), 'reconcile other lifecycle intent before gateway pin update')
@@ -762,3 +765,365 @@ def _gateway_read(c,prefix,owner,flags,directory,prepare,sign,scope,pin,export=F
     if export:require(result['signed'] and isinstance(result['admission_json'],str) and 0<len(result['admission_json'].encode())<=128*1024
                       and _sha(result['admission_json'].encode())==result['admission_sha256'],'Gateway public export differs')
     return {**result,'available':True,'blocker':None}
+
+# Prospective target owner. No private artifacts enter or leave the controller wire.
+GATEWAY_TARGET = 'tmp/gateway-target'
+GATEWAY_TARGET_CAPABILITY = {'capability':'engineering-rpc-gateway-target-v1','local_custody_only':True,'production_qualified':False}
+GATEWAY_TARGET_PUBLIC = {'genesis.json':4*1024*1024,'authority.json':1024*1024,'authority-root.pub':8192,
+                        'network-manifest.json':1024*1024,'transport-registry.json':1024*1024,'transport-root.pub':8192}
+GATEWAY_TARGET_KEYS = {'gateway-enrollment.json','gateway-transport.encrypted.json','gateway-identity.encrypted.json',
+                       'gateway-transport.unlock','gateway-identity.unlock'}
+GATEWAY_TARGET_COMMISSION = {'admission_json','admission_sha256','configuration_json','configuration_sha256'}
+
+
+def gateway_target_parameters(operation,p):
+    expected = {'genesis_sha256'} if operation=='gateway_target_generate' else GATEWAY_TARGET_COMMISSION if operation in ('gateway_target_commission','gateway_target_commission_preflight') else {'request_sha256'} if operation=='gateway_target_reconcile' else set()
+    require(operation in {'gateway_target_preflight','gateway_target_status','gateway_target_export','gateway_target_generate','gateway_target_commission','gateway_target_commission_preflight','gateway_target_reconcile'} and isinstance(p,dict) and set(p)==expected,'Exact gateway target parameters required')
+    for key in expected-{'admission_json','configuration_json'}:require(_is_digest(p[key]),'Exact gateway target digest required')
+    for key,limit in (('admission_json',128*1024),('configuration_json',64*1024)):
+        if key in p:
+            require(isinstance(p[key],str) and 0<len(p[key].encode())<=limit and _sha(p[key].encode())==p[key.replace('_json','_sha256')],'Exact bounded public gateway bytes required')
+
+
+def _gateway_target_result(state,scope=None,blocker=None,generated=None,commission=None):
+    out={'schema':'nodenetwork-gateway-target-v1','available':blocker is None,'blocker':blocker,'state':state,
+         **dict.fromkeys(('generation_request_sha256','commission_request_sha256','network_id','chain_id','genesis_sha256',
+                        'gateway_address','enrollment_sha256','admission_sha256','configuration_sha256')),
+         'transport_custody_verified':False,'services_started':False,'public_listener':False,'production_qualified':False,'automatic_retry':False}
+    if scope:out.update({k:scope[k] for k in ('network_id','chain_id','genesis_sha256')})
+    if generated:out.update(generation_request_sha256=generated['request_sha256'],gateway_address=generated['gateway_address'],enrollment_sha256=generated['enrollment_sha256'])
+    if commission:out.update(commission_request_sha256=commission['request_sha256'],admission_sha256=commission['admission_sha256'],configuration_sha256=commission['configuration_sha256'],transport_custody_verified=True)
+    return out
+
+
+def _gateway_target_config(c,receipt,pins,source):
+    root=c.root
+    return {'schema_version':1,'node_name':receipt['node_name'],'role':'rpc_gateway','chain_id':99999,'network_id':receipt['network_id'],
+        'manifest_path':str(source/'network-manifest.json'),'genesis_path':str(source/'genesis.json'),
+        'public_identity_path':str(root/'keys/apqe/gateway-enrollment.json'),'admin_socket_path':str(root/'run/admin.sock'),
+        'aegis_provider':{'report_path':str(root/'lib/apqe/build-report.json'),'authenticated_report_sha256':pins['provider']},
+        'apqe_transport':{'profile':'engineering_canary_pq_vsession_v1','registry_path':str(source/'transport-registry.json'),
+            'registry_trust_key_path':str(source/'transport-root.pub'),'registry_trust_key_sha256':pins['transport-root.pub'],
+            'genesis_trust_key_sha256':pins['authority-root.pub'],'enrollment_path':str(root/'keys/apqe/gateway-enrollment.json'),
+            'custody_path':str(root/'keys/apqe/gateway-transport.encrypted.json'),'custody_unlock_path':str(root/'keys/apqe/gateway-transport.unlock')},
+        'consensus':{'mode':'observe','authority_binding':str(source/'authority.json'),'authority_trust_key_path':str(source/'authority-root.pub'),
+            'proposal_timeout_ms':2000,'round_timeout_ms':5000,'max_rounds_behind':64},
+        'etdag':{'enabled':False,'protected_lookahead':5,'admission_queue_capacity':4096,'max_vertex_bytes':2097152,'proposal_material_wait_ms':1500},
+        'rpc':{'enabled':False,'listen_address':None,'max_request_bytes':1048576,'max_concurrent_requests':256},
+        'storage':{'data_directory':str(root/'data'),'wal_sync':'every_commit','max_open_files':128,'prune_finalized_history_after_blocks':64}}
+
+
+def _gateway_target_origin(c,policy,receipt,manifest,software):
+    source=c.control/'authorization/inputs/commissioning/network';approved=policy.get('authorization_files',{})
+    formation=c.direct(c.control/'authorization/inputs/formation-context.json',True,4096).read_bytes()
+    context=json.loads(formation,object_pairs_hook=_unique_fields)
+    require(_is_digest(policy.get('validator_formation_sha256')) and _sha(formation)==policy['validator_formation_sha256']==approved.get('formation-context.json')
+            and isinstance(context,dict) and set(context)=={'network_id','chain_id_hex','formation_id'}
+            and context['network_id']==receipt['network_id'] and context['chain_id_hex']==format(99999,'064x')
+            and _is_digest(context['formation_id']) and context['formation_id']!='0'*64,'Exact original formation context required')
+    pins={name:approved.get('commissioning/network/'+name) for name in GATEWAY_TARGET_PUBLIC}
+    require(policy.get('gateway_origin_files')=={'network/'+name:pin for name,pin in pins.items()},'Exact gateway public origin inventory required')
+    raw={name:c.direct(source/name,True,limit).read_bytes() for name,limit in GATEWAY_TARGET_PUBLIC.items()}
+    require(all(_is_digest(pins.get(name)) and _sha(value)==pins[name] for name,value in raw.items()),'Exact approved gateway public origin required')
+    independent=policy.get('validator_identity_network',{})
+    require(all(independent.get(name)==pins[name] for name in ('genesis.json','authority.json','authority-root.pub')),'Independent signed gateway Genesis pins required')
+    pins={name:pins[name] for name in GATEWAY_TARGET_PUBLIC};pins['provider']=manifest['files'].get('lib/apqe/build-report.json')
+    require(_is_digest(pins['provider']),'Qualified gateway provider required')
+    config=_gateway_target_config(c,receipt,pins,source)
+    config['aegis_provider']['report_path']=str(software/'lib/apqe/build-report.json')
+    scope=json.loads(native([software/'bin/synergy-node','canary-rpc-relay','inspect-origin'],data=_gateway_request_bytes(config),maximum_stdout=8192))
+    fields={'schema','network_id','chain_id','mutation_performed','genesis_sha256','authority_sha256','authority_root_sha256','registry_sha256','issuer_root_sha256','manifest_sha256'}
+    require(isinstance(scope,dict) and set(scope)==fields and scope['schema']=='nodenetwork-gateway-origin-v1'
+            and scope['network_id']==receipt['network_id'] and scope['chain_id']=='99999' and scope['mutation_performed'] is False
+            and all(scope[key]==pins[name] for key,name in (('genesis_sha256','genesis.json'),('authority_sha256','authority.json'),('authority_root_sha256','authority-root.pub'),('registry_sha256','transport-registry.json'),('issuer_root_sha256','transport-root.pub'),('manifest_sha256','network-manifest.json'))),'Native gateway origin differs')
+    return pins,raw,config,scope
+
+
+def _gateway_target_scope(c):
+    import lifecycle as life
+    receipt,manifest=life._sealed_receipt(c.root)
+    policy=c.policy()
+    require(receipt['role']=='rpc_gateway' and receipt['chain_id']==99999 and _is_digest(policy.get('engineering_initial_authorization_sha256')),'Exact engineering gateway installation required')
+    from controller import engineering_effective_selection
+    selection=engineering_effective_selection(c.root,policy)
+    require(selection is not None and all(selection[k]==receipt[k] for k in ('network_id','chain_id','node_name')),'Gateway installed selection differs')
+    require(json.loads(native([c.root/'bin/synergy-node','canary-rpc-relay','target-capability'],maximum_stdout=4096))==GATEWAY_TARGET_CAPABILITY,'Qualified gateway target owner unavailable')
+    pins,raw,config,scope=_gateway_target_origin(c,policy,receipt,manifest,c.root)
+    _gateway_target_services(c)
+    return policy,receipt,pins,raw,config,scope
+
+
+
+def _gateway_target_services(c):
+    import lifecycle as life
+    if life._integration_plan(c.root) is None:
+        for unit in (*life.UNITS,life.RELAY_UNIT):
+            state=life._unit_state(unit)
+            require(state.get('LoadState')=='not-found' and not state.get('FragmentPath') and state.get('MainPID','0') in ('','0'),
+                    'Unattributed gateway service already exists')
+    else:life._attributed_units(c.root)
+
+
+def _gateway_target_quiescent(c):
+    import lifecycle as life
+    _gateway_target_services(c)
+    if life._integration_plan(c.root) is not None:
+        for state in life._attributed_units(c.root).values():
+            require(state.get('ActiveState') in ('inactive','failed') and state.get('MainPID')=='0','Gateway target services must remain stopped')
+    life._assert_no_application_processes(c.root)
+    require(not any(_exists(c.root/name) for name in ('data','tmp/commissioning','evidence/upgrade-intent.json','evidence/application-replacement-intent.json',
+            'evidence/authority-recovery-intent.json','evidence/autonomous-epoch-intent.json')),'Gateway target application lifecycle is not quiescent')
+
+
+def _gateway_target_unpublished(c):
+    for name in ('config','network'):
+        folder=c.root/name;meta=folder.lstat()
+        require(stat.S_ISDIR(meta.st_mode) and not folder.is_symlink() and meta.st_uid==os.geteuid()
+                and stat.S_IMODE(meta.st_mode)==0o700 and not any(folder.iterdir()),'Gateway target public outputs already exist')
+
+
+def _gateway_target_write(c,path,raw):
+    require(not path.exists() and not path.is_symlink(),'Gateway target output already exists')
+    require(c.root in path.parents and '..' not in path.parts,'Gateway output escapes root')
+    parent=c.root
+    for component in (None,*path.parent.relative_to(c.root).parts):
+        if component is not None:
+            parent=parent/component
+            if not _exists(parent):parent.mkdir(mode=0o700)
+        meta=parent.lstat()
+        require(stat.S_ISDIR(meta.st_mode) and not parent.is_symlink() and meta.st_uid==os.geteuid() and stat.S_IMODE(meta.st_mode)==0o700,'Unsafe gateway output ancestry')
+    fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    try:
+        with os.fdopen(fd,'wb') as stream:stream.write(raw);stream.flush();os.fsync(stream.fileno())
+    finally:
+        import lifecycle
+        lifecycle._sync_directory(path.parent)
+
+
+def _gateway_target_read(c,path,maximum=256*1024):
+    return json.loads(c.direct(path,True,maximum).read_bytes(),object_pairs_hook=_unique_fields)
+
+
+def _gateway_target_consumed(c,operation,digest):
+    require(_is_digest(digest),'Exact retained gateway request required')
+    require(not _exists(c.control/'grants'/(digest+'.json')),'Gateway target grant remains unused')
+    path=c.control/'audit.jsonl';raw=c.direct(path,True,4*1024*1024).read_bytes()
+    found=[]
+    for line in raw.splitlines():
+        row=json.loads(line,object_pairs_hook=_unique_fields)
+        require(isinstance(row,dict) and set(row)=={'operation','request_sha256','time'} and type(row['time']) is int and row['time']>0 and isinstance(row['operation'],str) and _is_digest(row['request_sha256']),'Malformed gateway audit')
+        if row['request_sha256']==digest:found.append(row)
+    require(len(found)==1 and found[0]['operation']==operation,'Exact consumed gateway target request required')
+
+
+def _gateway_target_generated(c,config,scope):
+    directory=c.root/GATEWAY_TARGET
+    keys=c.root/'keys';meta=keys.lstat()
+    require(stat.S_ISDIR(meta.st_mode) and not keys.is_symlink() and meta.st_uid==os.geteuid() and stat.S_IMODE(meta.st_mode)==0o700,'Private direct gateway keys root required')
+    if not _exists(directory/'generate-request.json'):
+        require(not _exists(directory) and not any((c.root/'keys').rglob('*')),'Unknown gateway target custody or staging')
+        return None
+    allowed={'generate-request.json','origin-config.json','generated.json','commission-request.json','commissioned.json'}
+    require(directory.is_dir() and not directory.is_symlink() and {p.name for p in directory.iterdir()}<=allowed,'Unknown gateway target staging member')
+    require(c.direct(directory/'origin-config.json',True,65536).read_bytes()==_gateway_request_bytes(config),'Gateway origin configuration changed')
+    request=_gateway_target_read(c,directory/'generate-request.json');gateway_target_parameters(request['operation'],request['parameters'])
+    require(set(request)=={'version','operation','parameters'} and request['version']==1 and request['operation']=='gateway_target_generate'
+            and request['parameters']['genesis_sha256']==scope['genesis_sha256'],'Retained gateway generation request differs')
+    from controller import request_digest
+    key=request_digest(request);_gateway_target_consumed(c,'gateway_target_generate',key)
+    receipt=_gateway_target_read(c,directory/'generated.json')
+    require(set(receipt)=={'request_sha256','gateway_address','enrollment_sha256','files'} and receipt['request_sha256']==key
+            and set(receipt['files'])==GATEWAY_TARGET_KEYS,'Incomplete gateway generation receipt')
+    base=c.root/'keys/apqe'
+    for folder in (directory,c.root/'keys',base):
+        meta=folder.lstat()
+        require(stat.S_ISDIR(meta.st_mode) and not folder.is_symlink() and meta.st_uid==os.geteuid() and stat.S_IMODE(meta.st_mode)==0o700,'Private direct gateway directories required')
+    require({p.name for p in (c.root/'keys').iterdir()}=={'apqe'},'Unknown target key directory')
+    require(base.is_dir() and not base.is_symlink() and {p.name for p in base.iterdir()}==GATEWAY_TARGET_KEYS,'Exact target custody inventory required')
+    for name,pin in receipt['files'].items():require(_is_digest(pin) and _sha(c.direct(base/name,True,256*1024).read_bytes())==pin,'Gateway custody changed')
+    enrollment=c.direct(base/'gateway-enrollment.json',True,128*1024).read_bytes()
+    checked=json.loads(native([c.root/'bin/synergy-node','canary-rpc-relay','inspect-target-enrollment'],data=_gateway_request_bytes({'node_configuration':config,'enrollment_json':enrollment.decode()}),maximum_stdout=4096))
+    require(isinstance(checked,dict) and checked.get('mutation_performed') is False and checked=={'gateway_address':receipt['gateway_address'],'enrollment_sha256':_sha(enrollment),'mutation_performed':False}
+            and receipt['enrollment_sha256']==_sha(enrollment) and re.fullmatch('synv5[0-9a-z]+',receipt['gateway_address']),'Native target enrollment differs')
+    return receipt
+
+
+def _gateway_target_candidate(c,p,receipt,pins,config,generated):
+    require(generated is not None,'Generate the target gateway identity first')
+    wrapper=json.loads(p['configuration_json'],object_pairs_hook=_unique_fields)
+    require(isinstance(wrapper,dict) and set(wrapper)=={'node_configuration','relay_specification'},'Exact gateway configuration wrapper required')
+    final=_gateway_target_config(c,receipt,pins,c.root/'network')
+    # Comparing complete canonical defaults prevents arbitrary service/path/provider controls.
+    require(wrapper['node_configuration']==final,'Exact contained observer configuration required')
+    spec=wrapper['relay_specification'];relay=configuration(c.root,spec)
+    require(relay['role']['kind']=='gateway' and relay['role']['gateway_address']==generated['gateway_address']
+            and relay['role']['validator_relay_port']==8551 and BOOTSTRAP_PIN not in relay['role'],'Exact fresh signed-origin gateway relay required')
+    candidate=json.loads(json.dumps(relay))
+    checked=json.loads(native([c.root/'bin/synergy-node','canary-rpc-relay','inspect-target-candidate'],data=_gateway_request_bytes({'node_configuration':config,'relay_configuration':candidate,'admission_json':p['admission_json']}),maximum_stdout=4096))
+    require(isinstance(checked,dict) and checked.get('transport_custody_verified') is True and checked.get('mutation_performed') is False and checked=={'transport_custody_verified':True,'mutation_performed':False},'Native gateway admission/custody not proven')
+    return final,relay
+
+
+def _gateway_target_status(c,parts,export=False):
+    policy,receipt,pins,raw,config,scope=parts
+    generated=_gateway_target_generated(c,config,scope)
+    if generated is None:
+        _gateway_target_unpublished(c)
+        require(c.policy()==policy,'Gateway target authorization changed during review')
+        result=_gateway_target_result('ready',scope)
+        if export:result['enrollment_json']=None
+        return result
+    directory=c.root/GATEWAY_TARGET;record=None
+    if _exists(directory/'commission-request.json'):
+        q=_gateway_target_read(c,directory/'commission-request.json',256*1024);gateway_target_parameters(q['operation'],q['parameters'])
+        from controller import request_digest
+        key=request_digest(q);_gateway_target_consumed(c,'gateway_target_commission',key)
+        require(q['operation']=='gateway_target_commission' and q['version']==1 and set(q)=={'version','operation','parameters'},'Retained gateway commission request differs')
+        require(_exists(directory/'commissioned.json') and receipt.get('gateway_commissioned') is True,'Gateway commission requires reconciliation')
+        record=_gateway_target_read(c,directory/'commissioned.json')
+        require(record=={'request_sha256':key,'admission_sha256':q['parameters']['admission_sha256'],'configuration_sha256':q['parameters']['configuration_sha256']},'Gateway commission receipt differs')
+        final,relay=_gateway_target_candidate(c,q['parameters'],receipt,pins,config,generated)
+        expected={'config/node.json':_gateway_request_bytes(final),'config/canary-rpc-relay.json':_gateway_request_bytes(relay),
+                  'network/rpc-gateway-admission.json':q['parameters']['admission_json'].encode(),**{'network/'+k:v for k,v in raw.items()}}
+        require(all(c.direct(c.root/name,True,4*1024*1024).read_bytes()==value for name,value in expected.items()),'Installed gateway public files differ')
+    if record is None:
+        require(receipt.get('gateway_commissioned') is not True,'Gateway installation has an unmatched commission marker')
+        _gateway_target_unpublished(c)
+    require(c.policy()==policy,'Gateway target authorization changed during review')
+    result=_gateway_target_result('commissioned' if record else 'identity_ready',scope,generated=generated,commission=record)
+    if export:result['enrollment_json']=c.direct(c.root/'keys/apqe/gateway-enrollment.json',True,128*1024).read_bytes().decode()
+    return result
+
+
+def gateway_target(c,request):
+    import lifecycle as life
+    from controller import request_digest
+    op=request['operation'];p=request['parameters'];gateway_target_parameters(op,p)
+    with life._lifecycle_lock(c.root):
+        try:parts=_gateway_target_scope(c)
+        except (ValueError,OSError,KeyError,TypeError,subprocess.SubprocessError):
+            if op in ('gateway_target_preflight','gateway_target_status','gateway_target_export'):
+                result=_gateway_target_result('absent',blocker='owner_unavailable' if not _exists(c.root/'installation.json') else 'origin_required')
+                if op=='gateway_target_export':result['enrollment_json']=None
+                return result
+            raise
+        policy,receipt,pins,raw,config,scope=parts
+        try:
+            if op=='gateway_target_preflight':_gateway_target_quiescent(c)
+            state=_gateway_target_status(c,parts,op=='gateway_target_export')
+        except (ValueError,OSError,KeyError,TypeError,subprocess.SubprocessError):
+            if op in ('gateway_target_preflight','gateway_target_status','gateway_target_export'):
+                result=_gateway_target_result('uncertain',blocker='reconciliation_required')
+                if op=='gateway_target_export':result['enrollment_json']=None
+                return result
+            raise
+        if op in ('gateway_target_preflight','gateway_target_status','gateway_target_export'):return state
+        if op=='gateway_target_reconcile':
+            require(state['state'] in ('identity_ready','commissioned') and p['request_sha256'] in (state['generation_request_sha256'],state['commission_request_sha256']),'Exact verified target outcome required')
+            return state
+        _gateway_target_quiescent(c)
+        if op=='gateway_target_generate':
+            require(state['state']=='ready' and p['genesis_sha256']==scope['genesis_sha256'],'Exact fresh gateway generation scope required')
+            c.authorize(request);directory=c.root/GATEWAY_TARGET
+            _gateway_target_write(c,directory/'generate-request.json',_gateway_request_bytes(request))
+            # Both unlocks stay contained; APQE owns all key generation/envelope handling.
+            for name in ('gateway-transport.unlock','gateway-identity.unlock'):_gateway_target_write(c,directory/name,os.urandom(48).hex().encode())
+            cfg=directory/'origin-config.json';_gateway_target_write(c,cfg,_gateway_request_bytes(config))
+            base=c.root/'keys/apqe'
+            native([c.root/'bin/synergy-node','canary-rpc-relay','provision',cfg,base,directory/'gateway-transport.unlock',directory/'gateway-identity.unlock'])
+            for name in ('gateway-transport.unlock','gateway-identity.unlock'):os.rename(directory/name,base/name)
+            life._sync_directory(directory);life._sync_directory(base)
+            enrollment=c.direct(base/'gateway-enrollment.json',True,128*1024).read_bytes();value=json.loads(enrollment)
+            result={'request_sha256':request_digest(request),'gateway_address':value['payload']['node_address'],'enrollment_sha256':_sha(enrollment),
+                    'files':{name:_sha(c.direct(base/name,True,256*1024).read_bytes()) for name in GATEWAY_TARGET_KEYS}}
+            _gateway_target_write(c,directory/'generated.json',_gateway_request_bytes(result))
+            return _gateway_target_status(c,parts)
+        generated=_gateway_target_generated(c,config,scope)
+        require(state['state']=='identity_ready','Gateway target is already commissioned or uncertain')
+        _gateway_target_unpublished(c)
+        final,relay=_gateway_target_candidate(c,p,receipt,pins,config,generated)
+        if op=='gateway_target_commission_preflight':
+            future={'version':1,'operation':'gateway_target_commission','parameters':p}
+            return {'schema':'nodenetwork-gateway-target-commission-preflight-v1','ready':True,'request_sha256':request_digest(future),
+                    **{k:scope[k] for k in ('network_id','chain_id','genesis_sha256')},'gateway_address':generated['gateway_address'],
+                    'enrollment_sha256':generated['enrollment_sha256'],'admission_sha256':p['admission_sha256'],'configuration_sha256':p['configuration_sha256'],
+                    'transport_custody_verified':True,'mutation_performed':False,'services_started':False,'public_listener':False,'production_qualified':False}
+        c.authorize(request);directory=c.root/GATEWAY_TARGET
+        _gateway_target_write(c,directory/'commission-request.json',_gateway_request_bytes(request))
+        for name,value in {**{'network/'+k:v for k,v in raw.items()},'config/node.json':_gateway_request_bytes(final),
+                           CONFIG:_gateway_request_bytes(relay),'network/rpc-gateway-admission.json':p['admission_json'].encode()}.items():
+            _gateway_target_write(c,c.root/name,value)
+        native([c.root/'bin/synergy-node','canary-rpc-relay','check',c.root/CONFIG])
+        life._replace_bytes(c.root,c.root/'installation.json',_gateway_request_bytes(dict(receipt,gateway_commissioned=True)),0o600,request_digest(request))
+        record={'request_sha256':request_digest(request),'admission_sha256':p['admission_sha256'],'configuration_sha256':p['configuration_sha256']}
+        _gateway_target_write(c,directory/'commissioned.json',_gateway_request_bytes(record))
+        return _gateway_target_status(c,_gateway_target_scope(c))
+
+
+def gateway_install(c,request):
+    import lifecycle as life
+    from synergy_linux import install
+    from controller import request_digest
+    op=request['operation'];p=request['parameters']
+    with life._lifecycle_lock(c.root):
+        if op=='gateway_install_status':
+            original=_gateway_target_read(c,c.control/'gateway-install-request.json',16384)
+            require(original['operation']=='gateway_install' and request_digest(original)==p['request_sha256'],'Original gateway install differs')
+            from controller import parse_request
+            require(parse_request(_gateway_request_bytes(original))==original,'Exact original gateway install required')
+            _gateway_target_consumed(c,'gateway_install',p['request_sha256'])
+            parts=_gateway_target_scope(c);receipt=parts[1];manifest=life._sealed_receipt(c.root)[1]
+            expected=original['parameters']
+            require(receipt['package_sha256']==expected['manifest_sha256'] and manifest['release_id']==expected['release_id']
+                    and all(receipt[k]==expected[k] for k in ('network_id','chain_id','node_name')),'Installed gateway differs from original request')
+            fields={'format','root','role','network_id','chain_id','node_name','package_sha256','package_files','host_integrations','consensus_started'}
+            require(set(receipt) in (fields,fields|{'gateway_commissioned'}),'Gateway installation receipt fields differ')
+            if 'gateway_commissioned' in receipt:
+                require(receipt['gateway_commissioned'] is True and _gateway_target_status(c,parts)['state']=='commissioned','Gateway installation commission marker differs')
+                receipt={k:v for k,v in receipt.items() if k!='gateway_commissioned'}
+            return {'schema':'nodenetwork-gateway-install-status-v1','request_sha256':p['request_sha256'],'request':original,
+                    'installation':receipt,'origin_verified':True,'install_audit_verified':True,'grant_absent':True,'services_started':False}
+        package,manifest,approval=c.approved_package(p,bootstrap=True)
+        require(p['chain_id']==99999 and approval.get('networks',{}).get(p['network_id'])==99999,'Network not approved for selected release')
+        require('rpc_gateway' in read(package/'roles/roles.json')['implemented'],'Qualified gateway role missing')
+        require(json.loads(native([package/'bin/synergy-node','canary-rpc-relay','target-capability'],maximum_stdout=4096))==GATEWAY_TARGET_CAPABILITY,'Qualified gateway target owner unavailable')
+        receipt={k:p[k] for k in ('network_id','chain_id','node_name')};receipt['role']='rpc_gateway'
+        _gateway_target_origin(c,c.policy(),receipt,manifest,package)
+        # No service registration may be borrowed from another installation.
+        _gateway_target_services(c)
+        if op=='gateway_install_preflight':return {'packageVerified':True,'release':manifest['release_id'],'root':str(c.root),'networkSelectionApproved':True,'genesisAuthorityVerified':False,'activationAuthorized':False}
+        require(not _exists(c.control/'gateway-install-request.json'),'Reconcile original gateway installation before another request')
+        c.authorize(request)
+        _gateway_target_write(c,c.control/'gateway-install-request.json',_gateway_request_bytes(request))
+        return install(package,c.root,'rpc_gateway',p['network_id'],p['chain_id'],p['node_name'],staged_master_sha256=p['manifest_sha256'])
+
+
+def gateway_target_available(c):
+    try:
+        import lifecycle as life
+        if _exists(c.root/'installation.json'):
+            receipt,_=life._sealed_receipt(c.root)
+            if receipt['role']!='rpc_gateway':return False
+            package=c.root
+        else:
+            selection=c.policy().get('engineering_selection')
+            require(isinstance(selection,dict),'Exact staged selection required')
+            package,_,_=c.approved_package(selection,bootstrap=True)
+        return json.loads(native([package/'bin/synergy-node','canary-rpc-relay','target-capability'],maximum_stdout=4096))==GATEWAY_TARGET_CAPABILITY
+    except (ValueError,OSError,KeyError,TypeError,subprocess.SubprocessError):return False
+
+
+def approved_gateway_target_members(root):
+    from controller import Controller
+    c=Controller(root);directory=root/GATEWAY_TARGET;approved=set()
+    if not _exists(directory):return approved
+    parts=_gateway_target_scope(c)
+    state=_gateway_target_status(c,parts)
+    require(state['state'] in ('identity_ready','commissioned'),'Unverified gateway target state')
+    expected={'generate-request.json','origin-config.json','generated.json'}
+    if state['state']=='commissioned':expected|={'commission-request.json','commissioned.json'}
+    require({p.name for p in directory.iterdir()}==expected,'Unknown gateway target member')
+    for name in expected:c.direct(directory/name,True,256*1024);approved.add(str(Path(GATEWAY_TARGET)/name))
+    approved.update(str(Path('keys/apqe')/name) for name in GATEWAY_TARGET_KEYS)
+    approved.update({GATEWAY_TARGET,'keys/apqe'})
+    return approved

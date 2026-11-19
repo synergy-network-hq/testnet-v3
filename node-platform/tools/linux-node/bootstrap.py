@@ -24,7 +24,7 @@ sys.dont_write_bytecode=True
 ROOT=Path('/opt/synergy')
 LIMIT=256*1024*1024
 ENGINE=('controller.py','synergy_linux.py','lifecycle.py','conformance.py','apqe_layout.py','vpn.py','canary_rpc_relay.py','root_guard.py')
-OPTIONAL_ENGINE=('guest_lifecycle.py','vpn_authorization.py','treasury_send.py')
+OPTIONAL_ENGINE=('guest_lifecycle.py','vpn_authorization.py','treasury_send.py','runtime_probe.py')
 def engine_names(files):
     return (*ENGINE,*(name for name in OPTIONAL_ENGINE if 'tools/'+name in files))
 
@@ -504,7 +504,7 @@ def bare_initial_authorization(root,policy,release_id,pin):
     operations=[];grants={};files={artifact}
     for request in doc['requests']:
         operation=request['operation'];key=request['request_sha256']
-        require(operation in ('install','commission','register','start','stop','restart','upgrade','uninstall',
+        require(operation in ('gateway_install','gateway_target_generate','gateway_target_commission','install','commission','register','start','stop','restart','upgrade','uninstall',
             'identity_generate','formation_prepare','treasury_prepare','treasury_send_prepare','treasury_send_submit','genesis_stage','genesis_bind','network_formation_prepare',
             'network_formation_sign','network_transport_prepare','network_transport_sign','gateway_admission_prepare','gateway_admission_sign','vpn_enroll','vpn_bind','vpn_retire','vpn_cancel_unused','vpn_stop','vpn_resume','boot_policy',
             'guest_create','guest_stop','guest_resume','guest_remove') and key not in grants,'Invalid initial grant inventory')
@@ -712,7 +712,7 @@ st=policy_path.lstat()
 assert stat.S_ISREG(st.st_mode) and st.st_nlink==1 and st.st_uid==os.geteuid() and stat.S_IMODE(st.st_mode)==0o600
 policy=json.loads(policy_path.read_bytes());pins=policy['engine_files']
 base={'controller.py','synergy_linux.py','lifecycle.py','conformance.py','apqe_layout.py','vpn.py','canary_rpc_relay.py','root_guard.py'}
-assert base<=set(pins)<=base|{'guest_lifecycle.py','vpn_authorization.py','treasury_send.py'}
+assert base<=set(pins)<=base|{'guest_lifecycle.py','vpn_authorization.py','treasury_send.py','runtime_probe.py'}
 for name,pin in pins.items():
  p=control/name if name=='controller.py' else control/'tools'/name
  st=p.lstat()
@@ -1175,6 +1175,11 @@ def authorization_inputs(doc,encoded):
         require(0<len(data)<=limit and base64.b64encode(data).decode()==text
                 and hashlib.sha256(data).hexdigest()==pin,'Authorization artifact digest or encoding differs')
         result[name]=data
+    if any(row['operation']=='gateway_install' for row in doc['requests']):
+        names={'commissioning/network/'+name for name in ('genesis.json','authority.json','authority-root.pub','network-manifest.json','transport-registry.json','transport-root.pub')}
+        require(set(result)==names|{'formation-context.json'} and len(doc['requests'])==1 and doc['chain_id']==99999 and isinstance(doc['genesis_pins'],dict)
+                and all(doc['genesis_pins'].get(name)==doc['artifacts'].get('commissioning/network/'+name) for name in ('genesis.json','authority.json','authority-root.pub')),
+                'Gateway installation requires only its exact public formation and six-file origin with one gateway grant')
     if 'gateway-purpose.json' in result:
         require(set(result)=={'gateway-purpose.json'} and len(doc['requests'])==1
                 and doc['requests'][0]['operation']=='gateway_admission_prepare',
@@ -1485,9 +1490,13 @@ def stage_engineering_authorization(stream):
         commissioning={name[len('commissioning/'):]:pin for name,pin in doc['artifacts'].items() if name.startswith('commissioning/')}
         if commissioning:
             from apqe_layout import FORMATION_PUBLIC_INPUTS
-            require(set(commissioning)==FORMATION_PUBLIC_INPUTS,'Complete public commissioning inventory required')
+            gateway_install=len(doc['requests'])==1 and doc['requests'][0]['operation']=='gateway_install'
+            expected={'network/'+name for name in ('genesis.json','authority.json','authority-root.pub','network-manifest.json','transport-registry.json','transport-root.pub')} if gateway_install else FORMATION_PUBLIC_INPUTS
+            require(set(commissioning)==expected,'Complete public commissioning inventory required')
             require(doc['genesis_pins'] is not None and all(commissioning['network/'+name]==pin for name,pin in doc['genesis_pins'].items()),'Commissioning Genesis differs from independent pins')
-            policy['validator_commissioning_files']=commissioning
+            field='gateway_origin_files' if gateway_install else 'validator_commissioning_files'
+            require(field not in policy or policy[field]==commissioning,'Cannot replace approved commissioning origin')
+            policy[field]=commissioning
         refresh_readiness=readiness_augmentation
         predecessor=authorization_tree_digest(old)
         exchanged=False

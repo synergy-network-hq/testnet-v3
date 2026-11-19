@@ -37,6 +37,37 @@ class ControllerTests(unittest.TestCase):
     def tearDown(self): self.temp.cleanup()
     def save(self,path,value):
         path.write_bytes(c.canonical(value));path.chmod(0o600)
+    def test_optional_runtime_probe_does_not_require_new_engine_on_old_release(self):
+        import bootstrap
+        self.assertIn('tmp/controller/controller.py',c.control_inventory(self.root)[0])
+        self.assertEqual(set(bootstrap.enrolled_engine(self.policy)),c.ENGINE_MODULES)
+        query=request('upgrade_native_preflight',{'release_id':'candidate','manifest_sha256':'a'*64})
+        self.assertEqual(c.parse_request(c.canonical(query)),query)
+        with patch.object(c.platform,'system',return_value='Linux'),patch.object(c.platform,'machine',return_value='x86_64'):
+            row=next(v for v in self.controller.target()['operations'] if v['operation']==query['operation'])
+            self.assertFalse(row['available'])
+            with self.assertRaisesRegex(c.Refused,'engine required'):self.controller.dispatch(query)
+        self.assertFalse((self.control/'audit.jsonl').exists())
+    def test_runtime_probe_optional_bytes_are_pinned_before_dispatch(self):
+        import bootstrap
+        path=self.control/'tools/runtime_probe.py';path.write_bytes(b'authenticated new read engine');path.chmod(0o600)
+        self.policy['engine_files']['runtime_probe.py']=hashlib.sha256(path.read_bytes()).hexdigest();self.save(self.control/'policy.json',self.policy)
+        self.assertIn('tmp/controller/tools/runtime_probe.py',c.control_inventory(self.root)[0])
+        self.assertIn('runtime_probe.py',bootstrap.enrolled_engine(self.policy))
+        query=request('upgrade_native_preflight',{'release_id':'candidate','manifest_sha256':'a'*64})
+        with patch.object(c.platform,'system',return_value='Linux'),patch.object(c.platform,'machine',return_value='x86_64'),patch('runtime_probe.upgrade_native_preflight',return_value={'verified':'read-only'}) as native:
+            self.assertTrue(next(v for v in self.controller.target()['operations'] if v['operation']==query['operation'])['available'])
+            self.assertEqual(self.controller.dispatch(query),{'verified':'read-only'});native.assert_called_once_with(self.controller,query['parameters'])
+            path.write_bytes(b'changed')
+            with self.assertRaisesRegex(c.Refused,'bytes differ'):self.controller.dispatch(query)
+            self.assertEqual(native.call_count,1)
+        self.assertFalse((self.control/'audit.jsonl').exists())
+        self.assertEqual(list((self.control/'grants').iterdir()),[])
+    def test_runtime_probe_rejects_widened_or_unpinned_engine_and_selection(self):
+        for p in ({},{'release_id':'candidate','manifest_sha256':'A'*64},{'release_id':'candidate','manifest_sha256':'a'*64,'shell':'no'}):
+            with self.assertRaises(c.Refused):c.parse_request(c.canonical(request('upgrade_native_preflight',p)))
+        self.policy['engine_files']['unknown.py']='a'*64;self.save(self.control/'policy.json',self.policy)
+        with self.assertRaisesRegex(c.Refused,'Complete pinned'):c.control_inventory(self.root)
     def test_unrecognized_fields_duplicate_json_and_shell_operations_rejected(self):
         for raw in (b'{"version":1,"version":1,"operation":"target","parameters":{}}',
                     c.canonical(request('shell',{'command':'touch /tmp/bad'})),

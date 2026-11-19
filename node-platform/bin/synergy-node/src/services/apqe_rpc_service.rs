@@ -74,6 +74,30 @@ pub(crate) fn cli(args: impl Iterator<Item = String>) -> Result<(), String> {
     let args: Vec<String> = args.collect();
     let path = Path::new;
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["target-capability"] => { println!("{}",json!({"capability":"engineering-rpc-gateway-target-v1","local_custody_only":true,"production_qualified":false})); Ok(()) },
+        ["inspect-origin"] => {
+            let config:NodeConfiguration=serde_json::from_slice(&target_stdin()?).map_err(|_|"invalid gateway origin configuration")?;
+            println!("{}",apqe_rpc::inspect_gateway_origin(&config)?); Ok(())
+        },
+        ["inspect-target-enrollment"] => {
+            let q:TargetEnrollment=serde_json::from_slice(&target_stdin()?).map_err(|_|"invalid gateway enrollment review")?;
+            let scope=apqe_rpc::inspect_gateway_origin(&q.node_configuration)?;
+            let enrollment:synergy_address_engine::apqe::gateway_transport::GatewayEnrollment=serde_json::from_str(&q.enrollment_json).map_err(|_|"invalid gateway enrollment")?;
+            let engine=super::apqe_provider::load(&q.node_configuration)?;
+            enrollment.verify(&*engine.try_lock().map_err(|_|"gateway provider unavailable")?)?;
+            if enrollment.payload.chain_id.to_string()!=scope["chain_id"].as_str().ok_or("invalid chain")?
+                || Some(enrollment.payload.network_id.as_str())!=scope["network_id"].as_str()
+                || Some(enrollment.payload.genesis_artifact_sha256.as_str())!=scope["genesis_sha256"].as_str() { return Err("gateway enrollment origin differs".into()); }
+            println!("{}",json!({"gateway_address":enrollment.payload.node_address,"enrollment_sha256":transport::sha256(q.enrollment_json.as_bytes()),"mutation_performed":false})); Ok(())
+        },
+        ["inspect-target-candidate"] => {
+            let candidate:TargetCandidate=serde_json::from_slice(&target_stdin()?).map_err(|_|"invalid gateway target candidate")?;
+            apqe_rpc::inspect_gateway_origin(&candidate.node_configuration)?;
+            if !matches!(&candidate.relay_configuration.role,Role::Gateway{..}) { return Err("gateway candidate requires gateway role".into()); }
+            let admission=Arc::new(Admission::from_public_bytes(&candidate.node_configuration,candidate.admission_json.into_bytes())?);
+            run_verified(candidate.relay_configuration,Arc::new(candidate.node_configuration),admission,false)?;
+            println!("{}",json!({"transport_custody_verified":true,"mutation_performed":false})); Ok(())
+        },
         ["serve", config] => run(path(config), true),
         ["check", config] => run(path(config), false),
         ["provision", config, output, transport_unlock, identity_unlock] => apqe_rpc::provision(
@@ -86,6 +110,31 @@ pub(crate) fn cli(args: impl Iterator<Item = String>) -> Result<(), String> {
         ),
         _ => Err("usage: canary-rpc-relay serve CONFIG | check CONFIG | provision NODE_CONFIG NEW_DIRECTORY TRANSPORT_UNLOCK OFFLINE_IDENTITY_UNLOCK | issue NODE_CONFIG ENROLLMENT ROOT_CUSTODY ROOT_UNLOCK NEW_ADMISSION".into()),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetEnrollment {
+    node_configuration: NodeConfiguration,
+    enrollment_json: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetCandidate {
+    node_configuration: NodeConfiguration,
+    relay_configuration: Configuration,
+    admission_json: String,
+}
+fn target_stdin() -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    std::io::stdin()
+        .take(2 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "cannot read gateway candidate")?;
+    if bytes.is_empty() || bytes.len() > 2 * 1024 * 1024 {
+        return Err("gateway candidate exceeds bound".into());
+    }
+    Ok(bytes)
 }
 
 struct Validator {
@@ -221,6 +270,18 @@ fn run(path: &Path, listen: bool) -> Result<(), String> {
     let config =
         Arc::new(synergy_config::load(&options.node_config_path).map_err(|e| e.to_string())?);
     let admission = Arc::new(Admission::load(&config, &options.admission_path)?);
+    run_verified(options, config, admission, listen)
+}
+fn run_verified(
+    options: Configuration,
+    config: Arc<NodeConfiguration>,
+    admission: Arc<Admission>,
+    listen: bool,
+) -> Result<(), String> {
+    absolute(&[&options.node_config_path, &options.admission_path])?;
+    if options.schema_version != 1 || options.listen_address.port() == 0 {
+        return Err("unsupported RPC relay configuration".into());
+    }
     let mut workers = Vec::with_capacity(WORKERS);
     let allowed_source = match &options.role {
         Role::Validator {
