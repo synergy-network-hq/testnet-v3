@@ -1,7 +1,11 @@
 """Exact obsolete scope only. No services, keys, provider or hosts are used."""
+from contextlib import ExitStack
 import copy
+import fcntl
 import json
 from pathlib import Path
+import stat
+from types import SimpleNamespace
 from unittest.mock import patch
 import unittest
 import bootstrap as b
@@ -82,5 +86,63 @@ class LegacyCanaryRetirementTests(unittest.TestCase):
                 self.assertIn('foreign_resources',b._handoff_root_entries(root,{'README.md'})[1])
                 readme.unlink();readme.mkdir()
                 self.assertIn('foreign_resources',b._handoff_root_entries(root,{'README.md'})[1])
+
+    def test_stoppable_units_refuse_hooks_reverse_dependencies_and_boot_enablement(self):
+        relay, vpn = b.HANDOFF_UNITS[1:]
+        props = {'Id': vpn, 'LoadState': 'loaded', 'UnitFileState': 'linked',
+                 'NeedDaemonReload': 'no', 'KillMode': 'control-group', 'CanStop': 'yes',
+                 'RequiredBy': relay}
+        def read(changes):
+            output = '\n'.join(f'{key}={value}' for key, value in {**props, **changes}.items())
+            return patch.object(b, '_handoff_command', return_value=output.encode())
+        with read({}):
+            b._legacy_canary_stoppable(vpn)
+        for change in ({'UnitFileState': 'enabled'}, {'ExecStop': 'unexpected'},
+                       {'OnFailure': 'another.service'}, {'PropagatesStopTo': 'another.service'},
+                       {'RequiredBy': relay + ' another.service'}, {'NeedDaemonReload': 'yes'}):
+            with self.subTest(change=change), read(change), self.assertRaises(ValueError):
+                b._legacy_canary_stoppable(vpn)
+
+    def test_quiescence_binds_exact_review_and_preserves_protected_services(self):
+        fixture = handoff.GatewayHandoffTests()
+        fixture.setUp()
+        wire = {**fixture.wire, 'retirement_receipt_sha256': b.LEGACY_CANARY_RETIREMENT_RECEIPT_SHA256,
+                'reviewed_sha256': None}
+        wire['context']['machine_id_sha256'] = '8683ea9f4da9e9c05c26b6d8070cc13c0f5f75b0cd4a4de863492164f4c1e26d'
+        metadata = SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o700, st_dev=1, st_ino=2)
+        initial = {'preserved': {'rpc_tunnel_pid': 55}, 'metrics': {'listener_owned': True},
+                   'legacy': {'canary_pid': 12, 'vpn_pid': 13, 'canary_active': True, 'vpn_active': True}}
+        relay_stopped = {**initial, 'legacy': {**initial['legacy'], 'canary_pid': 0, 'canary_active': False}}
+        both_stopped = {**relay_stopped, 'legacy': {**relay_stopped['legacy'], 'vpn_pid': 0, 'vpn_active': False}}
+        with ExitStack() as stack:
+            for name, value in [('geteuid', 0), ('open', 123), ('fstat', metadata), ('close', None)]:
+                stack.enter_context(patch.object(b.os, name, return_value=value))
+            stack.enter_context(patch.object(Path, 'lstat', return_value=metadata))
+            stack.enter_context(patch.object(fcntl, 'flock'))
+            stack.enter_context(patch('time.time', return_value=1000))
+            stack.enter_context(patch.object(b, '_handoff_machine', return_value=wire['context']['machine_id_sha256']))
+            stack.enter_context(patch.object(b, '_legacy_canary_stoppable'))
+            read = stack.enter_context(patch.object(b, '_legacy_canary_quiesce_scope', return_value=initial))
+            stop = stack.enter_context(patch.object(b, '_handoff_command'))
+            review = b.legacy_canary_quiesce(wire)
+            self.assertFalse(review['applied'])
+            self.assertFalse(review['files_removed'])
+            stop.assert_not_called()
+            with self.assertRaises(ValueError):
+                b.legacy_canary_quiesce({**wire, 'reviewed_sha256': '0' * 64}, apply=True)
+            with self.assertRaises(ValueError):
+                b.legacy_canary_quiesce({**wire, 'retirement_receipt_sha256': '0' * 64})
+            stop.assert_not_called()
+            approved = {**wire, 'reviewed_sha256': review['reviewed_sha256']}
+            read.side_effect = [initial, {**relay_stopped, 'preserved': {'rpc_tunnel_pid': 99}}]
+            with self.assertRaises(ValueError):
+                b.legacy_canary_quiesce(approved, apply=True)
+            self.assertEqual([call.args[0][-1] for call in stop.call_args_list], [b.HANDOFF_UNITS[1]])
+            stop.reset_mock()
+            read.side_effect = [initial, relay_stopped, both_stopped]
+            outcome = b.legacy_canary_quiesce(approved, apply=True)
+            self.assertEqual(outcome['stopped_units'], list(b.HANDOFF_UNITS[1:]))
+            self.assertEqual([call.args[0][-1] for call in stop.call_args_list], list(b.HANDOFF_UNITS[1:]))
+            self.assertFalse(outcome['files_removed'])
 
 if __name__=='__main__':unittest.main()

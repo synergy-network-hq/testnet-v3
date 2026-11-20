@@ -2456,6 +2456,102 @@ def gateway_handoff_plan(wire, *, canary_only=False):
         **committed,'plan_sha256':pin,'mutation_performed':False,'removal_authorized':False,'automatic_retry':False}
 
 
+LEGACY_CANARY_RETIREMENT_RECEIPT_SHA256 = 'e88b81a2ea6e12ef767eb65e14e0aedbe88be8bb6b6b26bfd362dba1e791b9ee'
+
+
+def _legacy_canary_stoppable(unit):
+    """Require the exact linked legacy service and exclude stop propagation."""
+    required = {
+        'Id': unit, 'LoadState': 'loaded', 'UnitFileState': 'linked',
+        'NeedDaemonReload': 'no', 'KillMode': 'control-group',
+    }
+    optional = {'CanStop', 'ExecStop', 'ExecStopPost', 'Job', 'RequiredBy', 'RequisiteOf',
+                'WantedBy', 'BoundBy', 'ConsistsOf', 'PropagatesStopTo', 'TriggeredBy',
+                'OnFailure', 'OnSuccess'}
+    keys = sorted(required.keys() | optional)
+    raw = _handoff_command(['/usr/bin/systemctl', 'show', '--all', unit,
+                            '--property=' + ','.join(keys)], 8192).decode('utf-8')
+    pairs = [line.split('=', 1) for line in raw.splitlines() if '=' in line]
+    values = dict(pairs)
+    require(len(values) == len(pairs) and values.keys() <= set(keys)
+            and all(values.get(key) == value for key, value in required.items())
+            and values.get('CanStop') == 'yes', 'Legacy unit is not safely stoppable')
+    dependent = HANDOFF_UNITS[1] if unit == HANDOFF_UNITS[2] else ''
+    for key in optional - {'CanStop'}:
+        allowed = ('', dependent) if key in ('RequiredBy', 'WantedBy') else ('',)
+        require(values.get(key, '') in allowed, 'Unexpected legacy unit stop dependency or hook')
+
+
+def _legacy_canary_quiesce_scope():
+    facts = _gateway_handoff_snapshot(canary_only=True)
+    protected = facts['preserved']
+    metrics = facts['metrics']
+    require(all(protected[key] for key in ('tunnel_active', 'rpc_listener_owned', 'ws_listener_owned'))
+            and metrics['service_active'] and metrics['listener_owned'],
+            'Chain 1266 service or route attribution is incomplete')
+    legacy = dict(facts['legacy'])
+    # Live log timestamps and the VPN control socket are not stable across a
+    # service stop. They still require separate attribution before removal.
+    legacy.pop('upper_root_entries_sha256')
+    for unit in HANDOFF_UNITS[1:]:
+        _legacy_canary_stoppable(unit)
+    return {'preserved': protected, 'metrics': metrics, 'legacy': legacy}
+
+
+def legacy_canary_quiesce(wire, *, apply=False):
+    """Review or stop exactly two obsolete services. Leave both roots intact."""
+    import fcntl
+    import time
+    require(os.geteuid() == 0 and isinstance(wire, dict)
+            and set(wire) == {'context', 'challenge', 'retirement_receipt_sha256', 'reviewed_sha256'},
+            'Exact legacy service review required')
+    context, challenge, reviewed = wire['context'], wire['challenge'], wire['reviewed_sha256']
+    pin = lambda value: isinstance(value, str) and re.fullmatch('[a-f0-9]{64}', value)
+    require(isinstance(context, dict) and set(context) == {'target', 'machine_id_sha256', 'expires_at'}
+            and context['target'] == {'kind': 'remote', 'host': '167.86.83.83', 'port': 22, 'root': '/opt/synergy'}
+            and type(context['target']['port']) is int and pin(challenge)
+            and context['machine_id_sha256'] == '8683ea9f4da9e9c05c26b6d8070cc13c0f5f75b0cd4a4de863492164f4c1e26d'
+            and type(context['expires_at']) is int and int(time.time()) < context['expires_at'] <= int(time.time()) + 120
+            and wire['retirement_receipt_sha256'] == LEGACY_CANARY_RETIREMENT_RECEIPT_SHA256
+            and (pin(reviewed) if apply else reviewed is None), 'Invalid legacy service review scope')
+    machine = _handoff_machine()
+    require(machine == context['machine_id_sha256'], 'Legacy service machine differs')
+    root = Path('/opt/Synergy')
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fcntl.flock(directory, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        opened = os.fstat(directory)
+        require(opened.st_uid == 0 and stat.S_IMODE(opened.st_mode) == 0o700
+                and os.path.samestat(opened, root.lstat()), 'Legacy service root changed')
+        before = _legacy_canary_quiesce_scope()
+        scope = {'target': context['target'], 'machine_id_sha256': machine,
+                 'retirement_receipt_sha256': LEGACY_CANARY_RETIREMENT_RECEIPT_SHA256, **before}
+        digest = hashlib.sha256(json.dumps(scope, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        require(int(time.time()) < context['expires_at'] and os.path.samestat(opened, root.lstat()),
+                'Legacy service review expired or root changed')
+        stopped = []
+        if apply:
+            require(reviewed == digest, 'Legacy service review changed before dispatch')
+            state = before
+            for unit, active, pid in zip(HANDOFF_UNITS[1:], ('canary_active', 'vpn_active'), ('canary_pid', 'vpn_pid')):
+                if not state['legacy'][active]:
+                    continue
+                require(int(time.time()) < context['expires_at'] and os.path.samestat(opened, root.lstat()),
+                        'Legacy service review expired before stop')
+                _legacy_canary_stoppable(unit)
+                _handoff_command(['/usr/bin/systemctl', '--job-mode=fail', 'stop', unit], 4096, timeout=40)
+                expected = {**state, 'legacy': {**state['legacy'], active: False, pid: 0}}
+                state = _legacy_canary_quiesce_scope()
+                require(state == expected and _handoff_machine() == machine
+                        and os.path.samestat(opened, root.lstat()), 'Legacy stop or protected service could not be reconciled')
+                stopped.append(unit)
+        return {'schema': 'nodenetwork-legacy-canary-quiescence-v1', 'challenge': challenge,
+                **scope, 'reviewed_sha256': digest, 'stopped_units': stopped,
+                'applied': apply, 'files_removed': False}
+    finally:
+        os.close(directory)
+
+
 LEGACY_PEER_KEY_BINARY = Path('/opt/synergy/netbird/bin/netbird-combined')
 LEGACY_PEER_KEY_STORE = Path('/opt/synergy/netbird/lib/store.db')
 LEGACY_PEER_KEY_BINARY_SHA256 = 'e01941ced937e0a5dff7b02b8ae2be38b6efa6b3be03ec9b89d0b7f52a16c292'
@@ -2599,6 +2695,9 @@ def main():
         elif sys.argv[1:] in (['--gateway-handoff-plan'],['--legacy-canary-retirement-plan']):
             raw=sys.stdin.buffer.read(4097);require(len(raw)<=4096,'Handoff context exceeds bound')
             operation=gateway_handoff_plan(json.loads(raw),canary_only=sys.argv[1:]==['--legacy-canary-retirement-plan'])
+        elif sys.argv[1:] in (['--legacy-canary-quiesce-plan'], ['--legacy-canary-quiesce']):
+            raw=sys.stdin.buffer.read(4097);require(len(raw)<=4096,'Legacy service review exceeds bound')
+            operation=legacy_canary_quiesce(json.loads(raw),apply=sys.argv[1:]==['--legacy-canary-quiesce'])
         elif len(sys.argv)==2 and sys.argv[1]=='--inspect-update-commission-grant':
             raw=sys.stdin.buffer.read(65537);require(len(raw)<=65536,'Preservation proof exceeds bound')
             operation=inspect_update_commission_grant(json.loads(raw))
@@ -2627,6 +2726,9 @@ def main():
             result={'version':1,'ok':False,'error':{'code':'legacy_peer_key_proof_refused','message':'Exact legacy peer key observation refused; no resources changed'}}
         elif sys.argv[1:] in (['--gateway-handoff-plan'],['--legacy-canary-retirement-plan']):
             result={'version':1,'ok':False,'error':{'code':'gateway_handoff_refused','message':'Legacy gateway handoff observation refused; no resources changed'}}
+        elif sys.argv[1:] in (['--legacy-canary-quiesce-plan'], ['--legacy-canary-quiesce']):
+            result={'version':1,'ok':False,'error':{'code':'legacy_canary_quiescence_unverified',
+                'message':'The two obsolete services could not be verified. Review their current state before dispatching another stop.'}}
         elif sys.argv[1:]==['--upgrade-not-applied-proof'] and _UPGRADE_PROOF_PHASE in UPGRADE_PROOF_PHASES:
             result={'version':1,'ok':False,'error':{'code':'upgrade_proof_'+_UPGRADE_PROOF_PHASE+'_refused','message':'Read-only upgrade proof refused'}}
         elif _UPDATE_PHASE in UPDATE_PHASES:
