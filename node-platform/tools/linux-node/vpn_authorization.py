@@ -161,6 +161,122 @@ class HttpsProvider:
             connection.close()
 
 
+def _read_state(directory, name):
+    fd = os.open(directory / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as source:
+        meta = os.fstat(source.fileno())
+        require(stat.S_ISREG(meta.st_mode) and meta.st_uid == os.geteuid() and meta.st_nlink == 1
+                and not meta.st_mode & 0o077 and 0 < meta.st_size <= LIMIT, 'Unsafe VPN receipt')
+        raw = source.read(LIMIT + 1)
+        require(len(raw) == meta.st_size, 'VPN receipt changed while reading')
+        return decode(raw)
+
+
+def _write_state(directory, name, value):
+    raw = encode(value)
+    require(len(raw) <= LIMIT, 'VPN receipt exceeds bound')
+    fd = os.open(directory / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'wb') as output:
+        output.write(raw)
+        output.flush()
+        os.fsync(output.fileno())
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def retire_verified_legacy_peer(directory, policy, request, scope, *, reconcile_only):
+    """Execute the exact peer removal admitted by fresh native review.
+
+    The native caller must authenticate the public-key proof and locator before
+    sending this private wire. The issuance policy only authenticates the TLS
+    transport and account. It contributes no retirement or enrollment authority.
+    """
+    origin = 'https://vpn-coordinator.synergy-network.io'
+    identity = {
+        'account_id': 'da99e12f611ghl16dvjg',
+        'peer_id': 'dboqb9if611ohpqo0e1g',
+        'peer_name': 'synergy-canary-rpc-99999',
+        'hostname': 'vmi3381382',
+        'ip': '10.69.51.205',
+        'management_origin': origin,
+        'enrollment_sha256': 'f27a0e0031ba00f2a234e77e55449ca5f4b9a15dec7e2c8da3da5bde6ea37573',
+        'binding_sha256': '1629d857606c040ecbd7ed9d5dc692ac697dda3b129cc1f8b2bb9834e594d5f2',
+    }
+    pin_fields = ('plan_sha256', 'provider_sha256', 'credential_locator_sha256', 'ca_sha256')
+    require(type(reconcile_only) is bool and isinstance(scope, dict)
+            and set(scope) == set(identity) | set(pin_fields) | {'purpose', 'wireguard_public_key_sha256', 'expires_at'}
+            and scope['purpose'] == 'nodenetwork-legacy-vpn-peer-retirement-v1'
+            and scope['wireguard_public_key_sha256'] == '5e781088b3b0a7cd2862ee1010b5f84ce4f91ebc1abbbce92a10a0dc8563159f'
+            and all(scope[key] == value for key, value in identity.items())
+            and all(pin(scope[key]) for key in pin_fields)
+            and policy['profile'] == CONTROLLED_PROFILE
+            and policy['api_origin'] == policy['management_origin'] == origin
+            and policy['account_id'] == identity['account_id'] and scope['ca_sha256'] == policy['ca_sha256'],
+            'Exact legacy peer retirement scope required')
+    def call(method, path):
+        now = int(time.time())
+        require(type(scope['expires_at']) is int and now < scope['expires_at'] <= now + 120,
+                'Native retirement review expired')
+        return request(method, path)
+
+    directory = Path(directory)
+    require(directory.is_absolute() and all(p.is_dir() and not p.is_symlink() for p in directory.parents),
+            'Unsafe native retirement ancestry')
+    if not reconcile_only:
+        directory.mkdir(mode=0o700, exist_ok=True)
+    meta = directory.lstat()
+    require(stat.S_ISDIR(meta.st_mode) and meta.st_uid == os.geteuid()
+            and stat.S_IMODE(meta.st_mode) == 0o700, 'Private native retirement directory required')
+
+    stable = {**identity, **{key: scope[key] for key in pin_fields if key != 'plan_sha256'},
+              'wireguard_public_key_sha256': scope['wireguard_public_key_sha256']}
+    intent_name = 'retire-intent.json'
+    if reconcile_only:
+        intent = _read_state(directory, intent_name)
+        require(set(intent) == {'scope', 'reviewed_plan_sha256'} and intent['scope'] == stable
+                and pin(intent['reviewed_plan_sha256']), 'Original retirement intent differs')
+    else:
+        require(not os.path.lexists(directory / intent_name) and not os.path.lexists(directory / 'retired.json'),
+                'Retirement already dispatched. Check provider absence without sending DELETE again.')
+
+    def peer_inventory():
+        code, peers = call('GET', '/api/peers')
+        require(code == 200 and isinstance(peers, list) and len(peers) <= 8192
+                and all(isinstance(peer, dict) and identifier(peer.get('id'))
+                        and isinstance(peer.get('name'), str) and isinstance(peer.get('ip'), str) for peer in peers)
+                and len({peer['id'] for peer in peers}) == len(peers), 'Invalid peer inventory')
+        return [peer for peer in peers if peer['id'] == identity['peer_id']
+                or peer.get('name') == identity['peer_name'] or peer.get('ip') == identity['ip']]
+
+    code, accounts = call('GET', '/api/accounts')
+    require(code == 200 and isinstance(accounts, list) and len(accounts) == 1
+            and isinstance(accounts[0], dict) and accounts[0].get('id') == identity['account_id'],
+            'VPN management account differs')
+    path = '/api/peers/' + identity['peer_id']
+    code, peer = call('GET', path)
+    if not reconcile_only:
+        def matches(value):
+            return isinstance(value, dict) and all(value.get(key) == identity[owner] for key, owner in
+                (('id', 'peer_id'), ('name', 'peer_name'), ('ip', 'ip'), ('hostname', 'hostname')))
+        aliases = peer_inventory()
+        require(code == 200 and matches(peer) and len(aliases) == 1 and matches(aliases[0]),
+                'Exact provider peer identity differs')
+        _write_state(directory, intent_name, {'scope': stable, 'reviewed_plan_sha256': scope['plan_sha256']})
+        code, _ = call('DELETE', path)
+        require(code in (200, 204, 404), 'Retirement outcome requires reconciliation')
+        code, _ = call('GET', path)
+    require(code == 404 and not peer_inventory(), 'Provider absence has not been verified')
+    receipt = {'format': 'synergy-vpn-retirement-v1', **identity, 'retired': True, 'absence_verified': True}
+    if os.path.lexists(directory / 'retired.json'):
+        require(_read_state(directory, 'retired.json') == receipt, 'Retirement receipt differs')
+    else:
+        _write_state(directory, 'retired.json', receipt)
+    return receipt
+
+
 class Authorization:
     """One exact intent per private app-owned directory, never retries POST.
 
@@ -195,29 +311,10 @@ class Authorization:
                 require(self._read('bound.json')['binding'] == intent['binding'], 'Cleanup bound scope differs')
 
     def _read(self, name):
-        path = self.directory / name
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(fd, 'rb') as source:
-            meta = os.fstat(source.fileno())
-            require(stat.S_ISREG(meta.st_mode) and meta.st_uid == os.geteuid() and meta.st_nlink == 1
-                    and not meta.st_mode & 0o077 and 0 < meta.st_size <= LIMIT, 'Unsafe VPN receipt')
-            raw = source.read(LIMIT + 1)
-            require(len(raw) == meta.st_size, 'VPN receipt changed while reading')
-            return decode(raw)
+        return _read_state(self.directory, name)
 
     def _write(self, name, value):
-        raw = encode(value)
-        require(len(raw) <= LIMIT, 'VPN receipt exceeds bound')
-        fd = os.open(self.directory / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, 'wb') as output:
-            output.write(raw)
-            output.flush()
-            os.fsync(output.fileno())
-        fd = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        _write_state(self.directory, name, value)
 
     def _account(self, action=None):
         if self.policy['profile'] in (CONTROLLED_PROFILE,GATEWAY_PROFILE) and (self.directory / 'intent.json').exists():

@@ -108,4 +108,67 @@ class LegacyPeerTests(unittest.TestCase):
         result=self.preflight(self.review(),Mock(side_effect=[(200,[{'id':'original-account'}]),(200,peer),(200,[peer])]))
         self.assertFalse(result['public_key_verified']);self.assertFalse(result['ready'])
 
+    def native_retirement_inputs(self):
+        account = 'da99e12f611ghl16dvjg'
+        policy = {**self.policy, 'account_id': account}
+        scope = {
+            'purpose': 'nodenetwork-legacy-vpn-peer-retirement-v1',
+            'plan_sha256': 'a' * 64, 'provider_sha256': 'b' * 64,
+            'credential_locator_sha256': 'c' * 64, 'ca_sha256': policy['ca_sha256'],
+            'wireguard_public_key_sha256': '5e781088b3b0a7cd2862ee1010b5f84ce4f91ebc1abbbce92a10a0dc8563159f',
+            'account_id': account, 'peer_id': self.peer['id'], 'peer_name': self.peer['name'],
+            'hostname': self.peer['hostname'], 'ip': self.peer['ip'], 'management_origin': policy['management_origin'],
+            'enrollment_sha256': 'f27a0e0031ba00f2a234e77e55449ca5f4b9a15dec7e2c8da3da5bde6ea37573',
+            'binding_sha256': '1629d857606c040ecbd7ed9d5dc692ac697dda3b129cc1f8b2bb9834e594d5f2',
+            'expires_at': 1100,
+        }
+        return policy, scope, (200, [{'id': account}])
+
+    def test_native_retirement_reconciles_lost_reply_and_never_replays_delete(self):
+        policy, scope, account = self.native_retirement_inputs()
+        with tempfile.TemporaryDirectory() as parent, patch.object(auth.time, 'time', return_value=1000):
+            directory = Path(parent).resolve() / 'state'
+            def delete_with_lost_response():
+                self.assertTrue((directory / 'retire-intent.json').is_file())
+                raise OSError('lost provider reply')
+            original = Mock(side_effect=[account,(200,self.peer),(200,[self.peer]),None])
+            def dispatch(method, path):
+                if method == 'DELETE':
+                    self.assertEqual(path, '/api/peers/' + self.peer['id'])
+                    delete_with_lost_response()
+                return original(method, path)
+            with self.assertRaises(OSError):
+                auth.retire_verified_legacy_peer(directory,policy,dispatch,scope,reconcile_only=False)
+            second = Mock()
+            with self.assertRaisesRegex(ValueError, 'already dispatched'):
+                auth.retire_verified_legacy_peer(directory,policy,second,scope,reconcile_only=False)
+            second.assert_not_called()
+            still_present = Mock(side_effect=[account,(200,self.peer)])
+            with self.assertRaisesRegex(ValueError, 'absence'):
+                auth.retire_verified_legacy_peer(directory,policy,still_present,scope,reconcile_only=True)
+            self.assertTrue(all(c.args[0] == 'GET' for c in still_present.call_args_list))
+            gone = Mock(side_effect=[account,(404,None),(200,[])])
+            receipt = auth.retire_verified_legacy_peer(directory,policy,gone,
+                {**scope,'plan_sha256':'d'*64},reconcile_only=True)
+            self.assertTrue(receipt['retired'] and receipt['absence_verified'])
+            self.assertTrue(all(c.args[0] == 'GET' for c in gone.call_args_list))
+            self.assertEqual(receipt, json.loads((directory/'retired.json').read_bytes()))
+
+    def test_native_retirement_requires_exact_peer_inventory_and_fresh_scope(self):
+        policy, scope, account = self.native_retirement_inputs()
+        for defect in ('foreign','expired','missing','alias'):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as parent, patch.object(auth.time,'time',return_value=1000):
+                directory = Path(parent).resolve()/'state'
+                current = dict(scope)
+                responses = [account,(200,self.peer),(200,[self.peer])]
+                if defect == 'expired': current['expires_at'] = 1000
+                if defect == 'foreign': current['peer_id'] = 'another-peer'
+                if defect == 'missing': responses[1:] = [(404,None),(200,[])]
+                if defect == 'alias': responses[-1] = (200,[self.peer,{**self.peer,'id':'another-peer'}])
+                request = Mock(side_effect=responses)
+                with self.assertRaises(ValueError):
+                    auth.retire_verified_legacy_peer(directory,policy,request,current,reconcile_only=False)
+                self.assertFalse((directory/'retire-intent.json').exists())
+                self.assertTrue(all(call.args[0]=='GET' for call in request.call_args_list))
+
 if __name__=='__main__':unittest.main()
