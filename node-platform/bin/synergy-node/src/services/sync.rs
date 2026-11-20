@@ -28,8 +28,8 @@ use synergy_storage::{AtomicStore, NodeStorageLayout};
 use synergy_sync::{
     BlockRequest, BudgetedSyncWireMessage as SyncWireMessage, EpochAuthorityRequest,
     EpochAuthorityResponse, FinalizedCandidateRequest, HeadClaim, HeadCollectionError,
-    SnapshotChunkRequest, SnapshotChunkResponse, SyncManager, SyncMetrics, SyncPeerCandidate,
-    SyncPhase, SyncStatus, VerifiedHead, VerifiedHeadCollector,
+    SnapshotChunkRequest, SnapshotChunkResponse, SourceSelectionError, SyncManager, SyncMetrics,
+    SyncPeerCandidate, SyncPhase, SyncPlan, SyncStatus, VerifiedHead, VerifiedHeadCollector,
 };
 
 use super::authority::{self, AuthorityTransitionSignal, VerifiedAuthority};
@@ -1427,6 +1427,34 @@ impl SyncService {
         }
     }
 
+    fn verified_source_plan(
+        manager: &SyncManager,
+        candidates: &BTreeMap<String, SyncPeerCandidate>,
+        heads: &VerifiedHeadCollector,
+        authenticated: &BTreeSet<String>,
+    ) -> Result<Option<SyncPlan>, SourceSelectionError> {
+        let active_candidates = candidates
+            .values()
+            .filter(|peer| authenticated.contains(&peer.peer_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        // PoSy can publish a verified head before the corresponding Sync
+        // announcement arrives. Keep that head, but wait for the peer's
+        // candidate metadata before considering it as a Sync source.
+        let active_heads = heads
+            .heads()
+            .filter(|head| {
+                authenticated.contains(&head.peer_id) && candidates.contains_key(&head.peer_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        match manager.plan(&active_candidates, &active_heads) {
+            Ok(plan) => Ok(Some(plan)),
+            Err(SourceSelectionError::NoEligibleVerifiedSource) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     fn apply_sync_control(&mut self, action: SyncControlAction) -> Result<(), String> {
         match action {
             SyncControlAction::Pause => {
@@ -1449,12 +1477,14 @@ impl SyncService {
                 if !authenticated.contains(&peer_id) {
                     return Err("requested Sync source is not an authenticated peer".into());
                 }
-                let candidates: Vec<_> = self.candidates.values().cloned().collect();
-                let heads: Vec<_> = self.heads.heads().cloned().collect();
-                let plan = self
-                    .manager
-                    .plan(&candidates, &heads)
-                    .map_err(|error| format!("select verified Sync retry source: {error:?}"))?;
+                let plan = Self::verified_source_plan(
+                    &self.manager,
+                    &self.candidates,
+                    &self.heads,
+                    &authenticated,
+                )
+                .map_err(|error| format!("select verified Sync retry source: {error:?}"))?
+                .ok_or("No eligible verified Sync retry source")?;
                 let source = plan
                     .sources
                     .iter()
@@ -3060,14 +3090,15 @@ impl SyncService {
         }
         // Keep a persisted request across a peer disconnect so the next
         // authenticated source can be selected after the bounded timeout.
-        let candidates: Vec<_> = self.candidates.values().cloned().collect();
-        let heads: Vec<_> = self.heads.heads().cloned().collect();
         self.diagnostic_boundary("target-selection");
-        if !heads.is_empty() {
-            let plan = self
-                .manager
-                .plan(&candidates, &heads)
-                .map_err(|error| format!("select verified Sync source: {error:?}"))?;
+        let plan = Self::verified_source_plan(
+            &self.manager,
+            &self.candidates,
+            &self.heads,
+            &authenticated,
+        )
+        .map_err(|error| format!("select verified Sync source: {error:?}"))?;
+        if let Some(plan) = plan {
             self.status.select_target(plan.target_height);
             self.diagnostic_boundary("snapshot-acquisition");
             if self.drive_snapshot_acquisition(&plan)? {
@@ -3408,6 +3439,51 @@ mod congestion_tests {
         .unwrap();
         service.start(&CancellationToken::default()).unwrap();
         (root, service)
+    }
+
+    #[test]
+    fn verified_head_waits_for_authenticated_sync_candidate() {
+        let manager = SyncManager::new("genesis");
+        let mut candidates = BTreeMap::new();
+        let mut heads = VerifiedHeadCollector::new();
+        let peer_id = "verified-peer".to_string();
+        let authenticated = BTreeSet::from([peer_id.clone()]);
+        let head = VerifiedHead {
+            peer_id: peer_id.clone(),
+            finalized_height: 7,
+            finalized_hash: "block-7".into(),
+            finality_evidence_id: "finality-7".into(),
+        };
+        heads.record(head.clone()).unwrap();
+        assert!(
+            SyncService::verified_source_plan(&manager, &candidates, &heads, &authenticated)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(heads.heads().next(), Some(&head));
+        candidates.insert(
+            peer_id.clone(),
+            SyncPeerCandidate {
+                peer_id: peer_id.clone(),
+                authenticated: true,
+                protocol_compatible: true,
+                genesis_hash: "genesis".into(),
+                quarantined: false,
+                consensus_duties_disabled: true,
+                designated_support: false,
+                advertised_height: head.finalized_height,
+            },
+        );
+        assert!(
+            SyncService::verified_source_plan(&manager, &candidates, &heads, &BTreeSet::new())
+                .unwrap()
+                .is_none()
+        );
+        let plan = SyncService::verified_source_plan(&manager, &candidates, &heads, &authenticated)
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.sources, vec![head]);
+        assert_eq!(plan.target_height, 7);
     }
 
     #[test]
