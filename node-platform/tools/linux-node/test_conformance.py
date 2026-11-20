@@ -217,6 +217,35 @@ class ConformanceTests(unittest.TestCase):
             (p/'unknown-runtime.json').write_text('{}')
             with self.assertRaisesRegex(ValueError,'undeclared'):c.installed(root,manifest)
 
+    def test_finalized_receipt_runtime_paths_survive_conformance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve() / 'synergy'
+            root.mkdir()
+            manifest, _ = self.fixture(root)
+            execution = root / 'data/state/execution'
+            index = execution / 'finalized-transaction-index'
+            receipts = execution / 'finalized-receipts'
+            index.mkdir(parents=True)
+            receipts.mkdir()
+            records = (index / ('a' * 64 + '.json'), receipts / f'{9704:020}.json')
+            for record in records:
+                record.write_text('{}')
+                record.chmod(0o600)
+            self.assertTrue(c.installed(root, manifest)['conformant'])
+
+            invalid = (index / ('a' * 63 + '.json'), index / ('B' * 64 + '.json'),
+                       receipts / '9704.json', receipts / f'{9704:020}.json.bak')
+            for member in invalid:
+                with self.subTest(member=member.name):
+                    member.write_text('{}')
+                    with self.assertRaisesRegex(ValueError, 'undeclared'):
+                        c.installed(root, manifest)
+                    member.unlink()
+
+            records[1].chmod(0o700)
+            with self.assertRaisesRegex(ValueError, 'unexpected runtime executable'):
+                c.installed(root, manifest)
+
     def test_unknown_executable_and_empty_directory_are_not_excluded(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp).resolve()/'synergy';root.mkdir();manifest,_=self.fixture(root)
