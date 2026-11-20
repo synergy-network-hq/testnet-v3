@@ -2098,6 +2098,7 @@ HANDOFF_UNITS=('synergy-chain1266-role@rpc-gateway.service','synergy-canary-rpc-
 HANDOFF_MANAGED_UNIT_LINKS={
     '/etc/systemd/system/synergy-canary-rpc-relay.service':'/opt/Synergy/systemd/synergy-canary-rpc-relay.service',
     '/etc/systemd/system/synergy-vpn.service':'/opt/Synergy/systemd/synergy-vpn.service',
+    '/etc/systemd/system/synergy-node.service':'/opt/Synergy/systemd/synergy-node.service',
 }
 HANDOFF_FILES={
     'nginx_rpc':'/etc/nginx/sites-available/testnet-core-rpc.synergy-network.io',
@@ -2215,7 +2216,32 @@ def _handoff_root_entries(root,allowed):
     return hashlib.sha256(raw).hexdigest(),blockers
 
 
-def _legacy_upper_inventory(base=Path('/opt/Synergy')):
+LEGACY_CANARY_RUNTIME_DIRECTORIES = {
+    'cache', 'config', 'data', 'data/consensus', 'data/consensus/authority-transitions',
+    'evidence', 'keys', 'keys/apqe', 'logs', 'network', 'recovery', 'run',
+    'snapshots', 'systemd', 'tmp', 'vpn', 'vpn/netbird', 'vpn/root',
+}
+LEGACY_CANARY_RUNTIME_FILES = {
+    'config/canary-rpc-relay.json', 'config/node.json', 'installation.json',
+    'data/consensus/authority-transitions/.synergy-writer.lock',
+    *(f'data/consensus/authority-transitions/epoch-{epoch:020d}.json' for epoch in range(2, 6)),
+    *(f'evidence/{name}.json' for name in (
+        'authority-recovery-completed', 'gateway-bootstrap-pin', 'host-integrations',
+        'upgrade-completed', 'vpn-enrollment', 'vpn-gateway-route', 'vpn-server-binding')),
+    *(f'keys/apqe/{name}' for name in (
+        'gateway-enrollment.json', 'gateway-transport.encrypted.json', 'gateway-transport.unlock')),
+    *(f'logs/{name}' for name in ('canary-rpc-relay.log', 'netbird-service.log', 'netbird.log')),
+    *(f'network/{name}' for name in (
+        'authority-recovery-certificate.json', 'authority-root.pub', 'authority.json',
+        'genesis.json', 'network-manifest.json', 'rpc-gateway-admission.json',
+        'transport-registry.json', 'transport-root.pub')),
+    *(f'systemd/synergy-{name}.service' for name in ('canary-rpc-relay', 'node', 'vpn')),
+    'tools/netbird-client', 'vpn/active_profile.json', 'vpn/default.json',
+    'vpn/netbird/active_profile.txt', 'vpn/state.json',
+}
+
+
+def _legacy_upper_inventory(base=Path('/opt/Synergy'), *, attribute_runtime=False):
     """Old-only opaque commitment v1: recursive metadata + sealed SOFTWARE.
 
     The closed wire field stays upper_root_entries_sha256. Its old-only meaning
@@ -2234,6 +2260,15 @@ def _legacy_upper_inventory(base=Path('/opt/Synergy')):
         return value
     package=json.loads(raw,object_pairs_hook=unique);files=package.get('files')
     require(isinstance(files,dict) and 0<len(files)<=128,'Bounded legacy software map required')
+    runtime_dirs = LEGACY_CANARY_RUNTIME_DIRECTORIES
+    if attribute_runtime:
+        pin, roles_raw = _handoff_public(base/'roles/roles.json')
+        require(pin == files.get('roles/roles.json'), 'Legacy role catalog differs')
+        roles = json.loads(roles_raw, object_pairs_hook=unique)['roles']
+        require(isinstance(roles, list) and len(roles) == 20
+                and all(isinstance(role, str) and re.fullmatch('[a-z0-9_]{1,40}', role) for role in roles),
+                'Legacy role directory catalog differs')
+        runtime_dirs = runtime_dirs | {'roles/' + role for role in roles}
     software_dirs=set()
     for name,pin in files.items():
         require(isinstance(name,str) and len(name.encode())<=512 and isinstance(pin,str)
@@ -2265,8 +2300,15 @@ def _legacy_upper_inventory(base=Path('/opt/Synergy')):
                 require(info.st_dev==root.st_dev,'Legacy inventory crosses a mount')
                 kind='directory' if stat.S_ISDIR(info.st_mode) else 'file' if stat.S_ISREG(info.st_mode) else 'socket' if stat.S_ISSOCK(info.st_mode) else 'other'
                 classification='software' if relative in files else 'software_directory' if relative in software_dirs else 'manifest' if relative=='package.json' else 'runtime_unattributed'
+                socket_attributed = attribute_runtime and relative == 'run/netbird.sock' and kind == 'socket' and stat.S_IMODE(info.st_mode) == 0o666
+                if attribute_runtime:
+                    if (kind == 'directory' and relative in runtime_dirs
+                            or kind == 'file' and relative in LEGACY_CANARY_RUNTIME_FILES or socket_attributed):
+                        classification = 'legacy_gateway_runtime'
+                    if classification == 'runtime_unattributed' or info.st_gid != 0:
+                        blockers.add('foreign_resources')
                 records.append([relative,kind,classification,metadata(info)])
-                if info.st_uid!=0 or info.st_mode&0o022 or kind=='file' and info.st_nlink!=1 or kind=='other':
+                if info.st_uid!=0 or info.st_mode&0o022 and not socket_attributed or kind=='file' and info.st_nlink!=1 or kind=='other':
                     blockers.add('foreign_resources')
                 if not prefix and name not in DIRECTORIES|{'package.json','installation.json','README.md'}:
                     blockers.add('foreign_resources')
@@ -2311,7 +2353,7 @@ def _legacy_upper_inventory(base=Path('/opt/Synergy')):
         require(verified==files and metadata(base.lstat())==metadata(root),'Incomplete legacy software inventory')
         bare_mounts(base)
         require(_handoff_public(base/'package.json')==(package_pin,raw) and time.monotonic()<deadline,'Legacy manifest changed')
-        committed={'schema':'legacy-canary-upper-recursive-v1','package_sha256':package_pin,
+        committed={'schema':'legacy-canary-upper-attributed-v1' if attribute_runtime else 'legacy-canary-upper-recursive-v1','package_sha256':package_pin,
                    'root_metadata':metadata(root),'entries':sorted(records),'software_sha256':verified}
         return hashlib.sha256(json.dumps(committed,sort_keys=True,separators=(',',':')).encode()).hexdigest(),blockers
     finally:os.close(opened)
@@ -2457,6 +2499,7 @@ def gateway_handoff_plan(wire, *, canary_only=False):
 
 
 LEGACY_CANARY_RETIREMENT_RECEIPT_SHA256 = 'e88b81a2ea6e12ef767eb65e14e0aedbe88be8bb6b6b26bfd362dba1e791b9ee'
+LEGACY_CANARY_MACHINE_SHA256 = '8683ea9f4da9e9c05c26b6d8070cc13c0f5f75b0cd4a4de863492164f4c1e26d'
 
 
 def _legacy_canary_stoppable(unit):
@@ -2486,9 +2529,6 @@ def _legacy_canary_quiesce_scope():
     facts = _gateway_handoff_snapshot(canary_only=True)
     protected = facts['preserved']
     metrics = facts['metrics']
-    require(all(protected[key] for key in ('tunnel_active', 'rpc_listener_owned', 'ws_listener_owned'))
-            and metrics['service_active'] and metrics['listener_owned'],
-            'Chain 1266 service or route attribution is incomplete')
     legacy = dict(facts['legacy'])
     # Live log timestamps and the VPN control socket are not stable across a
     # service stop. They still require separate attribution before removal.
@@ -2498,9 +2538,7 @@ def _legacy_canary_quiesce_scope():
     return {'preserved': protected, 'metrics': metrics, 'legacy': legacy}
 
 
-def legacy_canary_quiesce(wire, *, apply=False):
-    """Review or stop exactly two obsolete services. Leave both roots intact."""
-    import fcntl
+def _legacy_canary_review(wire, apply):
     import time
     require(os.geteuid() == 0 and isinstance(wire, dict)
             and set(wire) == {'context', 'challenge', 'retirement_receipt_sha256', 'reviewed_sha256'},
@@ -2510,12 +2548,20 @@ def legacy_canary_quiesce(wire, *, apply=False):
     require(isinstance(context, dict) and set(context) == {'target', 'machine_id_sha256', 'expires_at'}
             and context['target'] == {'kind': 'remote', 'host': '167.86.83.83', 'port': 22, 'root': '/opt/synergy'}
             and type(context['target']['port']) is int and pin(challenge)
-            and context['machine_id_sha256'] == '8683ea9f4da9e9c05c26b6d8070cc13c0f5f75b0cd4a4de863492164f4c1e26d'
+            and context['machine_id_sha256'] == LEGACY_CANARY_MACHINE_SHA256
             and type(context['expires_at']) is int and int(time.time()) < context['expires_at'] <= int(time.time()) + 120
             and wire['retirement_receipt_sha256'] == LEGACY_CANARY_RETIREMENT_RECEIPT_SHA256
             and (pin(reviewed) if apply else reviewed is None), 'Invalid legacy service review scope')
     machine = _handoff_machine()
     require(machine == context['machine_id_sha256'], 'Legacy service machine differs')
+    return context, challenge, reviewed, machine
+
+
+def legacy_canary_quiesce(wire, *, apply=False):
+    """Review or stop exactly two obsolete services. Leave both roots intact."""
+    import fcntl
+    import time
+    context, challenge, reviewed, machine = _legacy_canary_review(wire, apply)
     root = Path('/opt/Synergy')
     directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -2548,6 +2594,104 @@ def legacy_canary_quiesce(wire, *, apply=False):
         return {'schema': 'nodenetwork-legacy-canary-quiescence-v1', 'challenge': challenge,
                 **scope, 'reviewed_sha256': digest, 'stopped_units': stopped,
                 'applied': apply, 'files_removed': False}
+    finally:
+        os.close(directory)
+
+
+def _legacy_canary_root_scope(root):
+    facts = _legacy_canary_quiesce_scope()
+    require(not facts['legacy']['canary_active'] and not facts['legacy']['vpn_active'],
+            'Stop both obsolete services before reviewing removal')
+    inventory, blockers = _legacy_upper_inventory(root, attribute_runtime=True)
+    require(not blockers, 'Legacy gateway contains an unattributed resource')
+    package_pin, package_raw = _handoff_public(root/'package.json')
+    installation = json.loads(_handoff_public(root/'installation.json')[1])
+    require(installation['root'] == str(root) and installation['role'] == 'rpc_gateway'
+            and installation['network_id'] == facts['legacy']['old_network']['network_id']
+            and installation['chain_id'] == 99999 and installation['consensus_started'] is False
+            and installation['package_sha256'] == package_pin
+            and installation['package_files'] == json.loads(package_raw)['files'],
+            'Legacy gateway installation differs')
+    unit_directory = Path('/etc/systemd/system')
+    plan = json.loads(_handoff_public(root/'evidence/host-integrations.json')[1])
+    expected = [str(unit_directory/unit) for unit in ('synergy-node.service', HANDOFF_UNITS[2], HANDOFF_UNITS[1])]
+    require(plan.get('root') == str(root) and plan.get('paths') == expected
+            and set(plan.get('sha256', {})) == set(expected), 'Legacy unit record differs')
+    registered = {}
+    for name in expected:
+        path = Path(name)
+        unit = path.name
+        pin, _ = _handoff_public(root/'systemd'/unit)
+        require(pin == plan['sha256'][name], 'Legacy recorded unit bytes differ')
+        if unit == 'synergy-node.service' and not path.exists() and not path.is_symlink():
+            require(inert_missing_unit(unit), 'A loaded validator conflicts with gateway removal')
+            continue
+        observed, running, _ = _handoff_unit(unit, name, str(root/'bin/synergy-node'))
+        require(observed == pin and not running, 'Legacy unit changed or restarted')
+        _legacy_canary_stoppable(unit)
+        registered[unit] = pin
+    for process in Path('/proc').iterdir():
+        if not process.name.isdecimal():
+            continue
+        try:
+            image=os.readlink(process/'exe').removesuffix(' (deleted)')
+            with (process/'cmdline').open('rb') as stream:
+                args = stream.read(131073).split(b'\0')
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        require(not image.startswith(str(root) + '/')
+                and not any(arg.startswith(os.fsencode(root) + b'/') for arg in args),
+                'Legacy gateway process still owns the root')
+    return {**facts, 'upper_inventory_sha256': inventory, 'registered_units': registered}
+
+
+def legacy_canary_remove(wire, *, apply=False):
+    """Unregister and remove only the attributed, stopped obsolete gateway."""
+    import fcntl
+    import time
+    context, challenge, reviewed, machine = _legacy_canary_review(wire, apply)
+    root = Path('/opt/Synergy')
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fcntl.flock(directory, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        opened = os.fstat(directory)
+        require(opened.st_uid == 0 and stat.S_IMODE(opened.st_mode) == 0o700
+                and os.path.samestat(opened, root.lstat()), 'Legacy removal root changed')
+        scope = {'target': context['target'], 'machine_id_sha256': machine,
+                 'retirement_receipt_sha256': LEGACY_CANARY_RETIREMENT_RECEIPT_SHA256,
+                 **_legacy_canary_root_scope(root)}
+        pin = hashlib.sha256(json.dumps(scope, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        require(os.path.samestat(opened, root.lstat()) and _handoff_machine() == machine
+                and int(time.time()) < context['expires_at'], 'Legacy review expired or target changed')
+        if apply:
+            require(reviewed == pin and shutil.rmtree.avoids_symlink_attacks, 'Exact attributed legacy removal required')
+            bare_mounts(root)
+            for unit, digest in scope['registered_units'].items():
+                _legacy_canary_stoppable(unit)
+                fragment = Path('/etc/systemd/system')/unit
+                observed, active, _ = _handoff_unit(unit, str(fragment), str(root/'bin/synergy-node'))
+                require(observed == digest and not active, 'A legacy registration changed')
+            inventory, blockers = _legacy_upper_inventory(root, attribute_runtime=True)
+            require(not blockers and inventory == scope['upper_inventory_sha256']
+                    and os.path.samestat(opened, root.lstat())
+                    and int(time.time()) < context['expires_at'], 'Retirement inventory changed before removal')
+            for unit in scope['registered_units']:
+                (Path('/etc/systemd/system')/unit).unlink()
+            _handoff_command(['/usr/bin/systemctl', 'daemon-reload'], 4096, timeout=30)
+            require(all(inert_missing_unit(unit) for unit in (*HANDOFF_UNITS[1:], 'synergy-node.service')),
+                    'Legacy service registrations could not be reconciled')
+            bare_mounts(root)
+            inventory, blockers = _legacy_upper_inventory(root, attribute_runtime=True)
+            require(not blockers and inventory == scope['upper_inventory_sha256']
+                    and os.path.samestat(opened, root.lstat())
+                    and not os.path.samestat(opened, ROOT.lstat()),
+                    'Legacy root changed or aliases the protected installation')
+            shutil.rmtree(root)
+            require(not root.exists() and not root.is_symlink()
+                    and _handoff_root_entries('/opt/synergy', {'chain1266'})[0] == scope['legacy']['lower_root_entries_sha256'],
+                    'Obsolete root removal or preserved root could not be verified')
+        return {'schema':'nodenetwork-legacy-canary-root-retirement-v1', 'challenge':challenge,
+                **scope, 'reviewed_sha256':pin, 'removed':apply}
     finally:
         os.close(directory)
 
@@ -2698,6 +2842,9 @@ def main():
         elif sys.argv[1:] in (['--legacy-canary-quiesce-plan'], ['--legacy-canary-quiesce']):
             raw=sys.stdin.buffer.read(4097);require(len(raw)<=4096,'Legacy service review exceeds bound')
             operation=legacy_canary_quiesce(json.loads(raw),apply=sys.argv[1:]==['--legacy-canary-quiesce'])
+        elif sys.argv[1:] in (['--legacy-canary-root-plan'], ['--legacy-canary-root-retire']):
+            raw=sys.stdin.buffer.read(4097);require(len(raw)<=4096,'Legacy root review exceeds bound')
+            operation=legacy_canary_remove(json.loads(raw),apply=sys.argv[1:]==['--legacy-canary-root-retire'])
         elif len(sys.argv)==2 and sys.argv[1]=='--inspect-update-commission-grant':
             raw=sys.stdin.buffer.read(65537);require(len(raw)<=65536,'Preservation proof exceeds bound')
             operation=inspect_update_commission_grant(json.loads(raw))
@@ -2729,6 +2876,9 @@ def main():
         elif sys.argv[1:] in (['--legacy-canary-quiesce-plan'], ['--legacy-canary-quiesce']):
             result={'version':1,'ok':False,'error':{'code':'legacy_canary_quiescence_unverified',
                 'message':'The two obsolete services could not be verified. Review their current state before dispatching another stop.'}}
+        elif sys.argv[1:] in (['--legacy-canary-root-plan'], ['--legacy-canary-root-retire']):
+            result={'version':1,'ok':False,'error':{'code':'legacy_canary_root_retirement_unverified',
+                'message':'Legacy remote removal was not verified. Inspect the original root and registrations before continuing.'}}
         elif sys.argv[1:]==['--upgrade-not-applied-proof'] and _UPGRADE_PROOF_PHASE in UPGRADE_PROOF_PHASES:
             result={'version':1,'ok':False,'error':{'code':'upgrade_proof_'+_UPGRADE_PROOF_PHASE+'_refused','message':'Read-only upgrade proof refused'}}
         elif _UPDATE_PHASE in UPDATE_PHASES:

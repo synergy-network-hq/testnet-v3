@@ -145,4 +145,57 @@ class LegacyCanaryRetirementTests(unittest.TestCase):
             self.assertEqual([call.args[0][-1] for call in stop.call_args_list], list(b.HANDOFF_UNITS[1:]))
             self.assertFalse(outcome['files_removed'])
 
+    def test_root_retirement_requires_rechecked_inventory_and_never_targets_lower_root(self):
+        fixture = handoff.GatewayHandoffTests()
+        fixture.setUp()
+        wire = {**fixture.wire, 'retirement_receipt_sha256': b.LEGACY_CANARY_RETIREMENT_RECEIPT_SHA256,
+                'reviewed_sha256': None}
+        wire['context']['machine_id_sha256'] = b.LEGACY_CANARY_MACHINE_SHA256
+        upper = SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o700, st_dev=1, st_ino=2)
+        lower = SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o755, st_dev=1, st_ino=3)
+        digest = 'a' * 64
+        units = dict.fromkeys(b.HANDOFF_UNITS[1:], digest)
+        facts = {'upper_inventory_sha256': digest, 'registered_units': units,
+                 'legacy': {'lower_root_entries_sha256': digest}}
+        with ExitStack() as stack:
+            def mock(name, value):
+                return stack.enter_context(patch.object(b, name, return_value=value))
+            for name, value in [('geteuid', 0), ('open', 123), ('fstat', upper), ('close', None)]:
+                stack.enter_context(patch.object(b.os, name, return_value=value))
+            stack.enter_context(patch.object(Path, 'lstat', autospec=True,
+                                             side_effect=lambda path: lower if path == b.ROOT else upper))
+            for action in ('exists', 'is_symlink'):
+                stack.enter_context(patch.object(Path, action, return_value=False))
+            unlink = stack.enter_context(patch.object(Path, 'unlink', autospec=True))
+            stack.enter_context(patch.object(fcntl, 'flock'))
+            stack.enter_context(patch('time.time', return_value=1000))
+            mock('_handoff_machine', b.LEGACY_CANARY_MACHINE_SHA256)
+            mock('_legacy_canary_root_scope', facts)
+            mock('_legacy_canary_stoppable', None)
+            mock('_handoff_unit', (digest, False, '0'))
+            mock('inert_missing_unit', True)
+            mock('bare_mounts', None)
+            mock('_handoff_command', b'')
+            mock('_handoff_root_entries', (digest, set()))
+            inventory = mock('_legacy_upper_inventory', (digest, set()))
+            delete = stack.enter_context(patch.object(b.shutil, 'rmtree'))
+            delete.avoids_symlink_attacks = True
+            reviewed = b.legacy_canary_remove(wire)
+            self.assertFalse(reviewed['removed'])
+            delete.assert_not_called()
+            unlink.assert_not_called()
+            approved = {**wire, 'reviewed_sha256': reviewed['reviewed_sha256']}
+            with self.assertRaises(ValueError):
+                b.legacy_canary_remove({**wire, 'reviewed_sha256': 'b' * 64}, apply=True)
+            inventory.return_value = (digest, {'foreign_resources'})
+            with self.assertRaises(ValueError):
+                b.legacy_canary_remove(approved, apply=True)
+            delete.assert_not_called()
+            unlink.assert_not_called()
+            inventory.return_value = (digest, set())
+            self.assertTrue(b.legacy_canary_remove(approved, apply=True)['removed'])
+            delete.assert_called_once_with(Path('/opt/Synergy'))
+            self.assertEqual({call.args[0] for call in unlink.call_args_list},
+                             {Path('/etc/systemd/system')/unit for unit in units})
+
 if __name__=='__main__':unittest.main()
