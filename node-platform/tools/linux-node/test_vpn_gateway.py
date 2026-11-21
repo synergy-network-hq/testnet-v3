@@ -13,11 +13,15 @@ class GatewayVpnTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
-        for name in ('run', 'vpn', 'evidence'):
+        self.root = Path(temporary.name).resolve()
+        for name in ('run', 'vpn', 'evidence', 'config', 'network'):
             (self.root/name).mkdir()
         node.write_new(self.root/'installation.json', {'role':'rpc_gateway','chain_id':99999})
-        self.target = {'ip':'10.69.1.2','port':8551}
+        self.target = {'ip':'10.69.1.2','port':9451}
+        node.write_new(self.root/'config/canary-rpc-relay.json',
+                       {'role':{'kind':'gateway','validator_address':'synv1fixture','validator_relay_port':9451}})
+        node.write_new(self.root/'network/transport-registry.json', {'payload':{'validators':[
+            {'node_address':'synv1fixture','revoked':False,'dial_address':'10.69.1.2:30303'}]}})
         self.live = {'publicKey':'wg-public','netbirdIp':'10.69.1.3/16'}
         self.request = {'setup_key':'one-off','management_url':'https://vpn.example','hostname':'gateway',
                         'required_gateway_tcp':self.target}
@@ -49,7 +53,7 @@ class GatewayVpnTests(unittest.TestCase):
                 self.assertTrue(result['tcp_verified'])
                 self.assertFalse(result['apqe_verified'])
                 sock.bind.assert_called_once_with(('10.69.1.3',0))
-                sock.connect.assert_called_once_with(('10.69.1.2',8551))
+                sock.connect.assert_called_once_with(('10.69.1.2',9451))
                 sock.setsockopt.assert_called_once_with(vpn.socket.SOL_SOCKET,25,b'wt0\0')
                 self.assertEqual(native.call_args.args[0],['ip','-j','route','get','10.69.1.2','from','10.69.1.3'])
                 self.assertEqual(node.read(self.root/vpn.GATEWAY_RECEIPT),result)
@@ -84,7 +88,8 @@ class GatewayVpnTests(unittest.TestCase):
         self.assertFalse((self.root/vpn.GATEWAY_RECEIPT).exists())
 
     def test_gateway_profile_disallows_unrestricted_ports_and_icmp(self):
-        for target in ({'ip':'10.69.1.2','port':443},{'ip':'127.0.0.1','port':8551},
+        for target in ({'ip':'10.69.1.2','port':443},{'ip':'127.0.0.1','port':9451},
+                       {'ip':'10.69.1.10','port':9451},
                        {'ip':'10.69.1.2','port':'8551'}):
             with self.assertRaises(ValueError):vpn.gateway_target(self.root,target)
         request=dict(self.request); del request['required_gateway_tcp']; request['required_peer_ips']=['10.69.1.2']

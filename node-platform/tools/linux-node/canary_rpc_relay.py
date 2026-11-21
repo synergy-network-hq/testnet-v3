@@ -998,7 +998,6 @@ def _gateway_target_candidate(c,p,receipt,pins,config,generated):
         require(spec == gateway_profile_relay(profile['gateway'], generated['gateway_address']),
                 'Relay settings differ from the approved network profile')
     require(relay['role']['kind']=='gateway' and relay['role']['gateway_address']==generated['gateway_address']
-            and relay['role']['validator_relay_port']==8551
             and BOOTSTRAP_PIN not in relay['role'],'Exact fresh signed-origin gateway relay required')
     candidate=json.loads(json.dumps(relay))
     checked=json.loads(native([c.root/'bin/synergy-node','canary-rpc-relay','inspect-target-candidate'],data=_gateway_request_bytes({'node_configuration':config,'relay_configuration':candidate,'admission_json':p['admission_json']}),maximum_stdout=4096))
@@ -1201,17 +1200,26 @@ def approved_gateway_target_members(root):
     return approved
 
 
+def gateway_upstream_tcp(role, validators):
+    """Combine the signed transport peer IP with the reviewed RPC relay port."""
+    from vpn_authorization import gateway_tcp
+
+    require(role['kind'] == 'gateway', 'Exact gateway relay required')
+    require(isinstance(validators, list) and 0 < len(validators) <= 128, 'Bounded signed transport roster required')
+    matches = [entry for entry in validators if entry.get('node_address') == role['validator_address']]
+    require(len(matches) == 1 and matches[0].get('revoked') is False, 'Selected signed validator is not uniquely active')
+    address, transport_port = matches[0]['dial_address'].rsplit(':', 1)
+    require(transport_port.isdecimal() and 0 < int(transport_port) <= 65535,
+            'Signed validator endpoint differs')
+    tcp = gateway_tcp({'ip': str(ipaddress.ip_address(address.strip('[]'))), 'port': role['validator_relay_port']})
+    require(tcp['port'] != int(transport_port), 'Gateway RPC relay must use a different port from validator P2P')
+    return tcp
+
+
 def _gateway_selected_tcp(c):
-    """Selected endpoint from the already native-verified signed registry."""
-    role=c.public_json(c.root/CONFIG,True)['role']
-    require(role['kind']=='gateway' and role['validator_relay_port']==8551,'Exact gateway relay required')
-    registry=c.public_json(c.root/'network/transport-registry.json',True)['payload']['validators']
-    require(isinstance(registry,list) and 0<len(registry)<=128,'Bounded signed transport roster required')
-    matches=[entry for entry in registry if entry.get('node_address')==role['validator_address']]
-    require(len(matches)==1 and matches[0].get('revoked') is False,'Selected signed validator is not uniquely active')
-    address,port=matches[0]['dial_address'].rsplit(':',1);ip=ipaddress.ip_address(address.strip('[]'))
-    require(port.isdecimal() and 0<int(port)<65536 and not (ip.is_loopback or ip.is_unspecified or ip.is_multicast or ip.is_link_local),'Signed validator endpoint differs')
-    return {'ip':str(ip),'port':8551}
+    role = c.public_json(c.root/CONFIG, True)['role']
+    validators = c.public_json(c.root/'network/transport-registry.json', True)['payload']['validators']
+    return gateway_upstream_tcp(role, validators)
 
 
 def gateway_relay_ready_locked(c, owned):
@@ -1296,13 +1304,10 @@ def gateway_vpn_enrollment_scope(c,receipt,secret_input):
 
 
 def gateway_vpn_parameters(parameters):
-    require(isinstance(parameters,dict) and set(parameters)=={'required_gateway_tcp'},'Exact gateway TCP parameter required')
-    target=parameters['required_gateway_tcp']
-    require(isinstance(target,dict) and set(target)=={'ip','port'} and isinstance(target['ip'],str)
-            and type(target['port']) is int and target['port']==8551,'Exact gateway TCP 8551 required')
-    ip=ipaddress.ip_address(target['ip'])
-    require(str(ip)==target['ip'] and not(ip.is_loopback or ip.is_unspecified or ip.is_multicast or ip.is_link_local),'Literal gateway overlay target required')
-    return target
+    from vpn_authorization import gateway_tcp
+    require(isinstance(parameters, dict) and set(parameters) == {'required_gateway_tcp'},
+            'Exact gateway TCP parameter required')
+    return gateway_tcp(parameters['required_gateway_tcp'])
 
 
 def gateway_vpn_preflight(c,parameters):

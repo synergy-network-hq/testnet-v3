@@ -241,8 +241,7 @@ def network_provisioning_profile(profile, selection):
     hostname = gateway['public_hostname']
     require(isinstance(hostname, str) and len(hostname) <= 253 and '.' in hostname
             and all(re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label) for label in hostname.split('.'))
-            and gateway['tls'] == 'required' and gateway['protocol'] == 'synergy-json-rpc-v1'
-            and gateway['validator_relay_port'] == 8551,
+            and gateway['tls'] == 'required' and gateway['protocol'] == 'synergy-json-rpc-v1',
             'Gateway requires a DNS hostname, HTTPS and a supported protocol')
     require((provider is None or pin(provider)) and (locator is None or (pin(provider) and pin(locator))),
             'Gateway VPN commitments must bind the provider and its credential locator')

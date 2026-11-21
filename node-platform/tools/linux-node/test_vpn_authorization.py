@@ -60,7 +60,7 @@ class AuthorizationTests(unittest.TestCase):
         inventory=self.gateway_inventory()
         raw=v.encode(self.p);sha=hashlib.sha256(raw).hexdigest()
         self.assertEqual(v.provider_policy(raw,sha,self.ca,1000),self.p)
-        for changed in ({**self.p,'required_peer_ips':['10.69.0.254']},{**self.p,'required_gateway_tcp':{'ip':'10.69.0.254','port':443}},{**self.p,'required_gateway_tcp':{'ip':'127.0.0.1','port':8551}},{**self.p,'expires_at':999}):
+        for changed in ({**self.p,'required_peer_ips':['10.69.0.254']},{**self.p,'required_gateway_tcp':{'ip':'10.69.0.254','port':0}},{**self.p,'required_gateway_tcp':{'ip':'127.0.0.1','port':8551}},{**self.p,'expires_at':999}):
             data=v.encode(changed)
             with self.assertRaises(ValueError):v.provider_policy(data,hashlib.sha256(data).hexdigest(),self.ca,1000)
         for groups in ([], ['gateway-group', 'validator-group']):
@@ -446,7 +446,7 @@ class GatewayAccessTests(unittest.TestCase):
             'management_origin': 'https://netbird.example', 'account_id': 'account',
             'ca_sha256': self.hash(self.ca), 'expires_at': 2000, 'target_sha256': 'a'*64,
             'network_profile_sha256': 'b'*64,
-            'required_gateway_tcp': {'ip': '10.10.0.2', 'port': 8551},
+            'required_gateway_tcp': {'ip': '10.10.0.2', 'port': 9451},
             'network_binding': {'network_id': 'independent-canary', 'chain_id': 10, 'formation_sha256': 'c'*64},
         }
         self.inventory = {
@@ -502,7 +502,7 @@ class GatewayAccessTests(unittest.TestCase):
         self.assertEqual(self.writes[1][1]['peers'], ['signed-upstream'])
         (rule,) = self.writes[2][1]['rules']
         self.assertEqual((rule['sources'], rule['destinations'], rule['ports'], rule['bidirectional']),
-                         (['created-0'], ['created-1'], ['8551'], False))
+                         (['created-0'], ['created-1'], ['9451'], False))
         policy = v.encode(result['provider_policy'])
         approved = v.provider_policy(policy, self.hash(policy), self.ca, 1000)
         flow = v.Authorization(self.root/'enrollment', approved, self.request, now=lambda: 1000)

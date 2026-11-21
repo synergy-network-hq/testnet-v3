@@ -115,13 +115,14 @@ def _provider_connection(policy, ca, now, allow_expired=False):
             'Provider approval expired')
 
 
-def _gateway_tcp(target):
+def gateway_tcp(target):
     require(isinstance(target, dict) and set(target) == {'ip', 'port'}
-            and isinstance(target['ip'], str) and type(target['port']) is int and target['port'] == 8551,
+            and isinstance(target['ip'], str) and type(target['port']) is int and 0 < target['port'] <= 65535,
             'Exact restricted gateway TCP target required')
     address = ipaddress.ip_address(target['ip'])
     require(str(address) == target['ip'] and not (address.is_unspecified or address.is_loopback
             or address.is_multicast or address.is_link_local), 'Literal signed gateway overlay target required')
+    return target
 
 
 def provider_policy(raw, expected_sha256, ca, now, *, cleanup_action=None):
@@ -137,7 +138,7 @@ def provider_policy(raw, expected_sha256, ca, now, *, cleanup_action=None):
             and len(set(policy['auto_groups'])) == len(policy['auto_groups']), 'Exact groups required')
     if policy['profile'] == GATEWAY_PROFILE:
         require(len(policy['auto_groups']) == 1, 'Gateway VPN requires one dedicated enrollment group')
-        _gateway_tcp(policy['required_gateway_tcp'])
+        gateway_tcp(policy['required_gateway_tcp'])
     else:
         require(isinstance(policy['required_peer_ips'], list) and 0 < len(policy['required_peer_ips']) <= 5
                 and len(set(policy['required_peer_ips'])) == len(policy['required_peer_ips']), 'Independent VPN peer targets required')
@@ -157,7 +158,7 @@ def gateway_access_scope(raw, expected_sha256, ca, now):
             and pin(scope['target_sha256']) and pin(scope['network_profile_sha256']),
             'Exact gateway policy administration scope required')
     _formation_scope(scope['network_binding'])
-    _gateway_tcp(scope['required_gateway_tcp'])
+    gateway_tcp(scope['required_gateway_tcp'])
     _provider_connection(scope, ca, now)
     return scope
 

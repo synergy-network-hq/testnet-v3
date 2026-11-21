@@ -179,7 +179,6 @@ def status(root, timeout=8):
     return j
 
 
-GATEWAY_PORT = 8551
 GATEWAY_RECEIPT = 'evidence/vpn-gateway-route.json'
 
 
@@ -187,13 +186,14 @@ def gateway_target(root, value):
     receipt = read(root/'installation.json')
     require(receipt.get('role') == 'rpc_gateway' and type(receipt.get('chain_id')) is int
             and 0 < receipt['chain_id'] < 2**64, 'restricted TCP enrollment requires a scoped RPC gateway')
-    require(isinstance(value, dict) and set(value) == {'ip', 'port'}
-            and isinstance(value['ip'], str) and type(value['port']) is int
-            and value['port'] == GATEWAY_PORT, 'exact validator TCP 8551 target required')
-    peer = ipaddress.ip_address(value['ip'])
-    require(str(peer) == value['ip'] and not (peer.is_loopback or peer.is_unspecified
-            or peer.is_multicast or peer.is_link_local), 'literal unicast overlay address required')
-    return {'ip': str(peer), 'port': GATEWAY_PORT}
+    from canary_rpc_relay import CONFIG, gateway_upstream_tcp
+    from vpn_authorization import gateway_tcp
+    role = read(root/CONFIG)['role']
+    validators = read(root/'network/transport-registry.json')['payload']['validators']
+    target = gateway_tcp(value)
+    require(target == gateway_upstream_tcp(role, validators),
+            'VPN target differs from the exact approved gateway TCP endpoint')
+    return target
 
 
 def verify_gateway_route(root, *, persist=True, locked=False):
@@ -226,7 +226,7 @@ def verify_gateway_route(root, *, persist=True, locked=False):
             connection.settimeout(3)
             connection.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'wt0\0')
             connection.bind((str(source), 0))
-            connection.connect((str(peer), GATEWAY_PORT))
+            connection.connect((str(peer), target['port']))
         result = {'peer_id': server['peer_id'], 'source_ip': str(source), 'target': target,
                   'interface': 'wt0', 'tcp_verified': True, 'apqe_verified': False}
         path = root/GATEWAY_RECEIPT
