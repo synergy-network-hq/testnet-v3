@@ -9,3 +9,7 @@ Complete these checks on Canary chain 99999 to qualify the architecture for a fr
 - [ ] Verify APQE and operational security. Check authenticated provider provenance, key custody and rotation, peer admission, malformed requests, replay rejection, and signed install, update and recovery through NodeNetwork.
 - [ ] Pass a sustained multi-host load and recovery test. Measure finalized throughput, finality latency, backlog recovery, resource growth and behavior when a validator drops out. Verify monitoring and alerts against authenticated data.
 - [ ] Validate the replacement formation. Prepare a fresh signed PoSy Genesis for chain 1266 with Val1 as the fifth validator, settle the initial allocation and entitlement rules, and verify that Portal and Wallet distinguish the fresh network by Genesis. Any protected Wallet features in launch scope need their ratified Core contract and end-to-end verification.
+
+## Latest verification
+
+On 2026-11-21 at 05:09 UTC, the public Canary `/network-profile` endpoint passed TLS verification and returned HTTP 502. Gateway commissioning and public proof, balance, and receipt verification remain open.
