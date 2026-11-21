@@ -2050,6 +2050,10 @@ def control_inventory(root):
         c.direct(path)
         require(hashlib.sha256(path.read_bytes()).hexdigest()==expected,'Controller engine bytes differ')
         approved.add(path.relative_to(root).as_posix())
+    # Retained gateway-install attribution itself imports an engine tool. Make
+    # tools importable only after the COMPLETE enrolled engine has been hashed.
+    tools=str(c.control/'tools')
+    if tools not in sys.path:sys.path.insert(0,tools)
     if (c.control/'gateway-install-request.json').exists() or (c.control/'gateway-install-request.json').is_symlink():
         raw=c.direct(c.control/'gateway-install-request.json',True,16384).read_bytes();request=parse_request(raw)
         require(request['operation']=='gateway_install','Unexpected gateway installation record')
@@ -2178,9 +2182,8 @@ def serve(raw, controller=None):
 def main():
     require(os.geteuid()==0,'Controller requires the enrolled privileged host interface','authorization_required')
     require(len(sys.argv)==1,'Controller accepts JSON stdin only','invalid_request')
-    control_inventory(ROOT)
     sys.modules['controller']=sys.modules[__name__]
-    sys.path.insert(0,str(ROOT/'tmp/controller/tools'))
+    control_inventory(ROOT)
     os.environ.update(HOME=str(ROOT),TMPDIR=str(ROOT/'tmp'),XDG_CONFIG_HOME=str(ROOT/'vpn'),
                       XDG_CACHE_HOME=str(ROOT/'cache'),NB_STATE_DIR=str(ROOT/'vpn'),
                       NB_DNS_STATE_FILE=str(ROOT/'vpn/state.json'))

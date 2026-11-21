@@ -1392,7 +1392,106 @@ def prepare_existing_gateway_stage(controller,policy,doc,pin):
     prepare_stage_executables(package,manifest)
 
 
-def stage_engineering_authorization(stream, *, prepare_gateway_stage=False):
+def repair_installed_gateway_controller(controller,policy,wire,pin,reconciled,replacement):
+    """Re-adopt one native-pinned controller after an exact consumed install.
+
+    An expired original approval proves historical attribution only. No request
+    is authorized, grant renewed, package changed, or application started here.
+    """
+    import copy
+    import ctypes
+    from controller import parse_request,request_digest,sync_directory
+    from lifecycle import _sealed_receipt
+    from canary_rpc_relay import _gateway_target_consumed,_gateway_target_quiescent,_gateway_target_unpublished
+    root=controller.root;old=controller.control
+    source=wire['gateway_controller_source'];expected=globals().get('NATIVE_AUTHENTICATED_GATEWAY_CONTROLLER_SHA256')
+    require(isinstance(source,str) and 0<len(source.encode('utf-8'))<=512*1024
+            and isinstance(expected,str) and re.fullmatch('[a-f0-9]{64}',expected)
+            and hashlib.sha256(source.encode('utf-8')).hexdigest()==expected,'Independent exact controller source required')
+    compile(source,'authenticated-gateway-controller','exec')
+    require(reconciled is not None,'Repair requires the identical retained authorization')
+    previous=policy['engineering_authorization']
+    require(type(previous.get('expires_at')) is int and previous['expires_at']>0,'Invalid retained authorization expiry')
+    doc=authorization_document(wire['authorization'],pin,previous['expires_at']-1)
+    require(doc['sequence']==previous['sequence'] and doc['expires_at']==previous['expires_at']
+            and policy.get('engineering_initial_authorization_sha256')==pin
+            and doc['target']==policy.get('engineering_target') and 'guest' not in doc['target']
+            and doc['genesis_pins']==policy.get('validator_identity_network')
+            and all(doc[k]==effective_engineering_selection(root,policy).get(k) for k in
+                    ('release_id','manifest_sha256','network_id','chain_id','node_name')),
+            'Repair changes the retained initial scope')
+    inputs=authorization_inputs(doc,wire['artifacts'])
+    require(set(inputs)==set(policy.get('authorization_files',{}))
+            and all(hashlib.sha256(raw).hexdigest()==policy['authorization_files'][name]
+                    and controller.direct(old/'authorization/inputs'/name,True,len(raw)+1).read_bytes()==raw
+                    for name,raw in inputs.items()),'Repair inputs differ from retained authority')
+    original=parse_request(controller.direct(old/'gateway-install-request.json',True,16384).read_bytes())
+    key=request_digest(original)
+    require(original['operation']=='gateway_install' and doc['requests']==[{'operation':'gateway_install','request_sha256':key}]
+            and all(original['parameters'][k]==doc[k] for k in
+                    ('release_id','manifest_sha256','network_id','chain_id','node_name')),
+            'Repair requires the exact original gateway install')
+    _gateway_target_consumed(controller,'gateway_install',key)
+    require(not any((old/'grants').iterdir()),'Repair preserves only the exact consumed initial grant state')
+    receipt,manifest=_sealed_receipt(root)
+    require(receipt['role']=='rpc_gateway' and receipt.get('consensus_started') is False
+            and 'gateway_commissioned' not in receipt and receipt['package_sha256']==doc['manifest_sha256']
+            and manifest['release_id']==doc['release_id']
+            and all(receipt[k]==doc[k] for k in ('network_id','chain_id','node_name')),
+            'Repair requires the same uncommissioned gateway installation')
+    _gateway_target_quiescent(controller);_gateway_target_unpublished(controller)
+    require(not any((root/'keys').iterdir()) and not (root/'tmp/gateway-target').exists()
+            and not (root/'tmp/gateway-target').is_symlink(),'Repair refuses prepared gateway custody')
+    predecessor=manifest['files']['tools/controller.py']
+    for name in enrolled_engine(policy):
+        require(policy['engine_files'][name]==(expected if name=='controller.py' and 'gateway_controller_repair' in policy
+                else manifest['files']['tools/'+name]),'Repair engine differs from original installed package')
+    marker=policy.get('gateway_controller_repair')
+    if marker is not None:
+        require(isinstance(marker,dict) and set(marker)=={'controller_sha256','previous_controller_sha256','authorization_sha256','request_sha256','predecessor_sha256'}
+                and marker['controller_sha256']==expected and marker['previous_controller_sha256']==predecessor
+                and marker['authorization_sha256']==pin and marker['request_sha256']==key
+                and re.fullmatch('[a-f0-9]{64}',marker['predecessor_sha256']), 'Repair reconciliation differs')
+        if replacement.exists() or replacement.is_symlink():
+            require(replacement.is_dir() and not replacement.is_symlink()
+                    and authorization_tree_digest(replacement)==marker['predecessor_sha256'],'Repair predecessor differs')
+            prior=json.loads((replacement/'policy.json').read_bytes())
+            transformed=copy.deepcopy(prior);transformed['engine_files']['controller.py']=expected
+            transformed['gateway_controller_repair']=marker
+            require(transformed==policy,'Repair predecessor policy differs')
+        verify_adopted_controller(root)
+        if replacement.exists():shutil.rmtree(replacement);sync_directory(root/'tmp')
+        return {**reconciled,'gateway_controller_repaired':True}
+    require(policy['engine_files']['controller.py']==predecessor and predecessor!=expected,
+            'Repair requires the exact installed predecessor controller')
+    require(not replacement.exists() and not replacement.is_symlink(),'Interrupted controller repair requires reconciliation')
+    marker={'controller_sha256':expected,'previous_controller_sha256':predecessor,'authorization_sha256':pin,
+            'request_sha256':key,'predecessor_sha256':authorization_tree_digest(old)}
+    changed=copy.deepcopy(policy);changed['engine_files']['controller.py']=expected;changed['gateway_controller_repair']=marker
+    exchanged=False
+    try:
+        shutil.copytree(old,replacement)
+        (replacement/'controller.py').unlink();save(replacement/'controller.py',source.encode('utf-8'))
+        (replacement/'policy.json').unlink();save(replacement/'policy.json',json.dumps(changed,sort_keys=True).encode())
+        for path in replacement.rglob('*'):
+            if path.is_file():
+                with path.open('rb') as stream:os.fsync(stream.fileno())
+        for path in sorted([p for p in replacement.rglob('*') if p.is_dir()],key=lambda p:-len(p.parts)):sync_directory(path)
+        sync_directory(replacement);sync_directory(root/'tmp')
+        exchange=ctypes.CDLL(None,use_errno=True).renameat2
+        exchange.argtypes=(ctypes.c_int,ctypes.c_char_p,ctypes.c_int,ctypes.c_char_p,ctypes.c_uint);exchange.restype=ctypes.c_int
+        if exchange(-100,os.fsencode(old),-100,os.fsencode(replacement),2):raise OSError(ctypes.get_errno(),'Controller repair exchange failed')
+        exchanged=True;sync_directory(root/'tmp')
+        verify_adopted_controller(root)
+        require(authorization_tree_digest(replacement)==marker['predecessor_sha256'],'Repair predecessor changed')
+        shutil.rmtree(replacement);sync_directory(root/'tmp')
+    except Exception:
+        if not exchanged and replacement.exists():shutil.rmtree(replacement)
+        raise
+    return {**reconciled,'reconciled':False,'gateway_controller_repaired':True}
+
+
+def stage_engineering_authorization(stream, *, prepare_gateway_stage=False, repair_gateway_controller=False):
     """Atomic exact engineering grants through the native application's admin transport.
 
     No renderer pin or package content can authorize itself. Repeating an applied
@@ -1406,7 +1505,8 @@ def stage_engineering_authorization(stream, *, prepare_gateway_stage=False):
     raw=stream.read(AUTHORIZATION_LIMIT+1)
     require(0<len(raw)<=AUTHORIZATION_LIMIT,'Authorization transfer exceeds bound')
     wire=json.loads(raw)
-    require(isinstance(wire,dict) and set(wire)=={'authorization','artifacts'},'Invalid authorization transfer')
+    require(isinstance(wire,dict) and set(wire)==({'authorization','artifacts','gateway_controller_source'}
+            if repair_gateway_controller else {'authorization','artifacts'}),'Invalid authorization transfer')
     pin=globals().get('NATIVE_AUTHENTICATED_AUTHORIZATION_SHA256')
     require(isinstance(pin,str) and re.fullmatch('[a-f0-9]{64}',pin),'No independent native authorization')
     require(ROOT.resolve()==ROOT and ROOT.stat().st_uid==0 and stat.S_IMODE(ROOT.stat().st_mode)==0o700,'Private canonical root required')
@@ -1434,6 +1534,8 @@ def stage_engineering_authorization(stream, *, prepare_gateway_stage=False):
         # Read-only reconciliation precedes expiration checks; never grants twice.
         previous=policy.get('engineering_authorization')
         reconciled=authorization_reconciliation(policy,pin,wire['authorization'])
+        if repair_gateway_controller:
+            return repair_installed_gateway_controller(Controller(ROOT),policy,wire,pin,reconciled,replacement)
         if prepare_gateway_stage:
             require(reconciled is not None and not replacement.exists() and not replacement.is_symlink(),
                     'Verify the exact prior initial gateway authorization before preparing its stage')
@@ -2911,8 +3013,9 @@ def main():
             operation=bare_rollback(sys.argv[2],sys.argv[3])
         elif len(sys.argv)==5 and sys.argv[1]=='--bare-rollback-apply':
             operation=bare_rollback(sys.argv[2],sys.argv[3],sys.argv[4])
-        elif len(sys.argv)==2 and sys.argv[1] in ('--stage-engineering-authorization','--prepare-existing-gateway-stage'):
-            operation=stage_engineering_authorization(sys.stdin.buffer,prepare_gateway_stage=sys.argv[1]=='--prepare-existing-gateway-stage')
+        elif len(sys.argv)==2 and sys.argv[1] in ('--stage-engineering-authorization','--prepare-existing-gateway-stage','--repair-installed-gateway-controller'):
+            operation=stage_engineering_authorization(sys.stdin.buffer,prepare_gateway_stage=sys.argv[1]=='--prepare-existing-gateway-stage',
+                repair_gateway_controller=sys.argv[1]=='--repair-installed-gateway-controller')
         elif len(sys.argv)==4 and sys.argv[1]=='--reconcile-engineering-update':
             operation=stage_engineering_update(None,sys.argv[2],sys.argv[3],reconcile=True)
         elif len(sys.argv)==4 and sys.argv[1]=='--stage-engineering-update':

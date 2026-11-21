@@ -189,4 +189,24 @@ print('packaged VPN dependency verified')
             self.assertNotIn(b'UNTRUSTED_TOOL_EXECUTED',result.stdout)
             self.assertFalse(list(root.rglob('__pycache__')))
 
+    def test_consumed_gateway_install_imports_only_the_fully_verified_engine(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=self.fixture(temporary);control=root/'tmp/controller'
+            request={'version':1,'operation':'gateway_install','parameters':{
+                'release_id':'test-master','manifest_sha256':'a'*64,'network_id':'test-network',
+                'chain_id':99999,'node_name':'rpc-test'}}
+            for name,raw in [('gateway-install-request.json',controller.canonical(request)),
+                ('audit.jsonl',controller.canonical({'operation':'gateway_install',
+                    'request_sha256':controller.request_digest(request),'time':1})+b'\n')]:
+                path=control/name;path.write_bytes(raw);path.chmod(0o600)
+            # A malformed operation is sufficient to exercise real main plus
+            # installed-request attribution, without invoking a node process.
+            result=self.run_enrolled(root,b'{"version":1,"operation":"invalid","parameters":{}}')
+            self.assertEqual(result.stderr,b'')
+            self.assertEqual(json.loads(result.stdout)['error']['code'],'invalid_request')
+            (control/'tools/canary_rpc_relay.py').write_text("print('UNVERIFIED_GATEWAY_IMPORT')")
+            result=self.run_enrolled(root)
+            self.assertIn('engine bytes differ',json.loads(result.stdout)['error']['message'])
+            self.assertNotIn(b'UNVERIFIED_GATEWAY_IMPORT',result.stdout)
+
 if __name__=='__main__':unittest.main()
