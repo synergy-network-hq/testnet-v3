@@ -6,6 +6,11 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+default = []
+# Inactive qualification only: no runtime or finalized authority activation.
+candidate-cluster-schedule = []
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

@@ -9,3 +9,8 @@ pub use cluster::ConsensusCluster;
 pub use membership::VerifiedClusterMembership;
 pub use schedule::derive_epoch_leader_ring;
 pub use verification::verify_cluster_assignment;
+
+#[cfg(feature = "candidate-cluster-schedule")]
+mod candidate_schedule;
+#[cfg(feature = "candidate-cluster-schedule")]
+pub use candidate_schedule::CandidateClusterSchedule;

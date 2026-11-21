@@ -13,10 +13,28 @@ pub struct FrozenValidatorRegistry {
 
 impl FrozenValidatorRegistry {
     pub fn new(epoch: u64, validators: Vec<ValidatorRecord>) -> PosyResult<Self> {
-        if validators.len() < crate::POSY_MIN_VALIDATOR_COUNT {
+        Self::with_minimum(epoch, validators, crate::POSY_MIN_VALIDATOR_COUNT)
+    }
+
+    /// Qualification-only minimum-three proposal; never used by active authority.
+    /// Caller-supplied records do not establish finalized membership eligibility.
+    #[cfg(feature = "candidate-cluster-schedule")]
+    pub fn new_candidate_cluster_profile(
+        epoch: u64,
+        validators: Vec<ValidatorRecord>,
+    ) -> PosyResult<Self> {
+        Self::with_minimum(epoch, validators, 3)
+    }
+
+    fn with_minimum(
+        epoch: u64,
+        validators: Vec<ValidatorRecord>,
+        minimum: usize,
+    ) -> PosyResult<Self> {
+        if validators.len() < minimum {
             return Err(PosyError::invalid(format!(
                 "PoSy v3 requires at least {} validators",
-                crate::POSY_MIN_VALIDATOR_COUNT
+                minimum
             )));
         }
         let mut indexed = BTreeMap::new();
@@ -37,7 +55,7 @@ impl FrozenValidatorRegistry {
             .values()
             .filter(|validator| validator.may_sign_consensus())
             .count()
-            < crate::POSY_MIN_VALIDATOR_COUNT
+            < minimum
         {
             return Err(PosyError::invalid(
                 "active validator set is below PoSy minimum",
