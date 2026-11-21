@@ -1075,6 +1075,7 @@ def gateway_target(c,request):
             return {
                 'schema': 'nodenetwork-gateway-profile-configuration-v1',
                 'profile': profile,
+                'profile_json': profile_raw.decode('utf-8'),
                 'profile_sha256': _sha(profile_raw),
                 'configuration_json': _gateway_request_bytes(wrapper).decode(),
                 'installed': state['state'] == 'commissioned',

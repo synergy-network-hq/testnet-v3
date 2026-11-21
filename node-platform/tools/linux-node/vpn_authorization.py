@@ -94,6 +94,7 @@ def provider_policy(raw, expected_sha256, ca, now, *, cleanup_action=None):
             and len(policy['auto_groups']) <= 16 and len(set(policy['auto_groups'])) == len(policy['auto_groups'])
             and all(identifier(group) for group in policy['auto_groups']), 'Exact account and groups required')
     if policy['profile']==GATEWAY_PROFILE:
+        require(len(policy['auto_groups']) == 1, 'Gateway VPN requires one dedicated enrollment group')
         target=policy['required_gateway_tcp']
         require(isinstance(target,dict) and set(target)=={'ip','port'} and isinstance(target['ip'],str) and type(target['port']) is int and target['port']==8551,'Exact restricted gateway TCP target required')
         address=ipaddress.ip_address(target['ip'])

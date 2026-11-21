@@ -230,17 +230,22 @@ def network_provisioning_profile(profile, selection):
     if profile['role'] == 'validator':
         require(gateway is None, 'Validator profile cannot enable a public gateway')
         return profile
-    require(isinstance(gateway, dict) and set(gateway) == {
+    routing_fields = {
         'public_hostname', 'tls', 'protocol', 'listen_address', 'validator_address',
         'validator_relay_port', 'allowed_origins', 'vpn_provider_sha256',
-    }, 'Complete gateway routing and VPN settings required')
+    }
+    locator_field = 'vpn_credential_locator_sha256'
+    require(isinstance(gateway, dict) and routing_fields <= set(gateway) <= routing_fields | {locator_field},
+            'Complete gateway routing and VPN settings required')
+    provider, locator = gateway['vpn_provider_sha256'], gateway.get(locator_field)
     hostname = gateway['public_hostname']
     require(isinstance(hostname, str) and len(hostname) <= 253 and '.' in hostname
             and all(re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label) for label in hostname.split('.'))
             and gateway['tls'] == 'required' and gateway['protocol'] == 'synergy-json-rpc-v1'
-            and gateway['validator_relay_port'] == 8551
-            and pin(gateway['vpn_provider_sha256']),
-            'Gateway requires a DNS hostname, HTTPS, a supported protocol and a pinned VPN profile')
+            and gateway['validator_relay_port'] == 8551,
+            'Gateway requires a DNS hostname, HTTPS and a supported protocol')
+    require((provider is None or pin(provider)) and (locator is None or (pin(provider) and pin(locator))),
+            'Gateway VPN commitments must bind the provider and its credential locator')
     from canary_rpc_relay import configuration
     configuration(Path('/opt/synergy'), gateway_profile_relay(gateway, 'synv5profileverification'))
     return profile

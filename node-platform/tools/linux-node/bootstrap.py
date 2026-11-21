@@ -1204,6 +1204,8 @@ def authorization_inputs(doc,encoded):
         require(gateway_install, 'Gateway network settings require the exact initial installation grant')
         from synergy_linux import network_provisioning_profile
         profile=network_provisioning_profile(json.loads(profile_raw), dict(doc, role='rpc_gateway'))
+        require(profile['gateway']['vpn_provider_sha256'] is not None,
+                'Gateway installation requires the approved VPN provider commitment')
         require(all(doc['artifacts'].get('commissioning/network/'+name)==pin for name,pin in profile['origin'].items()),
                 'Network profile origin differs from the approved signed files')
     if gateway_install:

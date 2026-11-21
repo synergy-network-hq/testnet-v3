@@ -49,6 +49,10 @@ class AuthorizationTests(unittest.TestCase):
         for changed in ({**self.p,'required_peer_ips':['10.69.0.254']},{**self.p,'required_gateway_tcp':{'ip':'10.69.0.254','port':443}},{**self.p,'required_gateway_tcp':{'ip':'127.0.0.1','port':8551}},{**self.p,'expires_at':999}):
             data=v.encode(changed)
             with self.assertRaises(ValueError):v.provider_policy(data,hashlib.sha256(data).hexdigest(),self.ca,1000)
+        for groups in ([], ['gateway-group', 'validator-group']):
+            data = v.encode({**self.p, 'auto_groups': groups})
+            with self.assertRaisesRegex(ValueError, 'one dedicated enrollment group'):
+                v.provider_policy(data, hashlib.sha256(data).hexdigest(), self.ca, 1000)
         other={**self.p,'network_binding':{**self.p['network_binding'],'chain_id':self.b['chain_id']+1}}
         other_raw=v.encode(other)
         other_policy=v.provider_policy(other_raw,hashlib.sha256(other_raw).hexdigest(),self.ca,1000)

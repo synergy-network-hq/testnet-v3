@@ -102,7 +102,7 @@ class GatewayLifecycleTests(unittest.TestCase):
  def test_restricted_provider_and_secret_scope_are_verified_before_enrollment(self):
   import hashlib,vpn_authorization as v
   ca=b'public fixture CA';binding={'network_id':'engineering-canary','chain_id':99999,'formation_sha256':'a'*64}
-  provider={'version':1,'profile':v.GATEWAY_PROFILE,'management_origin':'https://vpn.example','api_origin':'https://vpn.example','account_id':'account','ca_sha256':hashlib.sha256(ca).hexdigest(),'auto_groups':[],'network_binding':binding,'required_gateway_tcp':{'ip':'10.2.3.4','port':8551},'expires_at':int(time.time())+60}
+  provider={'version':1,'profile':v.GATEWAY_PROFILE,'management_origin':'https://vpn.example','api_origin':'https://vpn.example','account_id':'account','ca_sha256':hashlib.sha256(ca).hexdigest(),'auto_groups':['gateway-fixture'],'network_binding':binding,'required_gateway_tcp':{'ip':'10.2.3.4','port':8551},'expires_at':int(time.time())+60}
   raw=v.encode(provider);self.save('tmp/controller/authorization/inputs/vpn-provider.json',provider)
   path=self.c.control/'authorization/inputs/vpn-ca.pem';path.write_bytes(ca);path.chmod(0o600)
   self.policy['authorization_files']={'vpn-provider.json':hashlib.sha256(raw).hexdigest()};self.save('tmp/controller/policy.json',self.policy)
