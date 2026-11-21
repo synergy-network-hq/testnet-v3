@@ -21,6 +21,7 @@ LIMIT = 2 * 1024 * 1024
 PROFILE = 'nodenetwork-debug-vpn-provider-v1'
 CONTROLLED_PROFILE = 'nodenetwork-controlled-canary-v1'
 GATEWAY_PROFILE = 'nodenetwork-controlled-gateway-v1'
+GATEWAY_ACCESS_PROFILE = 'nodenetwork-gateway-access-scope-v1'
 
 
 class GatewayAccessRefused(ValueError):
@@ -71,28 +72,33 @@ def network_scope(policy, binding=None):
         require('network_binding' not in policy, 'Isolated profile cannot adopt controlled network scope')
         return
     scope = policy.get('network_binding')
-    require(isinstance(scope, dict) and set(scope) == {'network_id', 'chain_id', 'formation_sha256'}
-            and isinstance(scope['network_id'], str)
-            and re.fullmatch('[a-z0-9][a-z0-9_-]{1,127}', scope['network_id'])
-            and type(scope['chain_id']) is int and 0 < scope['chain_id'] < 2**64
-            and pin(scope['formation_sha256']), 'Exact controlled network scope required')
+    _formation_scope(scope)
     if binding is not None:
         require(isinstance(binding, dict) and all(type(binding.get(k)) is type(value) and binding.get(k) == value for k, value in scope.items()),
                 'Controlled network differs from approved scope')
 
 
-def provider_policy(raw, expected_sha256, ca, now, *, cleanup_action=None):
-    require(cleanup_action in (None, 'revoke', 'retire'), 'Unknown cleanup action')
+def _formation_scope(scope):
+    require(isinstance(scope, dict) and set(scope) == {'network_id', 'chain_id', 'formation_sha256'}
+            and isinstance(scope['network_id'], str)
+            and re.fullmatch('[a-z0-9][a-z0-9_-]{1,127}', scope['network_id'])
+            and type(scope['chain_id']) is int and 0 < scope['chain_id'] < 2**64
+            and pin(scope['formation_sha256']), 'Exact controlled network scope required')
+
+
+def _approved_document(raw, expected_sha256):
     require(pin(expected_sha256) and hashlib.sha256(raw).hexdigest() == expected_sha256,
             'Provider policy differs from independent native pin')
-    policy = decode(raw)
-    require(isinstance(policy, dict), 'Exact provider policy required')
-    network_scope(policy)
-    extra = {'network_binding'} if policy['profile'] in (CONTROLLED_PROFILE,GATEWAY_PROFILE) else set()
-    connectivity = 'required_gateway_tcp' if policy['profile']==GATEWAY_PROFILE else 'required_peer_ips'
-    require(set(policy) == extra | {'version', 'profile', 'management_origin',
-            'api_origin', 'account_id', 'ca_sha256', 'auto_groups', connectivity, 'expires_at'}, 'Exact provider policy required')
-    require(type(policy['version']) is int, 'Exact engineering provider version required')
+    document = decode(raw)
+    require(isinstance(document, dict), 'Exact provider policy required')
+    return document
+
+
+PROVIDER_FIELDS = {'version', 'profile', 'management_origin', 'api_origin', 'account_id',
+                   'ca_sha256', 'expires_at'}
+
+
+def _provider_connection(policy, ca, now, allow_expired=False):
     for field in ('api_origin', 'management_origin'):
         origin = policy[field]
         require(isinstance(origin, str) and len(origin) <= 512, 'Bounded provider origin required')
@@ -102,15 +108,36 @@ def provider_policy(raw, expected_sha256, ca, now, *, cleanup_action=None):
                 and origin == 'https://' + parsed.netloc and chr(92) not in origin
                 and not any(ord(c) < 33 or ord(c) > 126 for c in origin), 'Exact HTTPS origin required')
         require(parsed.port is None or 0 < parsed.port <= 65535, 'Invalid provider port')
-    require(identifier(policy['account_id']) and isinstance(policy['auto_groups'], list)
-            and len(policy['auto_groups']) <= 16 and len(set(policy['auto_groups'])) == len(policy['auto_groups'])
-            and all(identifier(group) for group in policy['auto_groups']), 'Exact account and groups required')
-    if policy['profile']==GATEWAY_PROFILE:
+    require(identifier(policy['account_id']), 'Exact provider account required')
+    require(pin(policy['ca_sha256']) and isinstance(ca, bytes) and 0 < len(ca) <= 128 * 1024
+            and hashlib.sha256(ca).hexdigest() == policy['ca_sha256'], 'Independent CA bytes differ')
+    require(type(policy['expires_at']) is int and (now < policy['expires_at'] or allow_expired),
+            'Provider approval expired')
+
+
+def _gateway_tcp(target):
+    require(isinstance(target, dict) and set(target) == {'ip', 'port'}
+            and isinstance(target['ip'], str) and type(target['port']) is int and target['port'] == 8551,
+            'Exact restricted gateway TCP target required')
+    address = ipaddress.ip_address(target['ip'])
+    require(str(address) == target['ip'] and not (address.is_unspecified or address.is_loopback
+            or address.is_multicast or address.is_link_local), 'Literal signed gateway overlay target required')
+
+
+def provider_policy(raw, expected_sha256, ca, now, *, cleanup_action=None):
+    require(cleanup_action in (None, 'revoke', 'retire'), 'Unknown cleanup action')
+    policy = _approved_document(raw, expected_sha256)
+    network_scope(policy)
+    extra = {'network_binding'} if policy['profile'] in (CONTROLLED_PROFILE, GATEWAY_PROFILE) else set()
+    connectivity = 'required_gateway_tcp' if policy['profile'] == GATEWAY_PROFILE else 'required_peer_ips'
+    require(set(policy) == extra | PROVIDER_FIELDS | {'auto_groups', connectivity}, 'Exact provider policy required')
+    _provider_connection(policy, ca, now, allow_expired=cleanup_action is not None)
+    require(isinstance(policy['auto_groups'], list) and len(policy['auto_groups']) <= 16
+            and all(identifier(group) for group in policy['auto_groups'])
+            and len(set(policy['auto_groups'])) == len(policy['auto_groups']), 'Exact groups required')
+    if policy['profile'] == GATEWAY_PROFILE:
         require(len(policy['auto_groups']) == 1, 'Gateway VPN requires one dedicated enrollment group')
-        target=policy['required_gateway_tcp']
-        require(isinstance(target,dict) and set(target)=={'ip','port'} and isinstance(target['ip'],str) and type(target['port']) is int and target['port']==8551,'Exact restricted gateway TCP target required')
-        address=ipaddress.ip_address(target['ip'])
-        require(str(address)==target['ip'] and not(address.is_unspecified or address.is_loopback or address.is_multicast or address.is_link_local),'Literal signed gateway overlay target required')
+        _gateway_tcp(policy['required_gateway_tcp'])
     else:
         require(isinstance(policy['required_peer_ips'], list) and 0 < len(policy['required_peer_ips']) <= 5
                 and len(set(policy['required_peer_ips'])) == len(policy['required_peer_ips']), 'Independent VPN peer targets required')
@@ -118,10 +145,21 @@ def provider_policy(raw, expected_sha256, ca, now, *, cleanup_action=None):
             address = ipaddress.ip_address(value)
             require(str(address) == value and not (address.is_unspecified or address.is_loopback or address.is_multicast),
                     'Literal independent overlay peer required')
-    require(pin(policy['ca_sha256']) and isinstance(ca, bytes) and 0 < len(ca) <= 128 * 1024
-            and hashlib.sha256(ca).hexdigest() == policy['ca_sha256'], 'Independent CA bytes differ')
-    require(type(policy['expires_at']) is int and (now < policy['expires_at'] or cleanup_action is not None), 'Provider approval expired')
     return policy
+
+
+def gateway_access_scope(raw, expected_sha256, ca, now):
+    """Authenticate scope for policy creation, separate from enrollment authority."""
+    scope = _approved_document(raw, expected_sha256)
+    require(set(scope) == PROVIDER_FIELDS | {'network_binding', 'required_gateway_tcp',
+            'target_sha256', 'network_profile_sha256'} and type(scope['version']) is int
+            and scope['version'] == 1 and scope['profile'] == GATEWAY_ACCESS_PROFILE
+            and pin(scope['target_sha256']) and pin(scope['network_profile_sha256']),
+            'Exact gateway policy administration scope required')
+    _formation_scope(scope['network_binding'])
+    _gateway_tcp(scope['required_gateway_tcp'])
+    _provider_connection(scope, ca, now)
+    return scope
 
 
 class HttpsProvider:
@@ -135,17 +173,23 @@ class HttpsProvider:
         self.context.minimum_version = ssl.TLSVersion.TLSv1_2
         self.context.load_verify_locations(cadata=ca.decode('ascii'))
         self.token = token
-        self.gateway = policy.get('profile') == GATEWAY_PROFILE
+        self.profile = policy['profile']
 
     def __repr__(self):
         return '<HttpsProvider credential=redacted>'
 
     def request(self, method, path, body=None):
-        require((method, path) in {('GET', '/api/accounts'), ('GET', '/api/peers'),
-                ('GET', '/api/setup-keys'), ('POST', '/api/setup-keys')}
-                or self.gateway and method == 'GET' and path in ('/api/groups', '/api/policies')
-                or re.fullmatch('/api/(?:peers|setup-keys)/[A-Za-z0-9_-]{1,100}', path)
-                and method in ('GET', 'DELETE'), 'Unsupported provider resource')
+        if self.profile == GATEWAY_ACCESS_PROFILE:
+            allowed = method == 'GET' and path in ('/api/accounts', '/api/peers', '/api/groups', '/api/policies')
+            allowed = allowed or method == 'POST' and path in ('/api/groups', '/api/policies')
+        else:
+            allowed = (method, path) in {('GET', '/api/accounts'), ('GET', '/api/peers'),
+                                         ('GET', '/api/setup-keys'), ('POST', '/api/setup-keys')}
+            allowed = allowed or (self.profile == GATEWAY_PROFILE and method == 'GET'
+                                  and path in ('/api/groups', '/api/policies'))
+            allowed = allowed or (method in ('GET', 'DELETE')
+                                  and re.fullmatch('/api/(?:peers|setup-keys)/[A-Za-z0-9_-]{1,100}', path))
+        require(allowed, 'Unsupported provider resource')
         require((method == 'POST') == (body is not None), 'Unexpected provider body')
         data = None if body is None else encode(body)
         require(data is None or len(data) <= 16384, 'Provider request exceeds bound')
@@ -290,6 +334,172 @@ def retire_verified_legacy_peer(directory, policy, request, scope, *, reconcile_
     return receipt
 
 
+
+def _account_inventory(request, account_id):
+    code, accounts = request('GET', '/api/accounts')
+    require(code == 200 and isinstance(accounts, list) and len(accounts) == 1
+            and isinstance(accounts[0], dict) and accounts[0].get('id') == account_id,
+            'Provider account differs')
+
+
+def _inventory(request, resource):
+    code, result = request('GET', '/api/' + resource)
+    require(code == 200 and isinstance(result, list) and len(result) <= 8192
+            and all(isinstance(item, dict) and identifier(str(item.get('id', ''))) for item in result)
+            and len({str(item['id']) for item in result}) == len(result), 'Invalid provider inventory')
+    return result
+
+
+def _gateway_memberships(groups, peers, tcp):
+    default = [row['id'] for row in groups if row.get('name') == 'All']
+    require(len(default) == 1, 'Exact default group required')
+    upstream = [row['id'] for row in peers if row.get('ip') == tcp['ip']]
+    require(len(upstream) == 1, 'Signed gateway upstream must match one VPN peer')
+    return default[0], upstream[0], {row['id']: group_ids(row.get('groups')) for row in peers}
+
+
+def _exact_peer_group(group, memberships, expected):
+    present = {peer for peer, groups in memberships.items() if group['id'] in groups}
+    require(type(group.get('peers_count')) is int and group['peers_count'] == len(expected)
+            and group.get('resources_count', 0) == 0 and not group.get('resources')
+            and present == expected, 'Provider group has unexpected peers or network resources')
+    if 'peers' in group:
+        require(group_ids(group['peers'] if group['peers'] is not None else []) == expected,
+                'Provider group directory disagrees with peer membership')
+
+
+def _gateway_rule_policies(policies, default, gateway, destinations, port):
+    matches = []
+    for policy in policies:
+        require(type(policy.get('enabled')) is bool, 'Invalid provider policy state')
+        if not policy['enabled']:
+            continue
+        rules = policy.get('rules')
+        require(isinstance(rules, list), 'Invalid provider policy rules')
+        for rule in rules:
+            require(isinstance(rule, dict) and type(rule.get('enabled')) is bool,
+                    'Invalid provider access rule')
+            if not rule['enabled'] or rule.get('action') == 'drop':
+                continue
+            require(rule.get('action') == 'accept', 'Unknown provider access rule action')
+            sources = group_ids(rule['sources'] if rule.get('sources') is not None else [])
+            targets = group_ids(rule['destinations'] if rule.get('destinations') is not None else [])
+            if default not in sources | targets and gateway not in sources | targets:
+                continue
+            require(gateway is not None and sources == {gateway} and len(targets) == 1
+                    and targets <= destinations and rule.get('bidirectional') is False
+                    and rule.get('protocol') == 'tcp' and rule.get('ports') == [str(port)]
+                    and not rule.get('port_ranges') and not rule.get('sourceResource')
+                    and not rule.get('destinationResource') and not rule.get('authorized_groups'),
+                    'A provider rule broadens gateway access')
+            matches.append(policy['id'])
+    return matches
+
+
+def _unique_named(rows, name):
+    matching = [row for row in rows if row.get('name') == name]
+    require(len(matching) <= 1, 'Managed gateway policy resource name is ambiguous')
+    return matching[0] if matching else None
+
+
+class GatewayAccess:
+    """Create only the two dedicated groups and one directional relay policy.
+
+    The native caller verifies the origin and approves the exact scope and fresh
+    plan. A lost POST is reconciled by reading inventories, never by retrying it.
+    """
+
+    def __init__(self, scope, request, now=None):
+        require(scope['profile'] == GATEWAY_ACCESS_PROFILE, 'Dedicated policy administration scope required')
+        self.scope, self.request = scope, request
+        self.now = time.time if now is None else now
+        stable_scope = {k: scope[k] for k in ('account_id', 'api_origin', 'network_binding',
+                                             'required_gateway_tcp', 'target_sha256')}
+        self.stem = 'nn-rpc-' + hashlib.sha256(encode(stable_scope)).hexdigest()[:32]
+
+    def review(self):
+        require(self.now() < self.scope['expires_at'], 'Gateway access approval expired')
+        _account_inventory(self.request, self.scope['account_id'])
+        groups = _inventory(self.request, 'groups')
+        peers = _inventory(self.request, 'peers')
+        policies = _inventory(self.request, 'policies')
+        tcp = self.scope['required_gateway_tcp']
+        default, upstream, memberships = _gateway_memberships(groups, peers, tcp)
+        source = _unique_named(groups, self.stem + '-gateway')
+        destination = _unique_named(groups, self.stem + '-upstream')
+        acl = _unique_named(policies, self.stem + '-relay')
+        if source is not None:
+            _exact_peer_group(source, memberships, set())
+        if destination is not None:
+            _exact_peer_group(destination, memberships, {upstream})
+        source_id = source['id'] if source else None
+        destination_id = destination['id'] if destination else None
+        acl_id = acl['id'] if acl else None
+        require(default not in (source_id, destination_id), 'Gateway resources must be dedicated')
+        matches = _gateway_rule_policies(policies, default, source_id,
+                                         {destination_id} if destination_id else set(), tcp['port'])
+        require(matches == ([acl_id] if acl else []), 'Existing gateway access policy is not an exact match')
+        if acl is not None:
+            require(acl['enabled'] is True and len(acl['rules']) == 1
+                    and not acl.get('source_posture_checks'), 'Existing gateway policy is not an exact match')
+        return {
+            'schema': 'nodenetwork-gateway-access-review-v1',
+            'scope_sha256': hashlib.sha256(encode(self.scope)).hexdigest(),
+            'upstream_peer_id': upstream,
+            'default_group_id': default,
+            'tcp': tcp,
+            'gateway_group': {'name': self.stem+'-gateway', 'id': source_id},
+            'upstream_group': {'name': self.stem+'-upstream', 'id': destination_id},
+            'relay_policy': {'name': self.stem+'-relay', 'id': acl_id},
+        }
+
+    def apply(self, state_parent, approved_review_sha256):
+        require(pin(approved_review_sha256), 'Exact native gateway policy review required')
+        current = self.review()
+        require(hashlib.sha256(encode(current)).hexdigest() == approved_review_sha256,
+                'Coordinator scope changed since the native review')
+        directory = Path(state_parent) / self.stem
+        for ancestor in directory.parents:
+            require(not ancestor.is_symlink(), 'Gateway access state ancestry contains a link')
+        directory.mkdir(mode=0o700, exist_ok=True)
+        meta = directory.lstat()
+        require(stat.S_ISDIR(meta.st_mode) and meta.st_uid == os.geteuid()
+                and not meta.st_mode & 0o077, 'Private native gateway policy state required')
+
+        for field in ('gateway_group', 'upstream_group', 'relay_policy'):
+            if current[field]['id'] is not None:
+                continue
+            name = current[field]['name']
+            if field == 'relay_policy':
+                resource = 'policies'
+                body = {'name': name, 'enabled': True, 'rules': [{
+                    'name': name, 'enabled': True, 'action': 'accept', 'bidirectional': False,
+                    'protocol': 'tcp', 'sources': [current['gateway_group']['id']],
+                    'destinations': [current['upstream_group']['id']], 'ports': [str(current['tcp']['port'])],
+                }]}
+            else:
+                resource = 'groups'
+                body = {'name': name, 'peers': [current['upstream_peer_id']] if field == 'upstream_group' else []}
+            require(self.now() < self.scope['expires_at'], 'Gateway access approval expired')
+            # Persist before dispatch. An interrupted call may be observed on a
+            # new review, but its missing receipt does not permit another POST.
+            try:
+                _write_state(directory, field+'.json', {'review_sha256': approved_review_sha256, 'request': body})
+            except FileExistsError:
+                raise ValueError('Original gateway policy request is unresolved; reconcile before retry') from None
+            code, value = self.request('POST', '/api/'+resource, body)
+            require(code in (200, 201) and isinstance(value, dict) and identifier(value.get('id')),
+                    'Coordinator policy write outcome is uncertain; review the original resources')
+            after = self.review()
+            expected = {**current, field: {'name': name, 'id': value['id']}}
+            require(after == expected, 'Coordinator policy write differs from the reviewed resource')
+            current = after
+
+        policy = {key: self.scope[key] for key in PROVIDER_FIELDS | {'network_binding', 'required_gateway_tcp'}}
+        policy.update(profile=GATEWAY_PROFILE, auto_groups=[current['gateway_group']['id']])
+        return {'schema': 'nodenetwork-gateway-access-result-v1', 'review': current, 'provider_policy': policy}
+
+
 class Authorization:
     """One exact intent per private app-owned directory, never retries POST.
 
@@ -334,64 +544,30 @@ class Authorization:
             network_scope(self.policy, self._read('intent.json').get('binding'))
         require(self.cleanup_action is None or action == self.cleanup_action, 'Cleanup capability cannot issue, bind or change action')
         require(self.now() < self.policy['expires_at'] or self.cleanup_action == action and action in ('revoke','retire'), 'Provider approval expired')
-        code, accounts = self.request('GET', '/api/accounts')
-        require(code == 200 and isinstance(accounts, list) and len(accounts) == 1
-                and accounts[0].get('id') == self.policy['account_id'], 'Provider account differs')
+        _account_inventory(self.request, self.policy['account_id'])
 
     def _list(self, resource):
-        code, result = self.request('GET', '/api/' + resource)
-        require(code == 200 and isinstance(result, list) and len(result) <= 8192
-                and all(isinstance(item, dict) and identifier(str(item.get('id', ''))) for item in result)
-                and len({str(item['id']) for item in result}) == len(result), 'Invalid provider inventory')
-        return result
+        return _inventory(self.request, resource)
 
     def _verify_gateway_access(self, peers):
         gateway, = self.policy['auto_groups']
-        groups = {row['id']: row for row in self._list('groups')}
-        all_groups = [group_id for group_id, row in groups.items() if row.get('name') == 'All']
-        require(len(all_groups) == 1 and gateway in groups and gateway != all_groups[0],
-                'Exact dedicated gateway and default groups required')
-
-        upstream = [row for row in peers if row.get('ip') == self.policy['required_gateway_tcp']['ip']]
-        require(len(upstream) == 1, 'Signed gateway upstream must match one VPN peer')
-        memberships = {row['id']: group_ids(row.get('groups')) for row in peers}
-        require(all(gateway not in ids for ids in memberships.values())
-                and type(groups[gateway].get('peers_count')) is int and groups[gateway]['peers_count'] == 0
-                and groups[gateway].get('resources_count', 0) == 0 and not groups[gateway].get('resources'),
-                'Gateway enrollment group must be empty')
-
-        upstream_id = upstream[0]['id']
-        permitted_upstream = {
-            group_id for group_id, group in groups.items()
-            if group_id not in {gateway, all_groups[0]} and group_id in memberships[upstream_id]
-            and type(group.get('peers_count')) is int and group['peers_count'] == 1
-            and group.get('resources_count', 0) == 0 and not group.get('resources')
-            and all(group_id not in ids for peer_id, ids in memberships.items() if peer_id != upstream_id)
-        }
-        approved_rules = 0
-        for policy in self._list('policies'):
-            require(type(policy.get('enabled')) is bool, 'Invalid provider policy state')
-            if not policy['enabled']:
+        tcp = self.policy['required_gateway_tcp']
+        groups = self._list('groups')
+        default, upstream, memberships = _gateway_memberships(groups, peers, tcp)
+        directory = {row['id']: row for row in groups}
+        require(gateway in directory and gateway != default, 'Exact dedicated gateway group required')
+        _exact_peer_group(directory[gateway], memberships, set())
+        allowed = set()
+        for group_id, group in directory.items():
+            if group_id in {gateway, default} or group_id not in memberships[upstream]:
                 continue
-            rules = policy.get('rules')
-            require(isinstance(rules, list), 'Invalid provider policy rules')
-            for rule in rules:
-                require(isinstance(rule, dict) and type(rule.get('enabled')) is bool,
-                        'Invalid provider access rule')
-                if not rule['enabled'] or rule.get('action') == 'drop':
-                    continue
-                require(rule.get('action') == 'accept', 'Unknown provider access rule action')
-                sources = group_ids(rule.get('sources') if rule.get('sources') is not None else [])
-                destinations = group_ids(rule.get('destinations') if rule.get('destinations') is not None else [])
-                if not {gateway, all_groups[0]} & (sources | destinations):
-                    continue
-                require(sources == {gateway} and len(destinations) == 1 and destinations <= permitted_upstream
-                        and rule.get('bidirectional') is False and rule.get('protocol') == 'tcp'
-                        and rule.get('ports') == [str(self.policy['required_gateway_tcp']['port'])]
-                        and not rule.get('port_ranges') and not rule.get('sourceResource')
-                        and not rule.get('destinationResource'), 'A provider rule broadens gateway access')
-                approved_rules += 1
-        require(approved_rules == 1, 'Exact gateway-to-upstream TCP policy required')
+            try:
+                _exact_peer_group(group, memberships, {upstream})
+            except ValueError:
+                continue
+            allowed.add(group_id)
+        matches = _gateway_rule_policies(self._list('policies'), default, gateway, allowed, tcp['port'])
+        require(len(matches) == 1, 'Exact gateway-to-upstream TCP policy required')
 
     def _key(self, key, intent, consumed=False):
         require(isinstance(key, dict) and identifier(str(key.get('id', '')))

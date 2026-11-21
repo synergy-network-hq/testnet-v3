@@ -292,13 +292,13 @@ class AuthorizationTests(unittest.TestCase):
     def test_duplicate_json_and_resource_injection(self):
         with self.assertRaises(ValueError):v.decode(b'{"id":1,"id":2}')
         client=object.__new__(v.HttpsProvider)
-        for gateway in (False, True):
-            client.gateway=gateway
+        for profile in (v.PROFILE, v.GATEWAY_PROFILE):
+            client.profile=profile
             for method,path in [('GET','/api/peers/../accounts'),('POST','/api/accounts'),
                                 ('DELETE','https://foreign/api/peers/one'),
                                 ('POST','/api/groups'),('PUT','/api/policies/gateway-policy')]:
                 with self.assertRaises(ValueError):client.request(method,path)
-        client.gateway=False
+        client.profile=v.PROFILE
         for path in ('/api/groups','/api/policies'):
             with self.assertRaises(ValueError):client.request('GET',path)
     def test_peer_retirement_preserves_identity_and_reconciles_lost_reply(self):
@@ -434,4 +434,129 @@ class AuthorizationTests(unittest.TestCase):
             changed={**server,'wireguard_public_key':base64.b64encode(b'x'*32).decode()}
             owner.public_json=lambda p,private:changed if p==path else self.local
             with self.assertRaises(controller.Refused):owner.vpn_bind({'operation':'vpn_bind'})
-if __name__=='__main__':unittest.main()
+
+class GatewayAccessTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.ca = b'test-provider-ca'
+        self.scope = {
+            'version': 1, 'profile': v.GATEWAY_ACCESS_PROFILE, 'api_origin': 'https://netbird.example',
+            'management_origin': 'https://netbird.example', 'account_id': 'account',
+            'ca_sha256': self.hash(self.ca), 'expires_at': 2000, 'target_sha256': 'a'*64,
+            'network_profile_sha256': 'b'*64,
+            'required_gateway_tcp': {'ip': '10.10.0.2', 'port': 8551},
+            'network_binding': {'network_id': 'independent-canary', 'chain_id': 10, 'formation_sha256': 'c'*64},
+        }
+        self.inventory = {
+            '/api/accounts': [{'id': 'account'}],
+            '/api/peers': [
+                {'id': 'signed-upstream', 'ip': '10.10.0.2', 'groups': [{'id': 'all'}]},
+                {'id': 'unrelated', 'ip': '10.10.0.3', 'groups': [{'id': 'all'}]},
+            ],
+            '/api/groups': [{'id': 'all', 'name': 'All', 'peers_count': 2}],
+            '/api/policies': [],
+        }
+        self.writes = []
+        self.lose = None
+        self.flow = v.GatewayAccess(self.scope, self.request, now=lambda: 1000)
+
+    @staticmethod
+    def hash(raw):
+        return hashlib.sha256(raw).hexdigest()
+
+    def request(self, method, path, body=None):
+        if method == 'GET':
+            return 200, deepcopy(self.inventory[path])
+        self.assertEqual(method, 'POST')
+        self.assertIn(path, ('/api/groups', '/api/policies'))
+        new_id = 'created-'+str(len(self.writes))
+        self.writes.append((path, deepcopy(body)))
+        if self.lose == 'before-write':
+            raise OSError('unconfirmed remote result')
+        created = {'id': new_id, **body}
+        if path == '/api/groups':
+            members = body['peers']
+            created.update(issued='api', peers_count=len(members), peers=[{'id': i} for i in members])
+            for peer in self.inventory['/api/peers']:
+                if peer['id'] in members:
+                    peer['groups'].append({'id': new_id})
+        else:
+            for key in ('sources', 'destinations'):
+                created['rules'][0][key] = [{'id': i} for i in body['rules'][0][key]]
+        self.inventory[path].append(deepcopy(created))
+        if self.lose == 'after-write':
+            raise OSError('reply lost')
+        return 200, created
+
+    def approve(self):
+        return self.hash(v.encode(self.flow.review()))
+
+    def test_safe_review_apply_and_reconcile_existing_exact_roles(self):
+        pin = self.approve()
+        self.assertEqual(self.writes, [])
+        result = self.flow.apply(self.root, pin)
+        self.assertEqual([path for path, _ in self.writes], ['/api/groups', '/api/groups', '/api/policies'])
+        self.assertEqual(self.writes[0][1]['peers'], [])
+        self.assertEqual(self.writes[1][1]['peers'], ['signed-upstream'])
+        (rule,) = self.writes[2][1]['rules']
+        self.assertEqual((rule['sources'], rule['destinations'], rule['ports'], rule['bidirectional']),
+                         (['created-0'], ['created-1'], ['8551'], False))
+        policy = v.encode(result['provider_policy'])
+        approved = v.provider_policy(policy, self.hash(policy), self.ca, 1000)
+        flow = v.Authorization(self.root/'enrollment', approved, self.request, now=lambda: 1000)
+        flow._verify_gateway_access(self.inventory['/api/peers'])
+        self.assertEqual(self.flow.apply(self.root, self.approve()), result)
+        self.assertEqual(len(self.writes), 3)
+
+    def test_drift_after_review_and_default_policy_refuse_without_writes(self):
+        pin = self.approve()
+        self.inventory['/api/peers'][0]['id'] = 'other-peer'
+        with self.assertRaisesRegex(ValueError, 'changed since the native review'):
+            self.flow.apply(self.root, pin)
+        self.inventory['/api/policies'] = [{'id': 'default', 'enabled': True, 'rules': [
+            {'enabled': True, 'action': 'accept', 'sources': [{'id': 'all'}], 'destinations': [{'id': 'all'}]},
+        ]}]
+        with self.assertRaisesRegex(ValueError, 'broadens gateway access'):
+            self.flow.review()
+        self.assertEqual(self.writes, [])
+
+    def test_interrupted_create_observes_exact_resource_and_never_replays(self):
+        self.lose = 'after-write'
+        with self.assertRaises(OSError):
+            self.flow.apply(self.root, self.approve())
+        self.lose = None
+        self.assertEqual(self.flow.review()['gateway_group']['id'], 'created-0')
+        self.flow.apply(self.root, self.approve())
+        self.assertEqual(len(self.writes), 3)
+        self.assertEqual(sum(body.get('peers') == [] for _, body in self.writes), 1)
+
+    def test_uncertain_absence_does_not_allow_another_ungoverned_write(self):
+        self.lose = 'before-write'
+        with self.assertRaises(OSError):
+            self.flow.apply(self.root, self.approve())
+        self.lose = None
+        with self.assertRaisesRegex(ValueError, 'unresolved'):
+            self.flow.apply(self.root, self.approve())
+        self.assertEqual(len(self.writes), 1)
+
+    def test_access_scope_and_transport_cannot_issue_or_mutate_existing_resources(self):
+        raw = v.encode(self.scope)
+        pin = self.hash(raw)
+        self.assertEqual(v.gateway_access_scope(raw, pin, self.ca, 1000), self.scope)
+        for debug_time, document_pin in ((2000, pin), (1000, '0'*64)):
+            with self.assertRaises(ValueError):
+                v.gateway_access_scope(raw, document_pin, self.ca, debug_time)
+        with self.assertRaises(ValueError):
+            v.provider_policy(raw, pin, self.ca, 1000)
+        client = object.__new__(v.HttpsProvider)
+        client.profile = v.GATEWAY_ACCESS_PROFILE
+        for method, path in (('POST', '/api/setup-keys'), ('DELETE', '/api/peers/id'),
+                             ('PUT', '/api/policies/id'), ('DELETE', '/api/groups/id')):
+            with self.assertRaisesRegex(ValueError, 'Unsupported provider resource'):
+                client.request(method, path, {} if method == 'POST' else None)
+
+
+if __name__ == '__main__':
+    unittest.main()
