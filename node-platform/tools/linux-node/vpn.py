@@ -48,14 +48,27 @@ def client_environment(root):
         require(pin(pins.get(name)),'Both approved VPN provider and CA required')
         raw[name]=c.direct(path,True,128*1024 if name.endswith('.pem') else 16384).read_bytes()
         require(hashlib.sha256(raw[name]).hexdigest()==pins[name],'Approved VPN trust artifact changed')
+    from vpn_authorization import GATEWAY_PROFILE, network_scope
     provider=json.loads(raw['vpn-provider.json'])
     require(isinstance(provider,dict) and type(provider.get('version')) is int and provider['version']==1
-            and provider.get('profile') in ('nodenetwork-debug-vpn-provider-v1','nodenetwork-controlled-canary-v1')
+            and provider.get('profile') in ('nodenetwork-debug-vpn-provider-v1','nodenetwork-controlled-canary-v1',GATEWAY_PROFILE)
             and provider.get('ca_sha256')==pins['vpn-ca.pem'],'Only exact isolated engineering CA scope is supported')
-    from vpn_authorization import network_scope
     selection=policy.get('engineering_selection',{})
     network_scope(provider,{'network_id':selection.get('network_id'),'chain_id':selection.get('chain_id'),
                             'formation_sha256':policy.get('validator_formation_sha256')})
+    receipt_path = root/'installation.json'
+    receipt = c.public_json(receipt_path, True) if receipt_path.exists() or receipt_path.is_symlink() else {}
+    is_gateway = receipt.get('role') == 'rpc_gateway'
+    require((provider['profile'] == GATEWAY_PROFILE) == is_gateway, 'VPN trust profile does not match the installed role')
+    if is_gateway:
+        from canary_rpc_relay import _gateway_profile
+        require(receipt.get('gateway_commissioned') is True
+                and all(receipt.get(key) == selection.get(key) for key in ('network_id', 'chain_id')),
+                'Gateway VPN trust requires the commissioned network')
+        profile, _ = _gateway_profile(c, policy, receipt)
+        require(profile is None or profile['gateway']['vpn_provider_sha256'] == pins['vpn-provider.json'],
+                'VPN provider differs from the installed network profile')
+        gateway_target(root, provider['required_gateway_tcp'])
     ca=raw['vpn-ca.pem']
     require(b'PRIVATE KEY' not in ca and ca.count(b'-----BEGIN CERTIFICATE-----')>=1,'Public CA certificate required')
     context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -834,13 +847,15 @@ def diagnostics(root, enrollment, *, observe_live=None):
             raw = controller.direct(root/'tmp/controller/authorization/inputs/vpn-provider.json', True, 16384).read_bytes()
             require(hashlib.sha256(raw).hexdigest() == pins['vpn-provider.json'], 'VPN provider changed')
             provider = json.loads(raw)
-            peers = provider['required_peer_ips']
-            require(isinstance(peers, list) and 0 < len(peers) <= 5
-                    and len(set(peers)) == len(peers), 'Invalid approved VPN peer set')
-            for peer in peers:
-                address = ipaddress.ip_address(peer)
-                require(str(address) == peer and not (address.is_loopback or address.is_unspecified
-                        or address.is_multicast or address.is_link_local), 'Invalid approved peer')
+            from vpn_authorization import GATEWAY_PROFILE
+            if provider['profile'] != GATEWAY_PROFILE:
+                peers = provider['required_peer_ips']
+                require(isinstance(peers, list) and 0 < len(peers) <= 5
+                        and len(set(peers)) == len(peers), 'Invalid approved VPN peer set')
+                for peer in peers:
+                    address = ipaddress.ip_address(peer)
+                    require(str(address) == peer and not (address.is_loopback or address.is_unspecified
+                            or address.is_multicast or address.is_link_local), 'Invalid approved peer')
         result['trust']['mode'] = 'approved_private_ca' if 'SSL_CERT_FILE' in environment else 'system'
     except (ValueError, OSError, KeyError, TypeError):
         result['trust']['error_code'] = 'approved_trust_scope_refused'

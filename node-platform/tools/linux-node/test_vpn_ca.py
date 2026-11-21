@@ -55,6 +55,42 @@ class CaTests(unittest.TestCase):
   self.policy['validator_formation_sha256']='d'*64;self.save(self.root/'tmp/controller/policy.json',self.policy)
   with self.context(),self.assertRaises(ValueError):vpn.client_environment(self.root)
 
+ def test_gateway_ca_requires_commissioned_role_and_exact_signed_upstream(self):
+  from canary_rpc_relay import CONFIG
+  from vpn_authorization import GATEWAY_PROFILE
+  scope = {'network_id':'independent-network','chain_id':135}
+  configured = {'ip':'10.69.1.2','port':9451}
+  self.provider.update(profile=GATEWAY_PROFILE,network_binding={**scope,'formation_sha256':'c'*64},
+                       required_gateway_tcp=configured)
+  self.policy.update(engineering_selection=scope,validator_formation_sha256='c'*64)
+  self.approve()
+  for name in ('config','network'):
+   (self.root/name).mkdir(mode=0o700)
+  self.save(self.root/CONFIG,{'role':{'kind':'gateway','validator_address':'upstream','validator_relay_port':9451}})
+  self.save(self.root/'network/transport-registry.json',{'payload':{'validators':[
+   {'node_address':'upstream','revoked':False,'dial_address':'10.69.1.2:30333'}]}})
+  receipt = {**scope,'role':'rpc_gateway','gateway_commissioned':True}
+  self.save(self.root/'installation.json',receipt)
+  provider_pin = self.policy['authorization_files']['vpn-provider.json']
+  profile = {'gateway':{'vpn_provider_sha256':provider_pin}}
+  with self.context(),patch('canary_rpc_relay._gateway_profile',return_value=(profile,None)),patch.object(vpn.os,'execve') as run:
+   vpn.client_exec(self.root,['status','--json'])
+   self.assertEqual(run.call_args.args[2]['SSL_CERT_FILE'],str(self.inputs/'vpn-ca.pem'))
+  for change in ({'role':'validator'},{'gateway_commissioned':False},{'chain_id':136}):
+   self.save(self.root/'installation.json',{**receipt,**change})
+   with self.context(),self.assertRaises(ValueError):vpn.client_environment(self.root)
+  self.save(self.root/'installation.json',receipt)
+  self.provider['required_gateway_tcp']={'ip':configured['ip'],'port':9452}
+  self.approve()
+  with self.context(),self.assertRaisesRegex(ValueError,'approved gateway TCP endpoint'):
+   vpn.client_environment(self.root)
+  with self.context(),patch('canary_rpc_relay._gateway_profile',return_value=(profile,None)),self.assertRaisesRegex(ValueError,'installed network profile'):
+   vpn.client_environment(self.root)
+  self.provider['profile']='nodenetwork-controlled-canary-v1'
+  self.approve()
+  with self.context(),self.assertRaisesRegex(ValueError,'does not match the installed role'):
+   vpn.client_environment(self.root)
+
  def test_ordinary_profile_keeps_system_trust_and_creates_no_ca(self):
   with patch.dict(os.environ,{'EXISTING_ENV':'kept'},clear=True):
    env=vpn.client_environment(self.root)

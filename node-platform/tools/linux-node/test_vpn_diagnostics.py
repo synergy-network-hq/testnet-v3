@@ -21,7 +21,8 @@ class VpnDiagnosticsTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.provider = self.root/'tmp/controller/authorization/inputs/vpn-provider.json'
         self.provider.parent.mkdir(parents=True)
-        self.provider.write_text(json.dumps({'required_peer_ips': ['10.69.51.205']}))
+        self.provider.write_text(json.dumps({'profile': 'nodenetwork-controlled-canary-v1',
+                                            'required_peer_ips': ['10.69.51.205']}))
         self.fake_controller = Mock()
         self.fake_controller.policy.return_value = {'authorization_files': {
             'vpn-provider.json': hashlib.sha256(self.provider.read_bytes()).hexdigest()}}
@@ -58,6 +59,17 @@ class VpnDiagnosticsTests(unittest.TestCase):
         self.assertFalse(result['mutation_performed'])
         self.assertNotIn('NEVER-RETURN', json.dumps(result))
         self.assertEqual(len(self.commands), 3)
+
+    def test_gateway_observes_connection_without_requiring_validator_icmp_policy(self):
+        self.provider.write_text(json.dumps({'profile': 'nodenetwork-controlled-gateway-v1',
+                                            'required_gateway_tcp': {'ip': '10.69.51.205', 'port': 8551}}))
+        self.fake_controller.policy.return_value['authorization_files']['vpn-provider.json'] = hashlib.sha256(self.provider.read_bytes()).hexdigest()
+        with patch.object(vpn, 'native', side_effect=self.native):
+            result = vpn.diagnostics(self.root, self.enrollment)
+        self.assertTrue(result['client']['management_connected'])
+        self.assertEqual(result['trust'], {'mode': 'approved_private_ca', 'error_code': None})
+        self.assertEqual(result['peers'], [])
+        self.assertEqual(len(self.commands), 1)
 
     def test_live_sample_is_shared_once_before_any_protocol_probes(self):
         samples=[]

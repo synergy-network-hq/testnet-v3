@@ -94,7 +94,10 @@ class EngineeringUpdateTests(unittest.TestCase):
     def test_native_staging_preserves_exact_expired_commission_grant_across_exchange(self):
         self._native_stage_fixture(True)
 
-    def _native_stage_fixture(self,preserve):
+    def test_commissioned_gateway_stages_software_while_its_relay_is_stopped(self):
+        self._native_stage_fixture(False, gateway=True)
+
+    def _native_stage_fixture(self,preserve,gateway=False):
         import ctypes
         import hashlib
         import io
@@ -104,6 +107,7 @@ class EngineeringUpdateTests(unittest.TestCase):
         import tempfile
         from contextlib import ExitStack
         from types import SimpleNamespace
+        import apqe_layout
         import lifecycle
         import synergy_linux
         from test_bootstrap import BootstrapTests
@@ -120,7 +124,6 @@ class EngineeringUpdateTests(unittest.TestCase):
             policy_path=control/'policy.json';policy_path.write_text(json.dumps(policy));policy_path.chmod(0o600)
             expected_grants=[]
             if preserve:
-                import apqe_layout
                 import controller as current_controller
                 for name in ('config','network','keys'):(root/name).mkdir(mode=0o700)
                 policy['engineering_authorization'].update(expires_at=100,sequence=21)
@@ -142,7 +145,10 @@ class EngineeringUpdateTests(unittest.TestCase):
                 context['commission_grant_preservation']=b.update_commission_grant(root,policy,1000)
             package,header=BootstrapTests().archive();context['release_id']=header['release_id'];context['manifest_sha256']=header['manifest_sha256']
             receipt={'role':'validator','network_id':selection['network_id'],'chain_id':99999,'node_name':selection['node_name'],'package_sha256':selection['manifest_sha256']}
+            if gateway:
+                receipt.update(role='rpc_gateway',gateway_commissioned=True,consensus_started=False)
             real_stat=Path.stat;real_lstat=Path.lstat
+            real_fstat=os.fstat
             def owned(call):
                 def result(path,*args,**kwargs):
                     value=call(path,*args,**kwargs)
@@ -156,6 +162,7 @@ class EngineeringUpdateTests(unittest.TestCase):
                 stack.enter_context(patch.object(b,'ROOT',root));stack.enter_context(patch.object(b.os,'geteuid',return_value=0))
                 stack.enter_context(patch.object(b.sys,'platform','linux'));stack.enter_context(patch.object(b.os,'uname',return_value=SimpleNamespace(machine='x86_64')))
                 stack.enter_context(patch.object(Path,'stat',owned(real_stat)));stack.enter_context(patch.object(Path,'lstat',owned(real_lstat)))
+                stack.enter_context(patch.object(os,'fstat',owned(real_fstat)))
                 stack.enter_context(patch.object(ctypes,'CDLL',return_value=SimpleNamespace(renameat2=exchange)))
                 stack.enter_context(patch.object(lifecycle,'_sealed_receipt',return_value=(receipt,{'release_id':selection['release_id']})))
                 stack.enter_context(patch.object(lifecycle,'_unit_state',return_value={'MainPID':'0','ActiveState':'inactive'}))
@@ -165,7 +172,13 @@ class EngineeringUpdateTests(unittest.TestCase):
                 stack.enter_context(patch.object(synergy_linux,'verify_package',side_effect=lambda path:json.loads((path/'package.json').read_bytes())))
                 stack.enter_context(patch('time.time',return_value=1000))
                 stack.enter_context(patch.object(b,'NATIVE_AUTHENTICATED_UPDATE_CONTEXT',context,create=True))
-                for key,value in [('network_id','foreign'),('chain_id',1266),('node_name','other'),('role','rpc_gateway')]:
+                if gateway:
+                    stack.enter_context(patch('canary_rpc_relay.validate_gateway_layout'))
+                    def relay_active(unit):
+                        return {'MainPID':'123','ActiveState':'active'} if 'rpc-relay' in unit else {'MainPID':'0','ActiveState':'inactive'}
+                    with patch.object(lifecycle,'_unit_state',side_effect=relay_active),self.assertRaisesRegex(ValueError,'Stop the attributed gateway relay'):
+                        b.stage_engineering_update(io.BytesIO(),header['release_id'],header['manifest_sha256'])
+                for key,value in [('network_id','foreign'),('chain_id',1266),('node_name','other'),('role','unmanaged'),('gateway_commissioned',False) if gateway else ('role','rpc_gateway')]:
                     changed_receipt={**receipt,key:value}
                     with patch.object(lifecycle,'_sealed_receipt',return_value=(changed_receipt,{'release_id':selection['release_id']})),self.assertRaises(ValueError):
                         b.stage_engineering_update(io.BytesIO(),header['release_id'],header['manifest_sha256'])

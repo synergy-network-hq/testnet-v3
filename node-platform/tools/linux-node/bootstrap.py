@@ -997,9 +997,17 @@ def stage_engineering_update(stream, release_id, pin, reconcile=False):
         previous=effective_engineering_selection(root,policy)
         update_phase('context')
         context=engineering_update_context(policy,previous,release_id,pin,int(time.time()))
-        require(receipt.get('role')=='validator'
+        role = receipt.get('role')
+        require((role=='validator' or role=='rpc_gateway' and receipt.get('gateway_commissioned') is True
+                 and receipt.get('consensus_started') is False)
                 and all(receipt.get(key)==previous[key] for key in ('network_id','chain_id','node_name')),
-                'Installed validator differs from the independently approved engineering selection')
+                'Installed node differs from the independently approved engineering selection')
+        if role == 'rpc_gateway':
+            from canary_rpc_relay import validate_gateway_layout
+            validate_gateway_layout(root)
+            relay = _unit_state('synergy-canary-rpc-relay.service')
+            require(relay.get('MainPID')=='0' and relay.get('ActiveState') in ('inactive','failed'),
+                    'Stop the attributed gateway relay before adopting an update')
         update_phase('namespace')
         control_inventory(root)
         update_phase('requests')
