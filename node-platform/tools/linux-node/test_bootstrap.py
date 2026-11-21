@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -38,6 +39,22 @@ class BootstrapTests(unittest.TestCase):
             result=b.extract(data,stage,header)
             self.assertEqual(result['release_id'],'qualified-test-only')
             self.assertEqual(len(list((stage/'roles').iterdir())),21)
+    def test_verified_stage_prepares_private_binary_modes_only(self):
+        data,header=self.archive()
+        with tempfile.TemporaryDirectory() as temporary:
+            stage=Path(temporary)
+            manifest=b.extract(data,stage,header)
+            node=stage/'bin/synergy-node'
+            self.assertEqual(stat.S_IMODE(node.stat().st_mode),0o600)
+            b.prepare_stage_executables(stage,manifest)
+            b.prepare_stage_executables(stage,manifest)
+            self.assertEqual(stat.S_IMODE(node.stat().st_mode),0o700)
+            self.assertEqual(stat.S_IMODE((stage/'tools/controller.py').stat().st_mode),0o600)
+            node.chmod(0o600)
+            node.write_bytes(b'different binary')
+            with self.assertRaisesRegex(ValueError,'changed after verification'):
+                b.prepare_stage_executables(stage,manifest)
+            self.assertEqual(stat.S_IMODE(node.stat().st_mode),0o600)
     def test_bad_manifest_pin_fails_before_payload_write(self):
         data,header=self.archive();header['manifest_sha256']='0'*64
         with tempfile.TemporaryDirectory() as temporary:

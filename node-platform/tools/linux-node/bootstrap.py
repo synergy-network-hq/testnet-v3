@@ -25,6 +25,7 @@ ROOT=Path('/opt/synergy')
 LIMIT=256*1024*1024
 ENGINE=('controller.py','synergy_linux.py','lifecycle.py','conformance.py','apqe_layout.py','vpn.py','canary_rpc_relay.py','root_guard.py')
 OPTIONAL_ENGINE=('guest_lifecycle.py','vpn_authorization.py','treasury_send.py','runtime_probe.py')
+STAGE_EXECUTABLES=('bin/synergy-node','bin/synergy-keytool','bin/synergy-genesis','bin/netbird')
 def engine_names(files):
     return (*ENGINE,*(name for name in OPTIONAL_ENGINE if 'tools/'+name in files))
 
@@ -202,21 +203,27 @@ def verify_executable_stage(stage):
     from synergy_linux import verify_package
     manifest=verify_package(stage)
     require_frozen_tree(stage)
-    for name in ('synergy-node','synergy-keytool','synergy-genesis','netbird'):
-        member='bin/'+name
+    prepare_stage_executables(stage,manifest)
+    return manifest
+
+
+def prepare_stage_executables(stage,manifest):
+    """Make only authenticated master executables runnable by their owner."""
+    for member in STAGE_EXECUTABLES:
         if member not in manifest['files']:continue
         fd=os.open(stage/member,os.O_RDONLY|os.O_NOFOLLOW)
         try:
             info=os.fstat(fd)
-            require(stat.S_ISREG(info.st_mode) and info.st_nlink==1,'Exact regular staged binary required')
+            require(stat.S_ISREG(info.st_mode) and info.st_nlink==1 and info.st_uid==os.geteuid()
+                    and stat.S_IMODE(info.st_mode) in (0o600,0o700),'Exact private staged binary required')
             with os.fdopen(os.dup(fd),'rb') as source:
                 digest=hashlib.sha256()
                 for chunk in iter(lambda:source.read(1024*1024),b''):digest.update(chunk)
                 require(digest.hexdigest()==manifest['files'][member],
                         'Staged binary changed after verification')
-            os.fchmod(fd,0o700);os.fsync(fd)
+            if stat.S_IMODE(info.st_mode)!=0o700:
+                os.fchmod(fd,0o700);os.fsync(fd)
         finally:os.close(fd)
-    return manifest
 
 
 def host_contents(public_key):
@@ -272,6 +279,7 @@ def bootstrap(stream):
     try:
         stage.mkdir(parents=True,mode=0o700)
         manifest=extract(stream,stage,header)
+        prepare_stage_executables(stage,manifest)
         for name in engine_names(manifest['files']):
             target=control/'controller.py' if name=='controller.py' else control/'tools'/name
             save(target,(stage/'tools'/name).read_bytes())
@@ -329,11 +337,12 @@ def bootstrap(stream):
         raise
 
 
-def bare_metadata(path, maximum=1024*1024):
+def bare_metadata(path, maximum=1024*1024, *, staged_executable=False):
     require(path.is_absolute() and path.resolve()==path,'Bare bootstrap path contains a link')
     metadata=path.lstat()
+    modes=(0o600,0o700) if staged_executable else (0o600,)
     require(stat.S_ISREG(metadata.st_mode) and metadata.st_uid==0 and metadata.st_nlink==1
-            and stat.S_IMODE(metadata.st_mode)==0o600 and metadata.st_size<=maximum,
+            and stat.S_IMODE(metadata.st_mode) in modes and metadata.st_size<=maximum,
             'Bare bootstrap file is unsafe')
     return metadata
 
@@ -343,8 +352,8 @@ def bare_file(path, maximum=1024*1024):
     return path.read_bytes()
 
 
-def bare_digest(path, maximum=LIMIT):
-    bare_metadata(path,maximum)
+def bare_digest(path, maximum=LIMIT, *, staged_executable=False):
+    bare_metadata(path,maximum,staged_executable=staged_executable)
     digest=hashlib.sha256()
     with path.open('rb') as stream:
         for chunk in iter(lambda:stream.read(1024*1024),b''):digest.update(chunk)
@@ -355,6 +364,7 @@ def bare_tree(root, manifest, authorization_files=()):
     """Exact bootstrap-only namespace; never a generic installation remover."""
     stage=root/'tmp/bootstrap-master'
     limit=master_archive_limit(manifest)
+    executable_files={stage/name for name in STAGE_EXECUTABLES}
     files={'tmp/controller/policy.json','tmp/bootstrap-master/package.json',*authorization_files}
     files|={'tmp/bootstrap-master/'+name for name in manifest['files']}
     files|={'tmp/controller/'+name if name=='controller.py' else 'tmp/controller/tools/'+name
@@ -388,7 +398,7 @@ def bare_tree(root, manifest, authorization_files=()):
                 observed_dirs.add(relative)
             else:
                 require(relative in files,'Bare bootstrap contains state, authorization or unknown files')
-                bare_metadata(path,limit);total+=metadata.st_size
+                bare_metadata(path,limit,staged_executable=path in executable_files);total+=metadata.st_size
                 require(total<=limit+4*1024*1024,'Bare namespace exceeds byte bound')
                 observed_files.add(relative)
             snapshot.append([relative,metadata.st_dev,metadata.st_ino,metadata.st_mode,metadata.st_size,
@@ -580,7 +590,8 @@ def bare_snapshot(release_id,pin):
     require(set(policy['engine_files'])==set(engine_names(manifest['files']))
             and set(policy['host_files'])=={'authorized_keys','sshd.conf','sudoers'},'Bare engine/host inventory differs')
     for name,expected in manifest['files'].items():
-        require(bare_digest(stage/name,master_archive_limit(manifest))==expected,'Bare staged payload drift')
+        require(bare_digest(stage/name,master_archive_limit(manifest),staged_executable=name in STAGE_EXECUTABLES)==expected,
+                'Bare staged payload drift')
     for name,expected in policy['engine_files'].items():
         path=root/'tmp/controller'/name if name=='controller.py' else root/'tmp/controller/tools'/name
         require(manifest['files'].get('tools/'+name)==expected
@@ -1357,7 +1368,31 @@ def transport_authorization(continuation,inputs,doc,policy):
         and all(doc['artifacts']['commissioning/network/'+n]==v for n,v in doc['genesis_pins'].items()))
 
 
-def stage_engineering_authorization(stream):
+def prepare_existing_gateway_stage(controller,policy,doc,pin):
+    """Complete executable preparation without replacing an enrolled stage or grant."""
+    from controller import request_digest
+    from synergy_linux import _staged_master, read
+
+    keys=('release_id','manifest_sha256','network_id','chain_id','node_name')
+    selection={key:doc[key] for key in keys}
+    require(policy.get('engineering_initial_authorization_sha256')==pin
+            and policy.get('engineering_selection')==selection
+            and policy.get('engineering_target')==doc['target']
+            and policy.get('authorization_files')==doc['artifacts']
+            and doc['sequence']==1 and doc['target']['kind']=='remote'
+            and 'guest' not in doc['target'] and 'network-provisioning.json' in doc['artifacts'],
+            'Gateway preparation requires the original authenticated remote profile and master')
+    request={'version':1,'operation':'gateway_install','parameters':selection}
+    require(doc['requests']==[{'operation':'gateway_install','request_sha256':request_digest(request)}],
+            'Gateway preparation requires the original exact installation grant')
+    controller.authorize(request,consume=False)
+    package,manifest,_=controller.approved_package(selection,bootstrap=True)
+    require('rpc_gateway' in read(package/'roles/roles.json')['implemented'],'Gateway role is unavailable')
+    _staged_master(controller.root,package,selection['manifest_sha256'])
+    prepare_stage_executables(package,manifest)
+
+
+def stage_engineering_authorization(stream, *, prepare_gateway_stage=False):
     """Atomic exact engineering grants through the native application's admin transport.
 
     No renderer pin or package content can authorize itself. Repeating an applied
@@ -1399,6 +1434,12 @@ def stage_engineering_authorization(stream):
         # Read-only reconciliation precedes expiration checks; never grants twice.
         previous=policy.get('engineering_authorization')
         reconciled=authorization_reconciliation(policy,pin,wire['authorization'])
+        if prepare_gateway_stage:
+            require(reconciled is not None and not replacement.exists() and not replacement.is_symlink(),
+                    'Verify the exact prior initial gateway authorization before preparing its stage')
+            doc=authorization_document(wire['authorization'],pin,int(time.time()))
+            prepare_existing_gateway_stage(Controller(ROOT),policy,doc,pin)
+            return {**reconciled,'gateway_stage_prepared':True}
         if reconciled is not None:
             if replacement.exists() or replacement.is_symlink():
                 require(replacement.is_dir() and not replacement.is_symlink()
@@ -2870,8 +2911,8 @@ def main():
             operation=bare_rollback(sys.argv[2],sys.argv[3])
         elif len(sys.argv)==5 and sys.argv[1]=='--bare-rollback-apply':
             operation=bare_rollback(sys.argv[2],sys.argv[3],sys.argv[4])
-        elif len(sys.argv)==2 and sys.argv[1]=='--stage-engineering-authorization':
-            operation=stage_engineering_authorization(sys.stdin.buffer)
+        elif len(sys.argv)==2 and sys.argv[1] in ('--stage-engineering-authorization','--prepare-existing-gateway-stage'):
+            operation=stage_engineering_authorization(sys.stdin.buffer,prepare_gateway_stage=sys.argv[1]=='--prepare-existing-gateway-stage')
         elif len(sys.argv)==4 and sys.argv[1]=='--reconcile-engineering-update':
             operation=stage_engineering_update(None,sys.argv[2],sys.argv[3],reconcile=True)
         elif len(sys.argv)==4 and sys.argv[1]=='--stage-engineering-update':
