@@ -123,6 +123,29 @@ class AuthorizationTests(unittest.TestCase):
         self.assertEqual(flow.cancel_unused(self.unused()),proof)
         self.assertFalse(any(call.args[0]=='DELETE' for call in self.request.call_args_list))
         with self.assertRaises(ValueError):flow.prepare(self.b)
+
+    def test_undispatched_gateway_key_can_be_cancelled_only_if_unused_and_peer_absent(self):
+        self.issue(self.gateway_inventory())
+        status = {**self.unused(), 'attempt_sha256': None, 'scope_sha256': None,
+                  'retry_after_sha256': None, 'pending_cancellation_sha256': None, 'attempt_scopes': []}
+        for attempted, peers, keys in (
+                ({**status, 'quiescent': False}, [], [self.key]),
+                ({**status, 'attempt_scopes': ['e'*64]}, [], [self.key]),
+                (status, [self.peer], [self.key]),
+                (status, [], [{**self.key, 'used_times': 1}])):
+            flow = self.flow([self.account, (200, peers), (200, keys)])
+            with self.assertRaises(ValueError):
+                flow.cancel_unused(attempted)
+            self.assertTrue(all(call.args[0] == 'GET' for call in self.request.call_args_list))
+        flow = self.flow([self.account, (200, []), (200, [self.key]), (204, None),
+                          (404, None), (200, []), (200, [])])
+        proof = flow.cancel_unused(status)
+        self.assertEqual(proof['format'], 'nodenetwork-vpn-undispatched-cancellation-v1')
+        self.assertIsNone(proof['attempt_sha256'])
+        self.assertEqual(sum(call.args[0] == 'DELETE' for call in self.request.call_args_list), 1)
+        flow = self.flow([self.account, (200, []), (404, None), (200, []), (200, [])])
+        self.assertEqual(flow.cancel_unused(status), proof)
+        self.assertTrue(all(call.args[0] == 'GET' for call in self.request.call_args_list))
     def test_unused_cancellation_used_or_matching_peer_never_deletes(self):
         self.issue()
         for responses in ([self.account,(200,[self.peer])],

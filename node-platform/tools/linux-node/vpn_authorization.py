@@ -705,13 +705,22 @@ class Authorization:
                 and issued.get('binding')==intent['binding'] and issued.get('name')==intent['name']
                 and identifier(issued.get('setup_key_id')),'Original issued VPN intent differs')
         require(isinstance(local,dict) and local.get('schema')=='nodenetwork-vpn-unused-preflight-v1'
-                and local.get('quiescent') is True and pin(local.get('attempt_sha256'))
+                and local.get('quiescent') is True and 'attempt_sha256' in local
                 and local.get('binding')==intent['binding'],'Exact quiescent original target required')
-        proof={'format':'nodenetwork-vpn-unused-cancellation-v1','binding':intent['binding'],
+        attempt = local['attempt_sha256']
+        undispatched = (self.policy['profile'] == GATEWAY_PROFILE and attempt is None
+                        and 'attempt_sha256' not in intent['binding']
+                        and local.get('attempt_scopes') == []
+                        and all(field in local and local[field] is None for field in
+                                ('scope_sha256', 'retry_after_sha256', 'pending_cancellation_sha256')))
+        require(pin(attempt) or undispatched, 'Exact attempted or undispatched gateway required')
+        proof_format = ('nodenetwork-vpn-undispatched-cancellation-v1' if undispatched
+                        else 'nodenetwork-vpn-unused-cancellation-v1')
+        proof={'format':proof_format,'binding':intent['binding'],
                'provider_sha256':intent['provider_sha256'],'account_id':intent['account_id'],
                'setup_key_id':issued['setup_key_id'],'name':intent['name'],
                'intent_sha256':hashlib.sha256(encode(intent)).hexdigest(),
-               'attempt_sha256':local['attempt_sha256'],'unused_verified':True,
+               'attempt_sha256':attempt,'unused_verified':True,
                'setup_key_absent':True,'peer_absence_verified':True}
         def no_peer():
             require(not any(peer.get('name')==intent['name'] for peer in self._list('peers')),

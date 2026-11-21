@@ -65,9 +65,16 @@ class VpnReconciliationTests(unittest.TestCase):
         return self.owner.vpn_bind({'version':1,'operation':'vpn_bind','parameters':{}})
 
     def test_gateway_recovery_checks_restricted_scope_before_grant_and_restores_no_probe_claim(self):
+        from canary_rpc_relay import CONFIG
         import synergy_linux
         synergy_linux.write_new(self.root/'installation.json',{'role':'rpc_gateway','chain_id':99999})
         self.provider.update(profile='nodenetwork-controlled-gateway-v1',required_gateway_tcp={'ip':'10.69.1.2','port':8551})
+        (self.root/'config').mkdir()
+        (self.root/'network').mkdir()
+        synergy_linux.write_new(self.root/CONFIG, {'role':{'kind':'gateway',
+            'validator_address':'upstream','validator_relay_port':8551}})
+        synergy_linux.write_new(self.root/'network/transport-registry.json', {'payload':{'validators':[
+            {'node_address':'upstream','dial_address':'10.69.1.2:30333','revoked':False}]}})
         self.write_inputs()
         with patch.object(lifecycle,'_sealed_receipt',return_value=({'role':'rpc_gateway'},{})),patch('canary_rpc_relay.gateway_vpn_recovery_scope',side_effect=ValueError('foreign signed target')):
             with self.assertRaises(ValueError):self.bind()
