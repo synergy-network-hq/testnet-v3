@@ -43,7 +43,7 @@ class BootPolicyTests(unittest.TestCase):
   with audit.open('a') as out:out.write(json.dumps({'operation':'boot_policy','request_sha256':c.request_digest(request),'time':1})+'\n')
   audit.chmod(0o600)
  def observe(self,args,**kw):
-  self.assertEqual(args[:2],['systemctl','is-enabled']);self.assertIn(args[2],life.UNITS)
+  self.assertEqual(args[:2],['systemctl','is-enabled']);self.assertIn(args[2],(*life.UNITS,life.RELAY_UNIT))
   enabled=(self.units/'multi-user.target.wants'/args[2]).is_symlink()
   return Mock(returncode=0 if enabled else 1,stdout=b'enabled\n' if enabled else b'linked\n')
  def native(self,args,**kw):
@@ -52,6 +52,21 @@ class BootPolicyTests(unittest.TestCase):
   if args[1]=='daemon-reload':return b''
   self.fail('Unexpected runtime command')
  def mutations(self):return self.calls
+ def gateway_installation(self):
+  self.receipt={'role':'rpc_gateway','network_id':'network','chain_id':99999,'gateway_commissioned':True}
+  life._sealed_receipt.return_value=(self.receipt,{})
+  (self.root/'data').rmdir()
+  self.write('tmp/gateway-target/commissioned.json',{})
+  unit=life.RELAY_UNIT
+  target=self.root/'systemd'/unit
+  target.write_text('exact owned '+unit);target.chmod(0o600)
+  path=self.units/unit;path.symlink_to(target)
+  plan=life._integration_plan(self.root)
+  plan['paths'].append(str(path));plan['sha256'][str(path)]=hashlib.sha256(target.read_bytes()).hexdigest()
+  self.write('evidence/host-integrations.json',plan)
+  self.states[unit]={'LoadState':'loaded','FragmentPath':str(path),'DropInPaths':'','MainPID':'0','ActiveState':'inactive'}
+  for name in ('validate_gateway_layout','gateway_relay_ready_locked'):
+   p=patch(f'canary_rpc_relay.{name}');setattr(self,name,p.start());self.addCleanup(p.stop)
  def test_exact_enable_disable_and_lost_reply_status(self):
   self.assertEqual(life.service_boot_state(self.root),{'node':False,'vpn':False})
   result=self.owner.boot_policy(self.request());self.assertEqual(result,{'schema':'nodenetwork-boot-policy-v1','service':'node','enabled':True,'runtime_changed':False})
@@ -59,6 +74,35 @@ class BootPolicyTests(unittest.TestCase):
   self.assertFalse(status['vpn_enabled']);self.assertEqual(self.mutations(),[['systemctl','daemon-reload']])
   self.owner.boot_policy(self.request(enabled=False));self.assertFalse(self.owner.boot_policy_status()['node_enabled'])
   self.owner.boot_policy(self.request('vpn'));self.assertTrue(self.owner.boot_policy_status()['vpn_enabled'])
+ def test_gateway_boot_controls_only_the_registered_relay(self):
+  self.gateway_installation()
+  self.owner.boot_policy(self.request())
+  self.assertTrue(self.owner.boot_policy_status()['node_enabled'])
+  self.assertTrue(self.owner.boot_policy_status()['applied'])
+  directory=self.units/'multi-user.target.wants'
+  self.assertEqual(set(directory.iterdir()),{directory/life.RELAY_UNIT})
+  self.assertEqual(os.readlink(directory/life.RELAY_UNIT),str(self.units/life.RELAY_UNIT))
+  self.gateway_relay_ready_locked.assert_called_once()
+  self.owner.require_bound_validator_vpn.assert_not_called()
+  self.conformance.assert_not_called()
+  self.gateway_relay_ready_locked.side_effect=ValueError('offline')
+  self.owner.boot_policy(self.request(enabled=False))
+  self.assertFalse(self.owner.boot_policy_status()['node_enabled'])
+  self.assertEqual(self.mutations(),[['systemctl','daemon-reload'],['systemctl','daemon-reload']])
+ def test_gateway_boot_refuses_uncommissioned_or_unbound_gateway_and_validator_link(self):
+  self.gateway_installation()
+  self.receipt['gateway_commissioned']=False
+  with self.assertRaisesRegex(ValueError,'Commission the gateway'):
+   self.owner.boot_policy(self.request())
+  self.receipt['gateway_commissioned']=True
+  self.gateway_relay_ready_locked.side_effect=ValueError('unbound gateway VPN')
+  with self.assertRaisesRegex(ValueError,'unbound gateway VPN'):
+   self.owner.boot_policy(self.request())
+  directory=self.units/'multi-user.target.wants';directory.mkdir()
+  (directory/life.UNITS[0]).symlink_to(self.units/life.UNITS[0])
+  with self.assertRaisesRegex(ValueError,'validator service must stay stopped and disabled'):
+   self.owner.boot_policy_status()
+  self.assertFalse(self.authorized);self.assertFalse(self.mutations())
  def test_partial_command_failure_can_only_reconcile_observed_exact_state(self):
   original=self.native
   def lost(args,**kw):

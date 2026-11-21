@@ -217,11 +217,19 @@ def mutate_owned_service(root, action, unit, allow_absent=False):
     native(['systemctl', action, unit])
 
 
-def service_boot_state(root):
-    """Observe only the two attributed units and their fixed persistent wants links."""
+def _boot_units(role):
+    require(role in ('validator', 'rpc_gateway'), 'Unsupported installed boot role')
+    return {'node': RELAY_UNIT if role == 'rpc_gateway' else UNITS[0], 'vpn': UNITS[1]}
+
+
+def service_boot_state(root, *, role='validator'):
+    """Observe the runtime for the sealed role and its VPN dependency."""
     root=Path(root);owned=_attributed_units(root)
+    units = _boot_units(role)
+    if role == 'rpc_gateway':
+        units['validator'] = UNITS[0]
     result={}
-    for service,unit in zip(('node','vpn'),UNITS):
+    for service,unit in units.items():
         require(unit in owned,'Boot policy requires both registered owned services')
         expected=UNIT_DIRECTORY/'multi-user.target.wants'/unit
         if expected.parent.exists() or expected.parent.is_symlink():
@@ -246,26 +254,30 @@ def service_boot_state(root):
                 'Unsupported service boot state')
         enabled=raw==b'enabled\n'
         require(enabled==present,'Service boot state and attributed registration disagree')
-        result[service]=enabled
+        if service == 'validator':
+            require(not enabled and owned[unit].get('ActiveState') in ('inactive', 'failed')
+                    and owned[unit].get('MainPID') == '0', 'Gateway validator service must stay stopped and disabled')
+        else:
+            result[service]=enabled
     return result
 
 
-def set_service_boot_policy(root, service, enabled):
+def set_service_boot_policy(root, service, enabled, *, role='validator'):
     require(service in ('node','vpn') and type(enabled) is bool,'Exact service boot policy required')
-    before=service_boot_state(root)
+    before=service_boot_state(root, role=role)
     if before[service]!=enabled:
-        unit=UNITS[0 if service=='node' else 1]
+        unit=_boot_units(role)[service]
         link=UNIT_DIRECTORY/'multi-user.target.wants'/unit
         # systemctl disable also removes the manually registered main unit link.
         # Change only the fixed attributed boot link; retain that registration.
         if enabled:
             if not link.parent.exists():
                 link.parent.mkdir(mode=0o755);_sync_directory(UNIT_DIRECTORY)
-            link.symlink_to(Path(root)/'systemd'/unit)
+            link.symlink_to(UNIT_DIRECTORY/unit)
         else:link.unlink()
         _sync_directory(link.parent)
         native(['systemctl','daemon-reload'],timeout=8)
-    after=service_boot_state(root)
+    after=service_boot_state(root, role=role)
     require(after[service]==enabled and after['vpn' if service=='node' else 'node']==before['vpn' if service=='node' else 'node'],
             'Service boot policy outcome uncertain; reconcile observed boot state')
     return after

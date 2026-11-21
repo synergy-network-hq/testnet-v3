@@ -1214,10 +1214,26 @@ def _gateway_selected_tcp(c):
     return {'ip':str(ip),'port':8551}
 
 
+def gateway_relay_ready_locked(c, owned):
+    """Check online relay prerequisites under the controller lifecycle lock."""
+    import lifecycle as life
+    from vpn import verify_gateway_route
+
+    node=owned.get(life.UNITS[0],{})
+    require(node.get('ActiveState') in ('inactive','failed') and node.get('MainPID')=='0','Gateway must never run the validator service')
+    require(life.RELAY_UNIT in owned,'Register the exact gateway relay before starting')
+    current=c.vpn_status()
+    require(current['service_registered'] and current['enrollment_recorded'] and current['server_bound'] and current['connected']
+            and not current['reconciliation_required'] and not current['retired'],'Existing bound gateway VPN must be connected')
+    local=c.public_json(c.root/'evidence/vpn-enrollment.json',True)
+    require(local.get('required_gateway_tcp')==_gateway_selected_tcp(c),'VPN target differs from selected signed validator')
+    verify_gateway_route(c.root,persist=False,locked=True)
+    life._relay_start_check_locked(c.root)
+
+
 def gateway_lifecycle(c,request):
     """Existing host operations with an explicit relay-only gateway role branch."""
     import lifecycle as life
-    from vpn import verify_gateway_route
     life._require_operator(linux=False)
     op=request['operation'];require(op in ('register','start','stop','restart','health') and not request['parameters'],'Exact gateway lifecycle operation required')
     with life._lifecycle_lock(c.root):
@@ -1245,16 +1261,7 @@ def gateway_lifecycle(c,request):
                                'server_bound':current['server_bound'],'connected':current['connected']},
                         'admission_custody_verified':True,'consensus_participant':False,'configured_loopback':True,'production_qualified':False}
             if op in ('start','restart'):
-                node=owned.get('synergy-node.service',{})
-                require(node.get('ActiveState') in ('inactive','failed') and node.get('MainPID')=='0','Gateway must never run the validator service')
-                require(life.RELAY_UNIT in owned,'Register the exact gateway relay before starting')
-                current=c.vpn_status()
-                require(current['service_registered'] and current['enrollment_recorded'] and current['server_bound'] and current['connected']
-                        and not current['reconciliation_required'] and not current['retired'],'Existing bound gateway VPN must be connected')
-                local=c.public_json(c.root/'evidence/vpn-enrollment.json',True)
-                require(local.get('required_gateway_tcp')==_gateway_selected_tcp(c),'VPN target differs from selected signed validator')
-                verify_gateway_route(c.root,persist=False,locked=True)
-                life._relay_start_check_locked(c.root)
+                gateway_relay_ready_locked(c, owned)
         c.authorize(request)
     # ExecStartPre acquires the same lifecycle lock in its own process. Never
     # hold that lock across systemctl or registration's own locked transaction.

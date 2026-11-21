@@ -23,6 +23,10 @@ CONTROLLED_PROFILE = 'nodenetwork-controlled-canary-v1'
 GATEWAY_PROFILE = 'nodenetwork-controlled-gateway-v1'
 
 
+class GatewayAccessRefused(ValueError):
+    """The current gateway access rule could not be verified before issuance."""
+
+
 def require(condition, message):
     if not condition:
         raise ValueError(message)
@@ -50,6 +54,14 @@ def pin(value):
 
 def identifier(value):
     return isinstance(value, str) and re.fullmatch('[A-Za-z0-9_-]{1,100}', value) is not None
+
+
+def group_ids(groups):
+    require(isinstance(groups, list) and all(isinstance(group, dict) and identifier(group.get('id'))
+            for group in groups), 'Invalid provider group membership')
+    ids = {group['id'] for group in groups}
+    require(len(ids) == len(groups), 'Provider group membership is ambiguous')
+    return ids
 
 
 def network_scope(policy, binding=None):
@@ -123,6 +135,7 @@ class HttpsProvider:
         self.context.minimum_version = ssl.TLSVersion.TLSv1_2
         self.context.load_verify_locations(cadata=ca.decode('ascii'))
         self.token = token
+        self.gateway = policy.get('profile') == GATEWAY_PROFILE
 
     def __repr__(self):
         return '<HttpsProvider credential=redacted>'
@@ -130,6 +143,7 @@ class HttpsProvider:
     def request(self, method, path, body=None):
         require((method, path) in {('GET', '/api/accounts'), ('GET', '/api/peers'),
                 ('GET', '/api/setup-keys'), ('POST', '/api/setup-keys')}
+                or self.gateway and method == 'GET' and path in ('/api/groups', '/api/policies')
                 or re.fullmatch('/api/(?:peers|setup-keys)/[A-Za-z0-9_-]{1,100}', path)
                 and method in ('GET', 'DELETE'), 'Unsupported provider resource')
         require((method == 'POST') == (body is not None), 'Unexpected provider body')
@@ -331,6 +345,54 @@ class Authorization:
                 and len({str(item['id']) for item in result}) == len(result), 'Invalid provider inventory')
         return result
 
+    def _verify_gateway_access(self, peers):
+        gateway, = self.policy['auto_groups']
+        groups = {row['id']: row for row in self._list('groups')}
+        all_groups = [group_id for group_id, row in groups.items() if row.get('name') == 'All']
+        require(len(all_groups) == 1 and gateway in groups and gateway != all_groups[0],
+                'Exact dedicated gateway and default groups required')
+
+        upstream = [row for row in peers if row.get('ip') == self.policy['required_gateway_tcp']['ip']]
+        require(len(upstream) == 1, 'Signed gateway upstream must match one VPN peer')
+        memberships = {row['id']: group_ids(row.get('groups')) for row in peers}
+        require(all(gateway not in ids for ids in memberships.values())
+                and type(groups[gateway].get('peers_count')) is int and groups[gateway]['peers_count'] == 0
+                and groups[gateway].get('resources_count', 0) == 0 and not groups[gateway].get('resources'),
+                'Gateway enrollment group must be empty')
+
+        upstream_id = upstream[0]['id']
+        permitted_upstream = {
+            group_id for group_id, group in groups.items()
+            if group_id not in {gateway, all_groups[0]} and group_id in memberships[upstream_id]
+            and type(group.get('peers_count')) is int and group['peers_count'] == 1
+            and group.get('resources_count', 0) == 0 and not group.get('resources')
+            and all(group_id not in ids for peer_id, ids in memberships.items() if peer_id != upstream_id)
+        }
+        approved_rules = 0
+        for policy in self._list('policies'):
+            require(type(policy.get('enabled')) is bool, 'Invalid provider policy state')
+            if not policy['enabled']:
+                continue
+            rules = policy.get('rules')
+            require(isinstance(rules, list), 'Invalid provider policy rules')
+            for rule in rules:
+                require(isinstance(rule, dict) and type(rule.get('enabled')) is bool,
+                        'Invalid provider access rule')
+                if not rule['enabled'] or rule.get('action') == 'drop':
+                    continue
+                require(rule.get('action') == 'accept', 'Unknown provider access rule action')
+                sources = group_ids(rule.get('sources') if rule.get('sources') is not None else [])
+                destinations = group_ids(rule.get('destinations') if rule.get('destinations') is not None else [])
+                if not {gateway, all_groups[0]} & (sources | destinations):
+                    continue
+                require(sources == {gateway} and len(destinations) == 1 and destinations <= permitted_upstream
+                        and rule.get('bidirectional') is False and rule.get('protocol') == 'tcp'
+                        and rule.get('ports') == [str(self.policy['required_gateway_tcp']['port'])]
+                        and not rule.get('port_ranges') and not rule.get('sourceResource')
+                        and not rule.get('destinationResource'), 'A provider rule broadens gateway access')
+                approved_rules += 1
+        require(approved_rules == 1, 'Exact gateway-to-upstream TCP policy required')
+
     def _key(self, key, intent, consumed=False):
         require(isinstance(key, dict) and identifier(str(key.get('id', '')))
                 and key.get('name') == intent['name'] and key.get('type') == 'one-off'
@@ -351,7 +413,13 @@ class Authorization:
                 'Exact native-approved target, release and formation required')
         require(not (self.directory / 'intent.json').exists(), 'VPN intent already exists; reconcile, never reissue')
         self._account()
-        peers, keys = self._list('peers'), self._list('setup-keys')
+        peers = self._list('peers')
+        if self.policy['profile'] == GATEWAY_PROFILE:
+            try:
+                self._verify_gateway_access(peers)
+            except (ValueError, TypeError, KeyError) as exc:
+                raise GatewayAccessRefused('Gateway access could not be verified before key issuance') from exc
+        keys = self._list('setup-keys')
         name = 'nn-' + hashlib.sha256(encode(binding)).hexdigest()[:60]
         require(not any(p.get('name') == name for p in peers + keys), 'VPN intent name already exists')
         intent = {'version': 1, 'binding': binding, 'name': name, 'account_id': self.policy['account_id'],

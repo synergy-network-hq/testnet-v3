@@ -1139,22 +1139,29 @@ class Controller:
                     'retry_requires_new_confirmation':True,'attempt_sha256':current['attempt_sha256'],
                     'cancellation_sha256':public_hash(event)}
 
-    def _boot_policy_scope(self, enabling=False):
+    def _boot_policy_scope(self, receipt, enabling=False):
         import lifecycle as life
         from conformance import installed
         from apqe_layout import startup_readiness_authorized
         from root_guard import check_registration
-        receipt,_=life._sealed_receipt(self.root)
+        role=receipt.get('role')
         check_registration(self.policy().get('root_guard_sha256'))
         for name in (HOST_REMOVAL,):
             require(not (self.control/name).exists() and not (self.control/name).is_symlink(),'Host retirement must reconcile before boot policy')
         for name in (life.UPGRADE_INTENT,life.REPLACEMENT_INTENT,life.AUTHORITY_RECOVERY_INTENT,life.AUTONOMOUS_EPOCH_INTENT,
                      'evidence/vpn-cancel-unused-intent.json','run/enrollment.key','tmp/controller/authorization/inputs/vpn-retirement.json'):
             require(not (self.root/name).exists() and not (self.root/name).is_symlink(),'Pending lifecycle mutation must reconcile before boot policy')
-        observed=life.service_boot_state(self.root)
+        observed=life.service_boot_state(self.root, role=role)
         if enabling:
             require(self.policy().get('engineering_target',{}).get('guest') is None,
-                    'Guest validator boot enable is not approved')
+                    'Managed guest boot enablement is unavailable')
+            if role=='rpc_gateway':
+                from canary_rpc_relay import GATEWAY_TARGET, gateway_relay_ready_locked, validate_gateway_layout
+                require(receipt.get('gateway_commissioned') is True and self.exists(f'{GATEWAY_TARGET}/commissioned.json'),
+                        'Commission the gateway before enabling boot policy')
+                validate_gateway_layout(self.root)
+                gateway_relay_ready_locked(self,life._attributed_units(self.root))
+                return observed
             require(receipt.get('role')=='validator' and (self.root/'data').is_dir() and not (self.root/'data').is_symlink(),
                     'Commission the active validator before enabling boot policy')
             installed(self.root,host=True)
@@ -1172,18 +1179,22 @@ class Controller:
         import lifecycle as life
         p=request['parameters']
         with life._lifecycle_lock(self.root):
-            self._boot_policy_scope(p['enabled'])
-            require((self.root/'data').is_dir() and not (self.root/'data').is_symlink(),
+            receipt,_=life._sealed_receipt(self.root)
+            self._boot_policy_scope(receipt,p['enabled'])
+            role=receipt['role']
+            require(receipt.get('gateway_commissioned') is True if role=='rpc_gateway' else
+                    (self.root/'data').is_dir() and not (self.root/'data').is_symlink(),
                     'Boot policy requires a commissioned installation')
             self.authorize(request)
-            life.set_service_boot_policy(self.root,p['service'],p['enabled'])
+            life.set_service_boot_policy(self.root,p['service'],p['enabled'],role=role)
             return {'schema':'nodenetwork-boot-policy-v1','service':p['service'],
                     'enabled':p['enabled'],'runtime_changed':False}
 
     def boot_policy_status(self):
         import lifecycle as life
         with life._lifecycle_lock(self.root):
-            observed=self._boot_policy_scope()
+            receipt,_=life._sealed_receipt(self.root)
+            observed=self._boot_policy_scope(receipt)
             result={'schema':'nodenetwork-boot-policy-status-v1','node_enabled':observed['node'],
                     'vpn_enabled':observed['vpn'],'applied':False,'request_sha256':None,'runtime_changed':False}
             audit=self.control/'audit.jsonl'
@@ -1796,19 +1807,24 @@ class Controller:
         from canary_rpc_relay import gateway_target_available
         target_owner=gateway_target_available(self)
         installed_role=None
+        commissioned_gateway=False
         if self.exists('installation.json'):
             try:
                 from lifecycle import _sealed_receipt
-                role=_sealed_receipt(self.root)[0].get('role')
+                receipt,_=_sealed_receipt(self.root)
+                role=receipt.get('role')
                 if role in ('validator','rpc_gateway'):installed_role=role
+                commissioned_gateway=role=='rpc_gateway' and receipt.get('gateway_commissioned') is True
             except (ValueError,OSError,KeyError,TypeError):pass
         operations=[]
         for op in sorted(READS | MUTATIONS):
             reason=None if op in READS else blocker or ('Operation has not passed host qualification' if op not in qualified else None)
             if op=='upgrade_native_preflight' and 'runtime_probe.py' not in policy.get('engine_files',{}):
                 reason='Authenticated candidate runtime probe engine required'
-            if op=='boot_policy' and (not (self.root/'data').is_dir() or (self.root/'data').is_symlink()):
-                reason='Commission the active validator before boot policy changes'
+            if op=='boot_policy':
+                ready=commissioned_gateway if installed_role=='rpc_gateway' else (
+                    installed_role=='validator' and (self.root/'data').is_dir() and not (self.root/'data').is_symlink())
+                if not ready:reason='Commission the installed role before changing boot policy'
             if op.startswith('guest_') and op!='guest_resources' and not isinstance(policy.get('managed_guest'),dict):
                 reason='Independently approved guest image, toolchain and resources required'
             if (op.startswith(('gateway_target_','gateway_install')) or op=='gateway_vpn_preflight') and not target_owner:

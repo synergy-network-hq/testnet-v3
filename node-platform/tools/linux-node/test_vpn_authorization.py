@@ -1,5 +1,6 @@
 """Native coordinator boundaries without management-server or host operations."""
 import base64
+from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
@@ -28,8 +29,8 @@ class AuthorizationTests(unittest.TestCase):
     def flow(self,responses):
         self.request=Mock(side_effect=responses)
         return v.Authorization(self.root,self.p,self.request,now=lambda:1000)
-    def issue(self):
-        flow=self.flow([self.account,(200,[]),(200,[]),(200,self.key)])
+    def issue(self, inventory=()):
+        flow=self.flow([self.account, *((200, rows) for rows in inventory or ([],)), (200,[]), (200,self.key)])
         public,secret=flow.prepare(self.b)
         self.assertEqual(secret,self.key['key']);self.assertEqual(public['setup_key_id'],'12')
         for path in self.root.iterdir():
@@ -38,12 +39,25 @@ class AuthorizationTests(unittest.TestCase):
     def controlled(self):
         self.p={**self.p,'profile':v.CONTROLLED_PROFILE,
                 'network_binding':{k:self.b[k] for k in ('network_id','chain_id','formation_sha256')}}
+    def gateway_inventory(self):
+        self.p={**self.p,'profile':v.GATEWAY_PROFILE,
+                'network_binding':{k:self.b[k] for k in ('network_id','chain_id','formation_sha256')},
+                'required_gateway_tcp':{'ip':'10.69.0.254','port':8551}}
+        del self.p['required_peer_ips']
+        peers=[{'id':'upstream','ip':'10.69.0.254','groups':[{'id':'all'},{'id':'relay-target'}]},
+               {'id':'other','ip':'10.69.0.253','groups':[{'id':'all'}]}]
+        groups=[{'id':'all','name':'All','peers_count':2},
+                {'id':'group1','name':'gateway','peers_count':0},
+                {'id':'relay-target','name':'signed-upstream','peers_count':1}]
+        policies=[{'id':'gateway-policy','enabled':True,'rules':[
+            {'enabled':True,'action':'accept','sources':[{'id':'group1'}],
+             'destinations':[{'id':'relay-target'}],'bidirectional':False,'protocol':'tcp','ports':['8551']}]}]
+        return peers, groups, policies
     def unused(self):
         return {'schema':'nodenetwork-vpn-unused-preflight-v1','quiescent':True,
                 'attempt_sha256':'d'*64,'binding':self.b}
     def test_gateway_policy_is_independent_exact_tcp_and_retained_network_scope(self):
-        self.p={**self.p,'profile':v.GATEWAY_PROFILE,'network_binding':{k:self.b[k] for k in ('network_id','chain_id','formation_sha256')},'required_gateway_tcp':{'ip':'10.69.0.254','port':8551}}
-        del self.p['required_peer_ips']
+        inventory=self.gateway_inventory()
         raw=v.encode(self.p);sha=hashlib.sha256(raw).hexdigest()
         self.assertEqual(v.provider_policy(raw,sha,self.ca,1000),self.p)
         for changed in ({**self.p,'required_peer_ips':['10.69.0.254']},{**self.p,'required_gateway_tcp':{'ip':'10.69.0.254','port':443}},{**self.p,'required_gateway_tcp':{'ip':'127.0.0.1','port':8551}},{**self.p,'expires_at':999}):
@@ -60,11 +74,44 @@ class AuthorizationTests(unittest.TestCase):
             v.network_scope(other_policy,self.b)
         with self.assertRaises(ValueError):v.provider_policy(raw,'0'*64,self.ca,1000)
         self.name='nn-'+hashlib.sha256(v.encode(self.b)).hexdigest()[:60];self.key['name']=self.name
-        self.issue()
+        flow=self.issue(inventory)
+        self.assertEqual([(call.args[0],call.args[1]) for call in flow.request.call_args_list],
+            [('GET','/api/accounts'),('GET','/api/peers'),('GET','/api/groups'),('GET','/api/policies'),
+             ('GET','/api/setup-keys'),('POST','/api/setup-keys')])
         before={p:p.read_bytes() for p in self.root.iterdir()}
         self.p['network_binding']['formation_sha256']='f'*64
         with self.assertRaises(ValueError):self.flow([])
         self.request.assert_not_called();self.assertEqual(before,{p:p.read_bytes() for p in self.root.iterdir()})
+
+    def test_gateway_access_failure_precedes_intent_and_key_issuance(self):
+        inventory=self.gateway_inventory()
+        for invalid in ('default-group', 'occupied-group', 'wrong-upstream', 'shared-upstream',
+                        'bidirectional', 'port-range', 'extra-rule', 'no-rule'):
+            with self.subTest(invalid=invalid):
+                peers, groups, policies=deepcopy(inventory)
+                rule=policies[0]['rules'][0]
+                if invalid == 'default-group':
+                    rule['sources']=[{'id':'all'}]
+                elif invalid == 'occupied-group':
+                    peers[1]['groups'].append({'id':'group1'})
+                elif invalid == 'wrong-upstream':
+                    peers[0]['ip']='10.69.0.252'
+                elif invalid == 'shared-upstream':
+                    peers[1]['groups'].append({'id':'relay-target'})
+                elif invalid == 'bidirectional':
+                    rule['bidirectional']=True
+                elif invalid == 'port-range':
+                    rule['port_ranges']=[{'start':8551,'end':8552}]
+                elif invalid == 'extra-rule':
+                    policies.append({'id':'other-policy','enabled':True,'rules':[
+                        {**rule,'destinations':[{'id':'all'}]}]})
+                else:
+                    policies[0]['enabled']=False
+                flow=self.flow([self.account,(200,peers),(200,groups),(200,policies)])
+                with self.assertRaises(v.GatewayAccessRefused):
+                    flow.prepare(self.b)
+                self.assertTrue(all(call.args[0]=='GET' for call in flow.request.call_args_list))
+                self.assertEqual(list(self.root.iterdir()),[])
 
     def test_unused_cancellation_exact_zero_usage_and_absence_is_idempotent(self):
         self.issue()
@@ -245,9 +292,15 @@ class AuthorizationTests(unittest.TestCase):
     def test_duplicate_json_and_resource_injection(self):
         with self.assertRaises(ValueError):v.decode(b'{"id":1,"id":2}')
         client=object.__new__(v.HttpsProvider)
-        for method,path in [('GET','/api/peers/../accounts'),('POST','/api/accounts'),
-                            ('DELETE','https://foreign/api/peers/one')]:
-            with self.assertRaises(ValueError):client.request(method,path)
+        for gateway in (False, True):
+            client.gateway=gateway
+            for method,path in [('GET','/api/peers/../accounts'),('POST','/api/accounts'),
+                                ('DELETE','https://foreign/api/peers/one'),
+                                ('POST','/api/groups'),('PUT','/api/policies/gateway-policy')]:
+                with self.assertRaises(ValueError):client.request(method,path)
+        client.gateway=False
+        for path in ('/api/groups','/api/policies'):
+            with self.assertRaises(ValueError):client.request('GET',path)
     def test_peer_retirement_preserves_identity_and_reconciles_lost_reply(self):
         self.issue()
         flow=self.flow([self.account,(200,[{**self.key,'used_times':1}]),(200,[self.peer])])
