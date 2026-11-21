@@ -63,12 +63,10 @@ def network_scope(policy, binding=None):
             and isinstance(scope['network_id'], str)
             and re.fullmatch('[a-z0-9][a-z0-9_-]{1,127}', scope['network_id'])
             and type(scope['chain_id']) is int and 0 < scope['chain_id'] < 2**64
-            and pin(scope['formation_sha256']), 'Exact controlled Canary network scope required')
-    if policy['profile']==GATEWAY_PROFILE:
-        require(scope['chain_id']==99999,'Engineering gateway Canary scope required')
+            and pin(scope['formation_sha256']), 'Exact controlled network scope required')
     if binding is not None:
         require(isinstance(binding, dict) and all(type(binding.get(k)) is type(value) and binding.get(k) == value for k, value in scope.items()),
-                'Controlled Canary network differs from approved scope')
+                'Controlled network differs from approved scope')
 
 
 def provider_policy(raw, expected_sha256, ca, now, *, cleanup_action=None):

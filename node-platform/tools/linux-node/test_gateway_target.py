@@ -49,6 +49,44 @@ class GatewayTargetTests(unittest.TestCase):
  def params(self):
   wrapper={'node_configuration':g._gateway_target_config(self.c,self.receipt,self.pins,self.root/'network'),'relay_specification':{'listen_address':'127.0.0.1:9944','role':{'kind':'gateway','gateway_address':'synv5fixture','validator_address':'synv1fixture','validator_relay_port':8551,'allowed_origins':[]}}};admission='{"public":"admission"}';config=g._gateway_request_bytes(wrapper).decode()
   return {'admission_json':admission,'admission_sha256':sha(admission.encode()),'configuration_json':config,'configuration_sha256':sha(config.encode())}
+ def test_configured_network_profile_persists_and_cannot_be_rebound(self):
+  selection = {'network_id': 'private-observer-network', 'chain_id': 14002}
+  self.receipt.update(selection)
+  self.save(self.root/'installation.json', g._gateway_request_bytes(self.receipt))
+  self.scope.update(network_id=selection['network_id'], chain_id=str(selection['chain_id']))
+  self.config.update(selection)
+  signed_origin = {name: self.pins[name] for name in self.raw}
+  profile = {
+   'schema': 'synergy-network-provisioning-v1', 'profile_id': 'private-rpc',
+   'network_name': 'Private network', 'genesis_hash': 'f'*64, **selection,
+   'node_name': self.receipt['node_name'], 'role': 'rpc_gateway', 'origin': signed_origin,
+   'gateway': {'public_hostname': 'rpc.example.test', 'tls': 'required',
+    'protocol': 'synergy-json-rpc-v1', 'listen_address': '127.0.0.1:9944',
+    'validator_address': 'synv1fixture', 'validator_relay_port': 8551,
+    'allowed_origins': [], 'vpn_provider_sha256': '5'*64},
+  }
+  raw = g._gateway_request_bytes(profile)
+  managed = self.c.control/'authorization/inputs'/g.NETWORK_PROFILE
+  self.save(managed, raw)
+  self.policy['authorization_files'] = {g.NETWORK_PROFILE: sha(raw)}
+  self.policy['gateway_origin_files'] = {'network/'+name: pin for name, pin in signed_origin.items()}
+
+  self.assertEqual(self.generate()['chain_id'], '14002')
+  parameters = self.params()
+  altered = json.loads(parameters['configuration_json'])
+  altered['relay_specification']['listen_address'] = '127.0.0.1:9945'
+  altered_raw = g._gateway_request_bytes(altered)
+  with self.assertRaisesRegex(ValueError, 'approved network profile'):
+   self.call('gateway_target_commission_preflight', dict(parameters,
+    configuration_json=altered_raw.decode(), configuration_sha256=sha(altered_raw)))
+
+  self.assertEqual(self.call('gateway_target_commission', parameters, True)['state'], 'commissioned')
+  installed = self.root/'config'/g.NETWORK_PROFILE
+  self.assertEqual(installed.read_bytes(), raw)
+  self.assertEqual(self.call('gateway_target_status')['chain_id'], '14002')
+  self.save(installed, g._gateway_request_bytes(dict(profile, chain_id=99999)))
+  self.assertEqual(self.call('gateway_target_status')['state'], 'uncertain')
+
  def test_generate_commission_positive_reconcile_export_preserves_all_custody(self):
   self.assertEqual(self.call('gateway_target_preflight')['state'],'ready');self.assertEqual(self.calls,[])
   generated=self.generate();self.assertEqual(generated['state'],'identity_ready');self.assertFalse(generated['transport_custody_verified']);custody={p:p.read_bytes() for p in (self.root/'keys/apqe').iterdir()}

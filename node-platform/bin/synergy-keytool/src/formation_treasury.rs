@@ -458,6 +458,85 @@ fn authenticated_send_context(
     }
     Ok((context, registry))
 }
+
+fn checked_lineage_descriptor(
+    descriptor: &Value, request_sha: &str, formation: &FormationContext,
+    p: &SendParameters, exported: &Value,
+) -> Result<(synergy_etdag::ProcessingContext, synergy_etdag::crypto::IngressKemKeyRegistry), String> {
+    let fields = ["schema","request_sha256","genesis_sha256","authority_sha256","authority_root_sha256",
+        "processing_context_sha256","processing_context_root","epoch_context_root","epoch","chain_id","network_id"];
+    let response: Value = serde_json::from_str(&p.processing_context_json).map_err(|_| "Invalid processing response")?;
+    let context: synergy_etdag::ProcessingContext = serde_json::from_value(response["context"].clone()).map_err(|_| "Processing context missing")?;
+    let registry: synergy_etdag::crypto::IngressKemKeyRegistry = serde_json::from_value(response["ingress_kem_registry"].clone()).map_err(|_| "Processing registry missing")?;
+    let signed: synergy_genesis::signing::SignedGenesis = serde_json::from_str(exported["artifacts"]["genesis.json"].as_str().ok_or("Signed Genesis missing")?).map_err(|_| "Signed Genesis invalid")?;
+    context.validate().map_err(|_| "Invalid processing context")?;
+    registry.validate_protected_profile().map_err(|_| "Invalid processing registry")?;
+    if !descriptor.as_object().is_some_and(|v|v.len()==fields.len()&&fields.iter().all(|k|v.contains_key(*k)))
+        || descriptor["schema"] != "nodenetwork-verified-treasury-context-v1"
+        || descriptor["request_sha256"] != request_sha
+        || descriptor["genesis_sha256"] != p.genesis_sha256
+        || descriptor["genesis_sha256"] != exported["genesis_sha256"]
+        || descriptor["authority_sha256"] != exported["authority_sha256"]
+        || descriptor["authority_root_sha256"] != exported["authority_root_sha256"]
+        || descriptor["processing_context_sha256"] != p.processing_context_sha256
+        || digest(p.processing_context_json.as_bytes()) != p.processing_context_sha256
+        || descriptor["processing_context_root"] != json!(context.root().map_err(|_| "Invalid processing root")?)
+        || !descriptor["epoch_context_root"].as_str().is_some_and(|s|s.len()==64&&s.bytes().all(|b|b.is_ascii_hexdigit()&&!b.is_ascii_uppercase()))
+        || descriptor["epoch"] != context.authority.epoch || context.authority.epoch <= 1
+        || descriptor["chain_id"] != context.authority.chain_id
+        || context.authority.chain_id != signed.unsigned.network.chain_id
+        || descriptor["network_id"] != formation.network_id
+        || context.authority.network_id != formation.network_id
+        || registry.root().map_err(|_| "Invalid processing registry root")? != context.authority.ingress_kem_registry_root
+    {
+        return Err("Native lineage descriptor differs from the exact treasury intent or signed formation".into());
+    }
+    Ok((context, registry))
+}
+
+// This is not a caller-supplied attestation: invoke the same sealed native owner
+// used by the validator/gateway. It independently replays signed-origin/3QC
+// lineage and binds its result to these exact request bytes. Never use PATH,
+// a shell, stdout diagnostics, or a caller-selected verifier/configuration.
+fn authenticated_lineage_context(
+    formation_directory: &Path, request_path: &Path, request_sha: &str,
+    formation: &FormationContext, p: &SendParameters, exported: &Value,
+) -> Result<(synergy_etdag::ProcessingContext, synergy_etdag::crypto::IngressKemKeyRegistry), String> {
+    use std::{io::Read, process::{Command,Stdio}, time::{Duration,Instant}};
+    let root = formation_directory.parent().and_then(Path::parent).ok_or("Managed treasury root missing")?;
+    if formation_directory != root.join("tmp/network-formation")
+        || std::env::current_exe().map_err(|_| "Current keytool unavailable")? != root.join("bin/synergy-keytool")
+    { return Err("Autonomous treasury verification requires the installed bundled keytool".into()); }
+    let manifest: Value = decode(&read(&root.join("package.json"), 1024*1024, false)?)?;
+    for name in ["bin/synergy-node","bin/synergy-keytool"] {
+        let bytes = read(&root.join(name), 256*1024*1024, false)?;
+        if manifest["files"][name] != digest(bytes.as_bytes()) {
+            return Err("Bundled treasury verifier differs from the sealed package".into());
+        }
+    }
+    let mut child = Command::new(root.join("bin/synergy-node"))
+        .args(["authority-successor","check-processing-context"])
+        .arg(root.join("config/node.json")).arg(request_path)
+        .env_clear().current_dir(root).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+        .spawn().map_err(|_| "Cannot start the bundled autonomous authority verifier")?;
+    let output = child.stdout.take().ok_or("Native authority output unavailable")?;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || { let mut bytes=Vec::new(); let result=output.take(8193).read_to_end(&mut bytes).map(|_|bytes); let _=sender.send(result); });
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if start.elapsed()<Duration::from_secs(60) => std::thread::sleep(Duration::from_millis(20)),
+            _ => { let _=child.kill(); let _=child.wait(); break Err("Autonomous authority verification did not finish; no treasury intent was reserved"); }
+        }
+    };
+    let bytes=receiver.recv_timeout(Duration::from_secs(1)).map_err(|_| "Native authority output interrupted")?.map_err(|_| "Native authority output unavailable")?;
+    if !status?.success() || bytes.len()>8192 {
+        return Err("Authenticated autonomous treasury context unavailable".into());
+    }
+    let descriptor: Value = serde_json::from_slice(&bytes).map_err(|_| "Invalid native authority descriptor")?;
+    checked_lineage_descriptor(&descriptor, request_sha, formation, p, exported)
+}
 fn send_path(treasury: &Path, nonce: u64) -> Result<std::path::PathBuf, String> {
     private_dir(treasury)?;
     Ok(treasury.join("sends").join(format!("{nonce:020}")))
@@ -504,7 +583,10 @@ pub fn prepare_send(
         formation_directory,
         engine.clone(),
     )?;
-    let (context, registry) = authenticated_send_context(&formation, p, &exported)?;
+    let response: Value = serde_json::from_str(&p.processing_context_json).map_err(|_| "Invalid processing response")?;
+    let (context, registry) = if response["context"]["authority"]["epoch"].as_u64().is_some_and(|epoch|epoch>1) {
+        authenticated_lineage_context(formation_directory, request_path, request_pin, &formation, p, &exported)?
+    } else { authenticated_send_context(&formation, p, &exported)? };
     let public: Public = decode(&read(&treasury.join("treasury-public.json"), LIMIT, true)?)?;
     let amount = decimal(&p.amount_nwei)?;
     let total = amount
@@ -976,6 +1058,30 @@ pub(crate) fn exercise_send_fixture(
     r.parameters.processing_context_json = changed.to_string();
     r.parameters.processing_context_sha256 = digest(changed.to_string().as_bytes());
     assert!(authenticated_send_context(&context_formation, &r.parameters, &export).is_err());
+    // The owner verifier is independently crypto-qualified in the native fresh
+    // E1->E2->E3 fixture. Here qualify exact descriptor/intent/origin binding;
+    // a caller cannot supply this descriptor to the production CLI.
+    let mut successor_response = response.clone();
+    successor_response["context"]["authority"]["epoch"] = json!(2);
+    successor_response["context"]["authority"]["target_height"] = json!(1005);
+    successor_response["context"]["authority"]["source_finalized_height"] = json!(1000);
+    let mut successor: SendRequest = serde_json::from_value(request.clone()).unwrap();
+    successor.parameters.processing_context_json=successor_response.to_string();
+    successor.parameters.processing_context_sha256=digest(successor.parameters.processing_context_json.as_bytes());
+    let successor_context:synergy_etdag::ProcessingContext=serde_json::from_value(successor_response["context"].clone()).unwrap();
+    let successor_pin=digest(&serde_json::to_vec(&successor).unwrap());
+    let descriptor=json!({"schema":"nodenetwork-verified-treasury-context-v1","request_sha256":successor_pin,
+        "genesis_sha256":export["genesis_sha256"],"authority_sha256":export["authority_sha256"],"authority_root_sha256":export["authority_root_sha256"],
+        "processing_context_sha256":successor.parameters.processing_context_sha256,
+        "processing_context_root":successor_context.root().unwrap(),"epoch_context_root":"a".repeat(64),
+        "epoch":2,"chain_id":a.chain_id,"network_id":context_formation.network_id});
+    assert!(checked_lineage_descriptor(&descriptor,&successor_pin,&context_formation,&successor.parameters,&export).is_ok());
+    for field in ["request_sha256","genesis_sha256","authority_sha256","authority_root_sha256","processing_context_sha256","processing_context_root","epoch_context_root","epoch","chain_id","network_id"] {
+        let mut bad=descriptor.clone();bad[field]=json!("foreign");
+        assert!(checked_lineage_descriptor(&bad,&successor_pin,&context_formation,&successor.parameters,&export).is_err());
+    }
+    assert!(authenticated_lineage_context(formation,&parent.join("not-dispatched.json"),&successor_pin,&context_formation,&successor.parameters,&export).is_err());
+    assert!(!treasury.join("sends/00000000000000000000").exists());
     let approved = parent.join("treasury-send.json");
     let raw = serde_json::to_vec(&request).unwrap();
     write(&approved, &raw).unwrap();

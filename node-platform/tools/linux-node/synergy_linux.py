@@ -204,10 +204,63 @@ def _require_install_operator():
     require(os.geteuid() == 0, 'installation requires root')
 
 
+def network_provisioning_profile(profile, selection):
+    """Validate the data that may accompany an exact approved network selection."""
+    fields = {'schema', 'profile_id', 'network_name', 'network_id', 'chain_id', 'node_name',
+              'role', 'genesis_hash', 'origin', 'gateway'}
+    require(isinstance(profile, dict) and set(profile) == fields
+            and profile['schema'] == 'synergy-network-provisioning-v1', 'Unsupported network profile')
+    identifier = lambda value: isinstance(value, str) and re.fullmatch(r'[a-z0-9][a-z0-9_-]{1,127}', value)
+    pin = lambda value: isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value)
+    require(identifier(profile['profile_id']) and identifier(profile['network_id'])
+            and isinstance(profile['network_name'], str) and 1 <= len(profile['network_name']) <= 96
+            and profile['network_name'].isprintable()
+            and type(profile['chain_id']) is int and 0 < profile['chain_id'] < 2**64
+            and isinstance(profile['node_name'], str) and re.fullmatch(r'[A-Za-z0-9_-]{1,64}', profile['node_name'])
+            and profile['role'] in ('validator', 'rpc_gateway') and pin(profile['genesis_hash']),
+            'Invalid network profile identity')
+    require(all(profile[key] == selection[key] for key in ('network_id', 'chain_id', 'node_name', 'role')),
+            'Network profile does not bind the selected node and role')
+    origin_fields = {'genesis.json', 'authority.json', 'authority-root.pub',
+                     'network-manifest.json', 'transport-registry.json', 'transport-root.pub'}
+    require(isinstance(profile['origin'], dict) and set(profile['origin']) == origin_fields
+            and all(pin(value) for value in profile['origin'].values()),
+            'Network profile requires the complete signed origin inventory')
+    gateway = profile['gateway']
+    if profile['role'] == 'validator':
+        require(gateway is None, 'Validator profile cannot enable a public gateway')
+        return profile
+    require(isinstance(gateway, dict) and set(gateway) == {
+        'public_hostname', 'tls', 'protocol', 'listen_address', 'validator_address',
+        'validator_relay_port', 'allowed_origins', 'vpn_provider_sha256',
+    }, 'Complete gateway routing and VPN settings required')
+    hostname = gateway['public_hostname']
+    require(isinstance(hostname, str) and len(hostname) <= 253 and '.' in hostname
+            and all(re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label) for label in hostname.split('.'))
+            and gateway['tls'] == 'required' and gateway['protocol'] == 'synergy-json-rpc-v1'
+            and gateway['validator_relay_port'] == 8551
+            and pin(gateway['vpn_provider_sha256']),
+            'Gateway requires a DNS hostname, HTTPS, a supported protocol and a pinned VPN profile')
+    from canary_rpc_relay import configuration
+    configuration(Path('/opt/synergy'), gateway_profile_relay(gateway, 'synv5profileverification'))
+    return profile
+
+
+def gateway_profile_relay(gateway, gateway_address):
+    return {
+        'listen_address': gateway['listen_address'],
+        'role': {
+            'kind': 'gateway',
+            'gateway_address': gateway_address,
+            **{name: gateway[name] for name in ('validator_address', 'validator_relay_port', 'allowed_origins')},
+        },
+    }
+
+
 def install(package, root, role, network_id, chain_id, node_name, *, staged_master_sha256=None):
     _require_install_operator()
     require(re.fullmatch(r'[a-z0-9][a-z0-9_-]{1,127}', network_id), 'explicit network incarnation required')
-    require(0 < chain_id <= (1 << 64) - 1, 'explicit nonzero u64 chain ID required')
+    require(type(chain_id) is int and 0 < chain_id < 2**64, 'explicit nonzero u64 chain ID required')
     package, root = Path(package), Path(root)
     if staged_master_sha256 is not None:
         _staged_master(root, package, staged_master_sha256)
@@ -216,7 +269,6 @@ def install(package, root, role, network_id, chain_id, node_name, *, staged_mast
     manifest = verify_package(package)
     roles = read(package / 'roles/roles.json')
     require(role in roles['roles'] and role in roles['implemented'], 'selected role is not implemented')
-    require(role != 'rpc_gateway' or chain_id == 99999, 'RPC gateway setup is restricted to Canary 99999')
     require(re.fullmatch(r'[a-zA-Z0-9_-]{1,64}', node_name), 'invalid node name')
     # No merge, overwrite, source checkout or old state is copied.
     ignore = shutil.ignore_patterns('._*', '__pycache__')

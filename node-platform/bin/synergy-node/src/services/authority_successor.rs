@@ -618,6 +618,95 @@ fn successor_time_policy(
     Ok(next)
 }
 
+// A spending client may use a retained immutable processing snapshot. Select its
+// exact authenticated autonomous owner, never substitute the latest epoch or
+// treat the RPC response itself as governance/finality evidence.
+fn treasury_processing_scope(
+    tip: &VerifiedAuthority,
+    response: &serde_json::Value,
+) -> Result<synergy_etdag::ProcessingContext, String> {
+    if !tip.autonomous_processing_origin().genesis_autonomous {
+        return Err("treasury lineage requires the authenticated fresh Genesis origin".into());
+    }
+    let context: synergy_etdag::ProcessingContext = serde_json::from_value(response["context"].clone())
+        .map_err(|_| "invalid treasury processing context")?;
+    context.validate().map_err(|_| "invalid treasury processing context")?;
+    let c = &context.authority;
+    let selected = tip.autonomous_authority_at(c.target_height)
+        .ok_or("treasury processing anchor lacks authenticated autonomous history")?;
+    let epoch = &selected.epoch;
+    let policy = selected.protected.as_ref().ok_or("treasury processing policy missing")?;
+    c.validate_with_parameters(&policy.parameters).map_err(|_| "invalid treasury source mapping")?;
+    let registry: synergy_etdag::crypto::IngressKemKeyRegistry =
+        serde_json::from_value(response["ingress_kem_registry"].clone())
+            .map_err(|_| "invalid treasury ingress registry")?;
+    registry.validate_protected_profile().map_err(|_| "invalid treasury ingress registry")?;
+    if !selected.processing_profile_enabled()
+        || response["profile_id"] != synergy_etdag::PROCESSING_PROFILE_ID
+        || c.chain_id != epoch.chain_id || c.network_id != epoch.network_id
+        || c.protocol_version != epoch.protocol_version || c.epoch != epoch.epoch
+        || c.active_validator_set_root != epoch.active_validator_set_root
+        || c.validator_consensus_key_root != epoch.validator_consensus_key_root
+        || c.frozen_voting_weight_root != epoch.frozen_voting_weight_root
+        || c.finalized_epoch_seed_root != epoch.finalized_epoch_seed_root
+        || c.consensus_parameter_root != epoch.consensus_parameter_root
+        || c.cluster_schedule_version != policy.cluster_schedule_version
+        || c.assigned_height_schedule_root != policy.assigned_height_schedule_root
+        || c.cluster_map_root != policy.cluster_map_root
+        || c.assigned_cluster_id != policy.assigned_cluster_id
+        || c.assigned_cluster_membership_root != policy.assigned_cluster_membership_root
+        || c.cryptographic_profile_root != policy.cryptographic_profile_root
+        || c.assigned_cluster_validator_count != selected.registry.active_count() as u64
+        || u128::from(c.assigned_cluster_total_voting_weight) != selected.registry.active_weight().map_err(|e| e.to_string())?
+        || registry != policy.ingress_kem_registry
+        || registry.root().map_err(|_| "invalid treasury ingress root")? != c.ingress_kem_registry_root
+        || (c.source_finalized_height == 0 && c.source_finality_context_root != selected.anchor_parent.reference_id())
+    {
+        return Err("treasury processing context differs from its authenticated epoch and registry".into());
+    }
+    Ok(context)
+}
+
+fn check_treasury_processing_context(config: &NodeConfiguration, request_path: &Path) -> Result<serde_json::Value, String> {
+    let genesis_path = config.genesis_path.as_ref().ok_or("treasury Genesis absent")?;
+    let root_path = config.consensus.authority_trust_key_path.as_ref().ok_or("treasury authority root absent")?;
+    let binding_path = config.consensus.authority_binding.as_ref().ok_or("treasury signed authority absent")?;
+    let stamps = [Stamp::capture(genesis_path)?, Stamp::capture(root_path)?, Stamp::capture(binding_path)?];
+    let raw = apqe_transport::read(request_path, 2 * 1024 * 1024, false)?;
+    let request: serde_json::Value = serde_json::from_slice(&raw).map_err(|_| "invalid treasury request")?;
+    let p = &request["parameters"];
+    let text = p["processing_context_json"].as_str().ok_or("treasury processing bytes missing")?;
+    if request["version"] != 1 || request["operation"] != "treasury_send_prepare"
+        || text.is_empty() || text.len() > 1024 * 1024
+        || p["processing_context_sha256"] != apqe_transport::sha256(text.as_bytes())
+    {
+        return Err("treasury request or exact processing digest differs".into());
+    }
+    // load() authenticates signed Genesis and every retained three-QC closure;
+    // it reads only public authority files, never opens a FinalityStore writer.
+    let tip = load(config)?.ok_or("authenticated treasury authority unavailable")?;
+    let response = serde_json::from_str(text).map_err(|_| "invalid treasury processing response")?;
+    let context = treasury_processing_scope(&tip, &response)?;
+    let origin = tip.autonomous_processing_origin();
+    let genesis = apqe_transport::read(genesis_path, 4 * 1024 * 1024, false)?;
+    let genesis_sha = apqe_transport::sha256(&genesis);
+    if p["genesis_sha256"] != genesis_sha {
+        return Err("treasury request differs from the authenticated Genesis bytes".into());
+    }
+    let root = apqe_transport::read(root_path, 8192, false)?;
+    if !stamps.iter().all(Stamp::unchanged) {
+        return Err("treasury origin changed during native verification".into());
+    }
+    let selected = tip.autonomous_authority_at(context.authority.target_height).ok_or("treasury epoch disappeared")?;
+    Ok(serde_json::json!({"schema":"nodenetwork-verified-treasury-context-v1",
+        "request_sha256":apqe_transport::sha256(&raw),"genesis_sha256":genesis_sha,
+        "authority_sha256":apqe_transport::sha256(origin.binding_bytes()),"authority_root_sha256":apqe_transport::sha256(&root),
+        "processing_context_sha256":apqe_transport::sha256(text.as_bytes()),
+        "processing_context_root":context.root().map_err(|_| "invalid treasury context root")?,
+        "epoch_context_root":selected.epoch.root().map_err(|e| e.to_string())?,
+        "epoch":selected.epoch.epoch,"chain_id":selected.epoch.chain_id,"network_id":selected.epoch.network_id}))
+}
+
 fn canary_successor_range(
     chain: u64,
     epoch: u64,
@@ -1227,7 +1316,7 @@ fn autonomous_bootstrap_cli(
 pub(crate) fn cli(args: impl Iterator<Item = String>) -> Result<(), String> {
     let args: Vec<_> = args.take(10).collect();
     let [command, config, proposal_path, extra @ ..] = args.as_slice() else {
-        return Err("usage: authority-successor check|activate|activate-observer CONFIG PROPOSAL; check-derived|check-derived-chain CONFIG PROOF; prepare-autonomous CONFIG WITNESS OUTPUT; check-autonomous|check-autonomous-local CONFIG ARTIFACT; export-boundary CONFIG WITNESS; prepare-payload CONFIG WITNESS OUTPUT; bundle CONFIG WITNESS SIGNED_AUTHORITY OUTPUT; check-local CONFIG PROPOSAL; registry CONFIG PROPOSAL CUSTODY OUTPUT; check-network CONFIG PROPOSAL REGISTRY WORKSPACE [ADMISSION]; issue-admission CONFIG PROPOSAL REGISTRY WORKSPACE ENROLLMENT CUSTODY UNLOCK OUTPUT".into());
+        return Err("usage: authority-successor check|activate|activate-observer CONFIG PROPOSAL; check-derived|check-derived-chain CONFIG PROOF; check-processing-context CONFIG SEND_REQUEST; prepare-autonomous CONFIG WITNESS OUTPUT; check-autonomous|check-autonomous-local CONFIG ARTIFACT; export-boundary CONFIG WITNESS; prepare-payload CONFIG WITNESS OUTPUT; bundle CONFIG WITNESS SIGNED_AUTHORITY OUTPUT; check-local CONFIG PROPOSAL; registry CONFIG PROPOSAL CUSTODY OUTPUT; check-network CONFIG PROPOSAL REGISTRY WORKSPACE [ADMISSION]; issue-admission CONFIG PROPOSAL REGISTRY WORKSPACE ENROLLMENT CUSTODY UNLOCK OUTPUT".into());
     };
     let config = Path::new(config);
     if !config.is_absolute() {
@@ -1244,6 +1333,10 @@ pub(crate) fn cli(args: impl Iterator<Item = String>) -> Result<(), String> {
     .then(|| crate::services::checkpoint::lock_configuration(config))
     .transpose()?;
     let configuration = synergy_config::load(config).map_err(|e| e.to_string())?;
+    if command == "check-processing-context" && extra.is_empty() {
+        println!("{}", check_treasury_processing_context(&configuration, Path::new(proposal_path))?);
+        return Ok(());
+    }
     if configuration
         .consensus
         .autonomous_epoch_activation
@@ -1862,6 +1955,37 @@ pub(super) fn qualify_fresh_genesis_autonomous(
         current = load(config).unwrap().unwrap(); // exact signed-origin + disk proof replay
         assert_eq!(current.epoch, verified.epoch);
         assert_eq!(current.anchor_parent, verified.anchor_parent);
+        // Reuse the real signed-Genesis/three-QC fixture, not a second authority
+        // algorithm or a simulated running cohort, for spending-context trust.
+        let target = proof.finalized.height + current.protected.as_ref().unwrap().parameters.target_height_offset;
+        let context = synergy_etdag::ProcessingContext { context_version:1,
+            profile_id:synergy_etdag::PROCESSING_PROFILE_ID.into(),
+            authority:current.protected_target(Some(&proof.finalized), target).unwrap().0 };
+        let response = serde_json::json!({"profile_id":synergy_etdag::PROCESSING_PROFILE_ID,
+            "context":context,"ingress_kem_registry":current.protected_ingress_registry().unwrap()});
+        assert_eq!(treasury_processing_scope(&current, &response).unwrap(), context);
+        assert!(treasury_processing_scope(&origin, &response).is_err()); // No skipped missing history.
+        for (field,value) in [("epoch",serde_json::json!(expected_epoch+1)),
+            ("network_id",serde_json::json!("foreign")),("finalized_epoch_seed_root",serde_json::json!("0".repeat(64))),
+            ("assigned_cluster_total_voting_weight",serde_json::json!(999)),("source_finalized_height",serde_json::json!(0))] {
+            let mut bad=response.clone();bad["context"]["authority"][field]=value;
+            assert!(treasury_processing_scope(&current,&bad).is_err());
+        }
+        let mut bad=response.clone();bad["ingress_kem_registry"]["records"][0]["public_key"]["public_key"][0]=serde_json::json!(99);
+        assert!(treasury_processing_scope(&current,&bad).is_err());
+        let text=response.to_string();
+        let request=serde_json::json!({"version":1,"operation":"treasury_send_prepare","parameters":{
+            "genesis_sha256":apqe_transport::sha256(&fs::read(config.genesis_path.as_ref().unwrap()).unwrap()),
+            "processing_context_json":text,"processing_context_sha256":apqe_transport::sha256(text.as_bytes())}});
+        let request_path=proof_root.join("treasury-context-request.json");
+        fs::write(&request_path,serde_json::to_vec(&request).unwrap()).unwrap();
+        let descriptor=check_treasury_processing_context(config,&request_path).unwrap();
+        assert_eq!(descriptor["epoch"],expected_epoch);
+        assert_eq!(descriptor["request_sha256"],apqe_transport::sha256(&fs::read(&request_path).unwrap()));
+        let mut bad=request.clone();bad["parameters"]["genesis_sha256"]=serde_json::json!("0".repeat(64));
+        fs::write(&request_path,serde_json::to_vec(&bad).unwrap()).unwrap();
+        assert!(check_treasury_processing_context(config,&request_path).is_err());
+        fs::remove_file(&request_path).unwrap();
         assert!(load_next_runtime_autonomous(config, origin.clone(), expected_epoch+1).is_err());
         let path = proof_root.join(format!("epoch-{expected_epoch:020}.json"));
         let mut broken: DerivedEpochProof = serde_json::from_slice(&encoded).unwrap();

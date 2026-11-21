@@ -1093,7 +1093,7 @@ def stage_engineering_update(stream, release_id, pin, reconcile=False):
 # The document is not a public policy issuer, membership proof or credential API.
 AUTHORIZATION_PROFILE='nodenetwork-isolated-formation-authorization-v1'
 AUTHORIZATION_LIMIT=12*1024*1024
-AUTHORIZATION_FILES={'gateway-purpose.json':16384,'commissioning-readiness.json':128*1024,'managed-guest.json':16384,'formation-context.json':4096,'vpn-ca.pem':128*1024,'vpn-provider.json':16384,'vpn-enrollment.json':16384,'vpn-server-binding.json':16384,'vpn-retirement.json':16384,'vpn-unused-cancellation.json':16384,
+AUTHORIZATION_FILES={'network-provisioning.json':16384,'gateway-purpose.json':16384,'commissioning-readiness.json':128*1024,'managed-guest.json':16384,'formation-context.json':4096,'vpn-ca.pem':128*1024,'vpn-provider.json':16384,'vpn-enrollment.json':16384,'vpn-server-binding.json':16384,'vpn-retirement.json':16384,'vpn-unused-cancellation.json':16384,
     'commissioning/config/node.json':1024*1024,'commissioning/config/start-authorized.json':65536,
     **{'commissioning/network/'+name:limit for name,limit in {
         'genesis.json':4*1024*1024,'authority.json':1024*1024,'authority-root.pub':8192,
@@ -1198,9 +1198,19 @@ def authorization_inputs(doc,encoded):
         require(0<len(data)<=limit and base64.b64encode(data).decode()==text
                 and hashlib.sha256(data).hexdigest()==pin,'Authorization artifact digest or encoding differs')
         result[name]=data
-    if any(row['operation']=='gateway_install' for row in doc['requests']):
+    gateway_install=any(row['operation']=='gateway_install' for row in doc['requests'])
+    profile_raw=result.get('network-provisioning.json')
+    if profile_raw is not None:
+        require(gateway_install, 'Gateway network settings require the exact initial installation grant')
+        from synergy_linux import network_provisioning_profile
+        profile=network_provisioning_profile(json.loads(profile_raw), dict(doc, role='rpc_gateway'))
+        require(all(doc['artifacts'].get('commissioning/network/'+name)==pin for name,pin in profile['origin'].items()),
+                'Network profile origin differs from the approved signed files')
+    if gateway_install:
         names={'commissioning/network/'+name for name in ('genesis.json','authority.json','authority-root.pub','network-manifest.json','transport-registry.json','transport-root.pub')}
-        require(set(result)==names|{'formation-context.json'} and len(doc['requests'])==1 and doc['chain_id']==99999 and isinstance(doc['genesis_pins'],dict)
+        expected=names|{'formation-context.json'}
+        if profile_raw is not None:expected.add('network-provisioning.json')
+        require(set(result)==expected and len(doc['requests'])==1 and isinstance(doc['genesis_pins'],dict)
                 and all(doc['genesis_pins'].get(name)==doc['artifacts'].get('commissioning/network/'+name) for name in ('genesis.json','authority.json','authority-root.pub')),
                 'Gateway installation requires only its exact public formation and six-file origin with one gateway grant')
     if 'gateway-purpose.json' in result:
@@ -1211,7 +1221,7 @@ def authorization_inputs(doc,encoded):
         fields={'format','purpose','formation_sha256','transport_review_sha256','issuer_root_sha256','gateway_enrollment_sha256',
                 'genesis_sha256','authority_sha256','registry_sha256','valid_from_unix','expires_at_unix'}
         require(isinstance(purpose,dict) and set(purpose)==fields and purpose['format']=='synergy-engineering-gateway-purpose-v1'
-                and purpose['purpose']=='engineering-rpc-gateway-admission-v1' and doc['chain_id']==99999
+                and purpose['purpose']=='engineering-rpc-gateway-admission-v1'
                 and all(isinstance(purpose[k],str) and re.fullmatch('[a-f0-9]{64}',purpose[k]) for k in fields-{'format','purpose','valid_from_unix','expires_at_unix'})
                 and type(purpose['valid_from_unix']) is int and type(purpose['expires_at_unix']) is int
                 and 0<purpose['valid_from_unix']<purpose['expires_at_unix']<2**53

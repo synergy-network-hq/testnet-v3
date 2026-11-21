@@ -185,8 +185,8 @@ GATEWAY_RECEIPT = 'evidence/vpn-gateway-route.json'
 
 def gateway_target(root, value):
     receipt = read(root/'installation.json')
-    require(receipt.get('role') == 'rpc_gateway' and receipt.get('chain_id') == 99999,
-            'restricted TCP enrollment requires the Canary RPC gateway role')
+    require(receipt.get('role') == 'rpc_gateway' and type(receipt.get('chain_id')) is int
+            and 0 < receipt['chain_id'] < 2**64, 'restricted TCP enrollment requires a scoped RPC gateway')
     require(isinstance(value, dict) and set(value) == {'ip', 'port'}
             and isinstance(value['ip'], str) and type(value['port']) is int
             and value['port'] == GATEWAY_PORT, 'exact validator TCP 8551 target required')

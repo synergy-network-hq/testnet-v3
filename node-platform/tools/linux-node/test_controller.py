@@ -48,6 +48,20 @@ class ControllerTests(unittest.TestCase):
             self.assertFalse(row['available'])
             with self.assertRaisesRegex(c.Refused,'engine required'):self.controller.dispatch(query)
         self.assertFalse((self.control/'audit.jsonl').exists())
+    def test_inventory_binds_only_exact_staged_network_profile(self):
+        path = self.control / 'authorization/inputs/network-provisioning.json'
+        path.parent.mkdir(parents=True, mode=0o700)
+        self.save(path, {'schema': 'synergy-network-provisioning-v1'})
+        self.policy['authorization_files'] = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()}
+        self.save(self.control / 'policy.json', self.policy)
+        self.assertIn(path.relative_to(self.root).as_posix(), c.control_inventory(self.root)[0])
+        self.save(path, {'schema': 'changed'})
+        with self.assertRaisesRegex(c.Refused, 'Authorization input drift'):
+            c.control_inventory(self.root)
+        self.policy['authorization_files'] = {'unexpected.json': 'a' * 64}
+        self.save(self.control / 'policy.json', self.policy)
+        with self.assertRaisesRegex(c.Refused, 'Unexpected authorization input'):
+            c.control_inventory(self.root)
     def test_runtime_probe_optional_bytes_are_pinned_before_dispatch(self):
         import bootstrap
         path=self.control/'tools/runtime_probe.py';path.write_bytes(b'authenticated new read engine');path.chmod(0o600)

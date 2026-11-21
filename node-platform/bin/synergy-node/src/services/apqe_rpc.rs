@@ -45,7 +45,7 @@ fn validate_binding(
     if p.schema_version != 1
         || p.scope != "isolated-development-canary"
         || p.protocol != PROTOCOL
-        || p.chain_id != 99999
+        || p.chain_id == 0
         || p.chain_id != base.payload.chain_id
         || p.network_id != base.payload.network_id
         || p.genesis_artifact_sha256 != base.network.genesis_sha256
@@ -60,7 +60,7 @@ fn validate_binding(
         || p.gateways.is_empty()
         || p.gateways.len() > 16
     {
-        return Err("RPC gateway admission differs from authenticated current canary".into());
+        return Err("RPC gateway admission differs from the authenticated network".into());
     }
     let mut ids = BTreeSet::new();
     let mut keys = BTreeSet::new();
@@ -261,8 +261,8 @@ pub(crate) fn inspect_gateway_origin(
 }
 
 fn snapshot(config: &NodeConfiguration) -> Result<Snapshot, String> {
-    if config.chain_id != 99999 {
-        return Err("RPC relay is restricted to isolated Canary 99999".into());
+    if config.chain_id == 0 {
+        return Err("RPC relay requires an explicit nonzero chain ID".into());
     }
     let selected = config
         .apqe_transport

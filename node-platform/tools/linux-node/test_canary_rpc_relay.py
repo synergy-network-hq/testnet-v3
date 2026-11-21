@@ -13,6 +13,7 @@ from test_lifecycle import LifecycleTests, save
 class ConfigurationTests(unittest.TestCase):
     def setUp(self):
         self.root=Path('/opt/synergy')
+        self.selection={'chain_id':14002,'network_id':'relay-fixture'}
         self.validator={'listen_address':'10.69.1.2:8551','role':{'kind':'validator','validator_address':'synv1abc','gateway_vpn_ip':'10.69.1.3'}}
         self.gateway={'listen_address':'127.0.0.1:8552','role':{'kind':'gateway','gateway_address':'synv5abc','validator_address':'synv1abc','validator_relay_port':8551,'allowed_origins':['https://example.com']}}
     def test_role_specific_paths_and_unit_no_autostart(self):
@@ -44,19 +45,19 @@ class ConfigurationTests(unittest.TestCase):
     def test_native_check_failure_removes_only_created_candidate(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp)/'synergy';(root/'config').mkdir(parents=True)
-            save(root/'config/node.json',{'chain_id':99999})
-            with patch.object(life,'_require_operator'),patch.object(life,'_sealed_receipt'),patch.object(relay,'native',side_effect=ValueError('bad signature')):
+            save(root/'config/node.json',self.selection)
+            with patch.object(life,'_require_operator'),patch.object(life,'_sealed_receipt',return_value=(self.selection,{})),patch.object(relay,'native',side_effect=ValueError('bad signature')):
                 with self.assertRaisesRegex(ValueError,'bad signature'):relay.configure(root,self.gateway)
             self.assertEqual([p.name for p in (root/'config').iterdir()],['node.json'])
     def test_configuration_publishes_only_after_actual_native_check(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp)/'synergy';(root/'config').mkdir(parents=True)
-            save(root/'config/node.json',{'chain_id':99999})
+            save(root/'config/node.json',self.selection)
             def checked(args):
                 self.assertFalse((root/relay.CONFIG).exists())
                 self.assertEqual(args[1:3],['canary-rpc-relay','check'])
                 self.assertEqual(json.loads(args[-1].read_text())['node_config_path'],str(root/'config/node.json'))
-            with patch.object(life,'_require_operator'),patch.object(life,'_sealed_receipt'),patch.object(relay,'native',side_effect=checked):
+            with patch.object(life,'_require_operator'),patch.object(life,'_sealed_receipt',return_value=(self.selection,{})),patch.object(relay,'native',side_effect=checked):
                 result=relay.configure(root,self.gateway)
                 self.assertFalse(result['services_started'])
                 with self.assertRaisesRegex(ValueError,'already exists'):relay.configure(root,self.gateway)

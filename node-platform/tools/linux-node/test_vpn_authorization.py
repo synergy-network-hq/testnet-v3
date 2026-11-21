@@ -42,14 +42,18 @@ class AuthorizationTests(unittest.TestCase):
         return {'schema':'nodenetwork-vpn-unused-preflight-v1','quiescent':True,
                 'attempt_sha256':'d'*64,'binding':self.b}
     def test_gateway_policy_is_independent_exact_tcp_and_retained_network_scope(self):
-        self.b['chain_id']=99999
         self.p={**self.p,'profile':v.GATEWAY_PROFILE,'network_binding':{k:self.b[k] for k in ('network_id','chain_id','formation_sha256')},'required_gateway_tcp':{'ip':'10.69.0.254','port':8551}}
         del self.p['required_peer_ips']
         raw=v.encode(self.p);sha=hashlib.sha256(raw).hexdigest()
         self.assertEqual(v.provider_policy(raw,sha,self.ca,1000),self.p)
-        for changed in ({**self.p,'required_peer_ips':['10.69.0.254']},{**self.p,'required_gateway_tcp':{'ip':'10.69.0.254','port':443}},{**self.p,'required_gateway_tcp':{'ip':'127.0.0.1','port':8551}},{**self.p,'network_binding':{**self.p['network_binding'],'chain_id':999998}},{**self.p,'expires_at':999}):
+        for changed in ({**self.p,'required_peer_ips':['10.69.0.254']},{**self.p,'required_gateway_tcp':{'ip':'10.69.0.254','port':443}},{**self.p,'required_gateway_tcp':{'ip':'127.0.0.1','port':8551}},{**self.p,'expires_at':999}):
             data=v.encode(changed)
             with self.assertRaises(ValueError):v.provider_policy(data,hashlib.sha256(data).hexdigest(),self.ca,1000)
+        other={**self.p,'network_binding':{**self.p['network_binding'],'chain_id':self.b['chain_id']+1}}
+        other_raw=v.encode(other)
+        other_policy=v.provider_policy(other_raw,hashlib.sha256(other_raw).hexdigest(),self.ca,1000)
+        with self.assertRaisesRegex(ValueError,'differs from approved scope'):
+            v.network_scope(other_policy,self.b)
         with self.assertRaises(ValueError):v.provider_policy(raw,'0'*64,self.ca,1000)
         self.name='nn-'+hashlib.sha256(v.encode(self.b)).hexdigest()[:60];self.key['name']=self.name
         self.issue()

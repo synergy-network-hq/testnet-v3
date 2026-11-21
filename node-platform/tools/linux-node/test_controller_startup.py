@@ -65,11 +65,12 @@ except m.Refused as e:
                 raw=('pinned-'+name).encode();(stage/'tools'/name).write_bytes(raw)
                 files['tools/'+name]=hashlib.sha256(raw).hexdigest()
             full=bootstrap.initial_engine_pins(stage,{'files':files})
-            self.assertEqual(set(full),set(controller.ENGINE_MODULES))
+            self.assertEqual(set(full),set(controller.ENGINE_MODULES)|{'runtime_probe.py'})
             self.assertEqual(full['guest_lifecycle.py'],files['tools/guest_lifecycle.py'])
             self.assertNotIn('unapproved.py',full)
-            self.assertEqual(bootstrap.enrolled_engine({'engine_files':full}),tuple(sorted(controller.ENGINE_MODULES)))
+            self.assertEqual(bootstrap.enrolled_engine({'engine_files':full}),tuple(sorted(full)))
             del files['tools/vpn_authorization.py'];del files['tools/treasury_send.py']
+            del files['tools/runtime_probe.py']
             legacy=bootstrap.initial_engine_pins(stage,{'files':files})
             self.assertEqual(set(legacy),set((*bootstrap.ENGINE,'guest_lifecycle.py')))
             self.assertEqual(set(bootstrap.enrolled_engine({'engine_files':legacy})),set(legacy))

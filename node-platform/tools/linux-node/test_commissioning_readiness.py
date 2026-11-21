@@ -135,7 +135,7 @@ class ObservationTests(unittest.TestCase):
         for field,value in [('network_id','wrong'),('chain_id',99998),('formation_sha256',pin('other'))]:
             original=self.provider['network_binding'][field];self.provider['network_binding'][field]=value
             save(path,self.provider);self.policy['authorization_files']['vpn-provider.json']=layout.digest(path)
-            with self.assertRaisesRegex(ValueError,'Controlled Canary network'):self.run_observation()
+            with self.assertRaisesRegex(ValueError,'Controlled network differs from approved scope'):self.run_observation()
             self.provider['network_binding'][field]=original
 
     def test_revoked_signed_member_refuses_before_any_probe(self):

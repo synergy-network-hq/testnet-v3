@@ -86,7 +86,7 @@ fn validate_payload(
         || a.valid_from_unix < owner.payload.valid_from_unix
         || a.expires_at_unix > owner.payload.expires_at_unix
         || p.gateway_enrollment_json.len() > 128 * 1024
-        || owner.payload.chain_id != 99999
+        || owner.payload.chain_id == 0
     {
         return Err(
             "Gateway additional-purpose approval differs from exact formation owner".into(),

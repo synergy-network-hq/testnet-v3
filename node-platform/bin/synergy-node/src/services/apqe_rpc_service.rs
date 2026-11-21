@@ -1,4 +1,4 @@
-//! Opt-in Canary 99999 relay. Public HTTP terminates on loopback; the native
+//! Opt-in authenticated RPC relay. Public HTTP terminates on loopback; the native
 //! gateway-to-validator hop always uses APQE. The upstream is the validator's
 //! existing loopback RPC, with a single dispatch and no alternate routing.
 use super::{
