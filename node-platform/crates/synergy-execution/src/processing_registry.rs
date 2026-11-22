@@ -12,14 +12,14 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use synergy_etdag::execution::{
-    ProcessingProposalMaterial, ProcessingReadyItem, ProcessingReadyView, ProcessingSelection,
-    ProcessingSelectionPolicy,
+    ProcessingOrderGroup, ProcessingProposalMaterial, ProcessingReadyItem, ProcessingReadyView,
+    ProcessingSelection, ProcessingSelectionPolicy,
 };
 use synergy_etdag::{EtdagDigest, EtdagError};
 use synergy_state::world_resources::{
-    WorldResourceBudget, WorldResourceError, WorldResourcePermit,
+    BudgetedWorld, WorldResourceBudget, WorldResourceError, WorldResourcePermit,
 };
-use synergy_state::{ProtocolChange, StateDiff, WorldState};
+use synergy_state::{ProtocolChange, StateDiff, StateError, WorldState};
 
 const META_KEY: &str = "etdag-processing-ready-v1/meta";
 const ITEM_PREFIX: &str = "etdag-processing-ready-v1/item/";
@@ -38,6 +38,44 @@ pub struct ProcessingReadyRecord {
 }
 
 impl ProcessingReadyRecord {
+    /// Bind authenticated plaintext to its original order coordinates.
+    /// Publication still requires the native closed-parent/reveal verifier.
+    pub fn for_revealed_member(
+        namespace: &EtdagDigest,
+        claim: &crate::ProcessingMemberClaim,
+        plaintext: &[u8],
+    ) -> Result<Self, ProcessingRegistryError> {
+        let member = &claim.member;
+        let payload_root = crate::processing_payload_root(
+            &member.processing_context_root,
+            &member.envelope.tx_commitment,
+            plaintext,
+        )?;
+        let readiness_root = EtdagDigest::from_canonical(
+            "SYNERGY_ETDAG_PROCESSING_NATIVE_READY_V1",
+            &(namespace, claim, &payload_root),
+        )?;
+        let record = Self {
+            processing_context_root: member.processing_context_root.clone(),
+            authorization_root: member.authorization_root.clone(),
+            sender_wallet: member.envelope.sender_id.clone(),
+            sender_nonce: member.envelope.nonce_slot,
+            item: ProcessingReadyItem {
+                group_number: claim.group_number,
+                group_root: claim.group_root.clone(),
+                order_position: claim.order_position,
+                envelope_id: member.envelope.tx_commitment.clone(),
+                payload_root,
+                readiness_root,
+                gas_class_units: member.envelope.gas_class_units,
+                encoded_bytes: plaintext.len() as u64,
+                remaining_dependencies: member.envelope.protocol_dependencies.clone(),
+            },
+        };
+        record.validate()?;
+        Ok(record)
+    }
+
     fn validate(&self) -> Result<(), ProcessingRegistryError> {
         for root in [&self.processing_context_root, &self.authorization_root] {
             root.validate()?;
@@ -199,7 +237,51 @@ pub struct ParentProcessingSelection<'a, 'world> {
     selection: ProcessingSelection,
     _permit: WorldResourcePermit,
 }
+
+pub struct ProcessingLifecycleTransition {
+    pub(crate) ready: ProcessingRegistryTransition,
+    pub(crate) groups: crate::ProcessingGroupTransition,
+}
+
+impl ProcessingLifecycleTransition {
+    /// The selected transaction effects and these diffs belong to the same
+    /// speculative candidate. A failure releases the private result.
+    pub fn apply(&self, mut candidate: BudgetedWorld) -> Result<BudgetedWorld, StateError> {
+        candidate.try_apply(self.ready.diff())?;
+        candidate.try_apply(self.groups.diff())?;
+        Ok(candidate)
+    }
+}
+
 impl ParentProcessingSelection<'_, '_> {
+    pub fn prepare_lifecycle(
+        &self,
+        publications: &[ProcessingReadyRecord],
+        new_group: Option<&ProcessingOrderGroup>,
+        verifier: &impl ProcessingReadinessVerifier,
+    ) -> Result<ProcessingLifecycleTransition, ProcessingRegistryError> {
+        let ready = self.transition(
+            publications,
+            verifier,
+            self.selection.maximum_gas,
+            self.selection.maximum_bytes,
+        )?;
+        let namespace = &self.registry.metadata.namespace_root;
+        let groups = crate::processing_group_transition(
+            self.registry.parent,
+            namespace,
+            self.records(),
+            new_group,
+            verifier,
+            &self.registry.budget,
+        )?;
+        // Only already-closed assignments in the old parent may publish READY.
+        for record in publications {
+            crate::verify_processing_record_assignment(self.registry.parent, namespace, record)?;
+        }
+        Ok(ProcessingLifecycleTransition { ready, groups })
+    }
+
     pub fn selection(&self) -> &ProcessingSelection {
         &self.selection
     }

@@ -33,15 +33,23 @@ use synergy_etdag::{
 };
 use synergy_execution::{
     processing_group_state, processing_group_transition, processing_member_claim,
-    ProcessingReadinessVerifier, ProcessingReadyRecord,
+    processing_member_claim_optional, verify_processing_payload,
+    verify_processing_record_assignment, ParentProcessingRegistry, ProcessingReadinessVerifier,
+    ProcessingReadyRecord,
 };
 use synergy_posy::{FinalizedBlockRecord, ValidatorRecord, ValidatorStatus};
-use synergy_state::world_resources::WorldResourceBudget;
+use synergy_state::world_resources::{BudgetedWorld, WorldResourceBudget};
+
+pub(super) struct ClosedCandidateOrder {
+    permission: ProcessingRevealPermission,
+    world: BudgetedWorld,
+}
 
 pub(super) struct OpenedCandidateEnvelope {
     opening: AuthenticatedProcessingOpening,
     envelope: ProcessingEnvelope,
     context: ProcessingContext,
+    order: Option<ClosedCandidateOrder>,
 }
 
 pub(super) enum CandidateEnvelopeProfile {
@@ -62,6 +70,86 @@ impl OpenedCandidateEnvelope {
     }
     pub(super) fn context(&self) -> &ProcessingContext {
         &self.context
+    }
+
+    /// Exercise the shared READY publication and consumption against the same
+    /// native-verified bytes. The first check stages protected writes privately.
+    pub(super) fn execute_ordered<T>(
+        &self,
+        apply_action: impl Fn(&mut BudgetedWorld) -> Result<T, String>,
+    ) -> Result<(BudgetedWorld, T), String> {
+        let order = self
+            .order
+            .as_ref()
+            .ok_or("candidate lacks a closed order")?;
+        let parent = order.world.as_ref();
+        let namespace = &order.permission.namespace_root;
+        let budget = order.world.budget();
+        let mut preflight = BudgetedWorld::try_clone_world(parent, budget).map_err(err)?;
+        apply_action(&mut preflight)?;
+        drop(preflight);
+
+        let claim = processing_member_claim(
+            parent,
+            &self.envelope.aad.sender_id,
+            self.envelope.aad.nonce_slot,
+        )
+        .map_err(err)?;
+        let payload = self.plaintext();
+        let scratch = budget.reserve(payload.len() * 8 + 4096).map_err(err)?;
+        let record =
+            ProcessingReadyRecord::for_revealed_member(namespace, &claim, payload).map_err(err)?;
+        drop(scratch);
+        let verifier = FixtureReady {
+            namespace,
+            record: &record,
+        };
+        let maximum_gas = record.item.gas_class_units;
+        let maximum_bytes = record.item.encoded_bytes;
+
+        let registry = ParentProcessingRegistry::read(parent, namespace, budget).map_err(err)?;
+        let selected = registry
+            .select(&verifier, maximum_gas, maximum_bytes)
+            .map_err(err)?;
+        assert_eq!(selected.records().count(), 0);
+        let lifecycle = selected
+            .prepare_lifecycle(std::slice::from_ref(&record), None, &verifier)
+            .map_err(err)?;
+        let published = lifecycle
+            .apply(BudgetedWorld::try_clone_world(parent, budget).map_err(err)?)
+            .map_err(err)?;
+        assert_eq!(published.as_ref().accounts, parent.accounts);
+
+        let registry =
+            ParentProcessingRegistry::read(published.as_ref(), namespace, budget).map_err(err)?;
+        let selected = registry
+            .select(&verifier, maximum_gas, maximum_bytes)
+            .map_err(err)?;
+        let mut records = selected.records();
+        let committed = records
+            .next()
+            .ok_or("published protected candidate was not selected")?;
+        assert_eq!(committed, &record);
+        assert!(records.next().is_none());
+        verify_processing_payload(committed, payload, budget).map_err(err)?;
+        let lifecycle = selected
+            .prepare_lifecycle(&[], None, &verifier)
+            .map_err(err)?;
+        let mut execution =
+            BudgetedWorld::try_clone_world(published.as_ref(), budget).map_err(err)?;
+        let result = apply_action(&mut execution)?;
+        let settled = lifecycle.apply(execution).map_err(err)?;
+        assert!(processing_member_claim_optional(
+            settled.as_ref(),
+            &record.sender_wallet,
+            record.sender_nonce
+        )
+        .map_err(err)?
+        .is_none());
+        let consumed =
+            ParentProcessingRegistry::read(settled.as_ref(), namespace, budget).map_err(err)?;
+        assert!(consumed.records().is_empty());
+        Ok((settled, result))
     }
 }
 struct SignedShares(Vec<ProcessingDecryptShare>);
@@ -105,7 +193,7 @@ impl CandidateOrderFixture<'_> {
         context: &ProcessingContext,
         parent: &WorldState,
         authenticate: impl Fn(&CandidateAdmission) -> Result<T, String>,
-    ) -> Result<(T, ProcessingRevealPermission), String> {
+    ) -> Result<(T, ClosedCandidateOrder), String> {
         let envelope = &admission.envelope;
         // Selected for this isolated ordering fixture. The deployed profile
         // supplies its ratified class policy and authenticated fee schedule.
@@ -203,41 +291,41 @@ impl CandidateOrderFixture<'_> {
             ordered: &ordered,
             successor: &successor,
         };
-        let mut world = parent.clone();
-        processing_group_transition(
-            &world,
+        let mut world = BudgetedWorld::try_clone_world(parent, self.budget).map_err(err)?;
+        let publish = processing_group_transition(
+            world.as_ref(),
             &namespace,
             std::iter::empty(),
             Some(&ordered),
             &verifier,
             self.budget,
         )
-        .map_err(err)?
-        .diff()
-        .apply(&mut world)
         .map_err(err)?;
-        assert!(processing_group_state(&world, &namespace, 1)
+        world.try_apply(publish.diff()).map_err(err)?;
+        assert!(processing_group_state(world.as_ref(), &namespace, 1)
             .map_err(err)?
             .closed_by_successor
             .is_none());
-        processing_group_transition(
-            &world,
+        let close = processing_group_transition(
+            world.as_ref(),
             &namespace,
             std::iter::empty(),
             Some(&successor),
             &verifier,
             self.budget,
         )
-        .map_err(err)?
-        .diff()
-        .apply(&mut world)
         .map_err(err)?;
+        world.try_apply(close.diff()).map_err(err)?;
         let item = &ordered.members[0];
-        let claim =
-            processing_member_claim(&world, &item.envelope.sender_id, item.envelope.nonce_slot)
-                .map_err(err)?;
+        let claim = processing_member_claim(
+            world.as_ref(),
+            &item.envelope.sender_id,
+            item.envelope.nonce_slot,
+        )
+        .map_err(err)?;
         assert_eq!(&claim.member, item);
-        let group = processing_group_state(&world, &namespace, claim.group_number).map_err(err)?;
+        let group =
+            processing_group_state(world.as_ref(), &namespace, claim.group_number).map_err(err)?;
         let permission = ProcessingRevealPermission {
             namespace_root: namespace,
             group_number: claim.group_number,
@@ -250,7 +338,7 @@ impl CandidateOrderFixture<'_> {
             parent_block_id: self.source.block_id.clone(),
             validation_id: self.source.finality_certificate_id.clone(),
         };
-        Ok((authorized, permission))
+        Ok((authorized, ClosedCandidateOrder { permission, world }))
     }
 }
 
@@ -284,6 +372,49 @@ impl ProcessingReadinessVerifier for FixtureOrder<'_> {
     }
 }
 
+struct FixtureReady<'a> {
+    namespace: &'a EtdagDigest,
+    record: &'a ProcessingReadyRecord,
+}
+
+impl ProcessingReadinessVerifier for FixtureReady<'_> {
+    fn first_unconsumed_position(
+        &self,
+        record: &ProcessingReadyRecord,
+        parent: &WorldState,
+    ) -> Result<Option<u32>, String> {
+        let group = processing_group_state(parent, self.namespace, record.item.group_number)
+            .map_err(err)?;
+        Ok(Some(group.next_position))
+    }
+
+    fn verify_publication(
+        &self,
+        record: &ProcessingReadyRecord,
+        parent: &WorldState,
+    ) -> Result<(), String> {
+        if record != self.record {
+            return Err("publication differs from the validated protected opening".into());
+        }
+        verify_processing_record_assignment(parent, self.namespace, record)
+            .map(drop)
+            .map_err(err)
+    }
+
+    fn identity_is_current(
+        &self,
+        record: &ProcessingReadyRecord,
+        parent: &WorldState,
+    ) -> Result<bool, String> {
+        self.verify_publication(record, parent)?;
+        Ok(parent
+            .accounts
+            .get(&record.sender_wallet)
+            .map(|account| account.nonce)
+            == Some(record.sender_nonce))
+    }
+}
+
 /// Opens exactly the original supplied bytes. Report authentication and every
 /// KEM operation use the native APQE owner; no embedded crypto fallback exists.
 /// Passed chain/source/sender/nonce values are fixture coordinates only. This
@@ -302,7 +433,7 @@ pub(super) fn open_candidate_envelope<T>(
         &ProcessingEnvelope,
         &ProcessingContext,
         &CandidateOrderFixture<'_>,
-    ) -> Result<(T, Option<ProcessingRevealPermission>), String>,
+    ) -> Result<(T, Option<ClosedCandidateOrder>), String>,
 ) -> Result<(OpenedCandidateEnvelope, T), String> {
     let source_height = source.height;
     if chain_id == 0 || source_height == 0 {
@@ -467,17 +598,20 @@ pub(super) fn open_candidate_envelope<T>(
         source,
         budget: &budget,
     };
-    let (admission, permission) = before_open(&envelope, &context, &ordering)?;
-    let permission = permission.unwrap_or_else(|| ProcessingRevealPermission {
-        namespace_root: envelope.content_blind_order_key.clone(),
-        group_number: 1,
-        group_root: envelope.share_commitment_root.clone(),
-        successor_root: envelope.share_capsule_root.clone(),
-        processing_context_root: envelope.aad.processing_context_root.clone(),
-        envelope_id: envelope.envelope_id.clone(),
-        parent_block_id: source.block_id.clone(),
-        validation_id: source.finality_certificate_id.clone(),
-    });
+    let (admission, order) = before_open(&envelope, &context, &ordering)?;
+    let permission = order
+        .as_ref()
+        .map(|order| order.permission.clone())
+        .unwrap_or_else(|| ProcessingRevealPermission {
+            namespace_root: envelope.content_blind_order_key.clone(),
+            group_number: 1,
+            group_root: envelope.share_commitment_root.clone(),
+            successor_root: envelope.share_capsule_root.clone(),
+            processing_context_root: envelope.aad.processing_context_root.clone(),
+            envelope_id: envelope.envelope_id.clone(),
+            parent_block_id: source.block_id.clone(),
+            validation_id: source.finality_certificate_id.clone(),
+        });
     let mut shares = SignedShares(Vec::with_capacity(MEMBERS));
     for (index, ((capsule, record), secret)) in envelope
         .share_capsules
@@ -574,6 +708,7 @@ pub(super) fn open_candidate_envelope<T>(
             opening,
             envelope,
             context,
+            order,
         },
         admission,
     ))

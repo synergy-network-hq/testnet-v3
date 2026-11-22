@@ -21,7 +21,7 @@ use synergy_address_engine::apqe::SecretBytes;
 use synergy_etdag::{
     crypto::{ShamirShare, SignatureVerifier},
     execution::{
-        ProcessingDecryptShare, ProcessingGroupMember, ProcessingOrderGroup, ProcessingReadyItem,
+        ProcessingDecryptShare, ProcessingGroupMember, ProcessingOrderGroup,
         ProcessingRevealPermission, ProcessingVertex, ProcessingVertexAdmission,
     },
     AvailabilityCertificate, EtdagDigest, ProcessingContext, ProcessingEnvelope,
@@ -1108,34 +1108,9 @@ impl NativeProcessingCompletion {
             request.sender_nonce,
         )
         .map_err(err)?;
-        let payload_root = synergy_execution::processing_payload_root(
-            &request.context_root,
-            &opened.envelope_id,
-            plaintext,
-        )
-        .map_err(err)?;
-        let readiness_root = EtdagDigest::from_canonical(
-            "SYNERGY_ETDAG_PROCESSING_NATIVE_READY_V1",
-            &(&parent.namespace, &claim, &payload_root),
-        )
-        .map_err(err)?;
-        let record = ProcessingReadyRecord {
-            processing_context_root: request.context_root.clone(),
-            authorization_root: vertex.member.authorization_root.clone(),
-            sender_wallet: request.sender_wallet.clone(),
-            sender_nonce: request.sender_nonce,
-            item: ProcessingReadyItem {
-                group_number: claim.group_number,
-                group_root: claim.group_root,
-                order_position: claim.order_position,
-                envelope_id: opened.envelope_id.clone(),
-                payload_root,
-                readiness_root,
-                gas_class_units: request.gas_class_units,
-                encoded_bytes: plaintext.len() as u64,
-                remaining_dependencies: vertex.member.envelope.protocol_dependencies.clone(),
-            },
-        };
+        let record =
+            ProcessingReadyRecord::for_revealed_member(&parent.namespace, &claim, plaintext)
+                .map_err(err)?;
         let retained = opened
             .plaintext_capacity
             .checked_add(

@@ -39,8 +39,9 @@ pub use dispatcher::{
 pub use executor::DeterministicExecutor;
 pub use fees::{FeeSchedule, FeeSettlement};
 pub use processing_candidate::{
-    processing_payload_root, ProcessingCandidateContext, ProcessingCandidateError,
-    ProcessingEpochClose, ProcessingPayloadError, ProcessingPayloadProvider,
+    processing_payload_root, verify_processing_payload, ProcessingCandidateContext,
+    ProcessingCandidateError, ProcessingEpochClose, ProcessingPayloadError,
+    ProcessingPayloadProvider,
 };
 pub use processing_epoch::{propose_empty_processing_epoch_transition, ProcessingEpochTransition};
 pub use processing_groups::{

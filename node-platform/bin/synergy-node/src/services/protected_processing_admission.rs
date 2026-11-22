@@ -7,12 +7,17 @@ use synergy_etdag::{
     CertifiedEnvelopeRef, EtdagError, ProcessingContext, ProcessingEnvelope,
 };
 #[cfg(test)]
-use synergy_etdag::{execution::ProcessingRevealPermission, EtdagDigest};
+use synergy_etdag::EtdagDigest;
 #[cfg(test)]
 use synergy_state::world_resources::WorldResourceBudget;
 
 #[cfg(test)]
-use super::{debug, etdag_candidate::CandidateOrderFixture, tests::Scratch, FinalizedSnapshot};
+use super::{
+    debug,
+    etdag_candidate::{CandidateOrderFixture, ClosedCandidateOrder},
+    tests::Scratch,
+    FinalizedSnapshot,
+};
 use crate::services::processing_store::{PendingProcessingIdentity, ProcessingAdmissionRecord};
 #[cfg(test)]
 use crate::services::processing_store::{
@@ -124,7 +129,7 @@ pub(super) fn recover_before_reveal<T>(
     original: CandidateAdmission,
     ordering: &CandidateOrderFixture<'_>,
     authorize: impl Fn(&ProcessingContext, &CandidateAdmission) -> Result<T, String>,
-) -> Result<(T, Option<ProcessingRevealPermission>), String> {
+) -> Result<(T, Option<ClosedCandidateOrder>), String> {
     let root = Scratch::new();
     let namespace = EtdagDigest::from_canonical(
         "SYNERGY_PW13_ENGINEERING_PENDING_SCOPE_V1",
@@ -196,7 +201,7 @@ pub(super) fn recover_before_reveal<T>(
                         finalized.world,
                         |admission| authorize(stored_context, admission),
                     )
-                    .map(|(authorized, permission)| (authorized, Some(permission)))
+                    .map(|(authorized, order)| (authorized, Some(order)))
                     .map_err(ProcessingStoreError::Verification)
             },
         )

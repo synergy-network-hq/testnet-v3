@@ -1,7 +1,8 @@
 //! Engineering path for sponsored enrollment through the encrypted envelope.
 use super::{
     debug, sponsor_digest, CandidateProtectedAccounts, EnrollmentProofs, FinalizedSnapshot,
-    Mldsa87, Position, PqProvider, PublicKey, SignOptions, Signature, SponsorProof, WorldState,
+    Mldsa87, Position, PqProvider, ProtectedExecutionWorld, PublicKey, SignOptions, Signature,
+    SponsorProof,
 };
 use super::{
     settlement::EngineeringEtdagOpening, sponsor_settlement::SponsoredOutcome, transfer_admission,
@@ -93,7 +94,7 @@ impl CandidateProtectedAccounts<'_> {
         provider: &PqProvider<Mldsa87>,
         identity_verifier: &ApqeIdentityVerifier,
         finalized: &FinalizedSnapshot<'_>,
-        world: &mut WorldState,
+        world: &mut impl ProtectedExecutionWorld,
         inclusion: Position,
         opened: RevealedProcessingPayload<'_>,
         admission: &VerifiedSponsoredAdmission,

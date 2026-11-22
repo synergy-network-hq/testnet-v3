@@ -192,6 +192,17 @@ bytes are refused. The selected fee class and PoSy parent coordinates are
 fixture inputs. Live protected readiness and ordered execution still require
 the ratified policy and authenticated parent chain.
 
+Ordinary and protected candidates now share READY record construction and
+the parent-derived transitions that publish and consume those records. The
+protected fixtures reopen the retained admission, verify the signed opening
+and stage the action against a private budgeted World before READY
+publication. The next candidate authenticates the same plaintext, applies
+the action and its fee, nonce and settlement writes, and consumes the READY
+entry and original nonce claim. The fixtures cover sponsored commit and
+reveal, an applied D/P transfer and refusal of an altered D proof. Their
+ordering and inclusion coordinates are isolated engineering inputs. Live
+activation still requires the ratified dispatch and resource contract.
+
 The offline settlement verifier checks the exact encrypted transfer and
 sponsored enrollment receipts against adjacent three-QC-certified blocks
 and their Worlds. It checks first appearance, the certified inclusion time,

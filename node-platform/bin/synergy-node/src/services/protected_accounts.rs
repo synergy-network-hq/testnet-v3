@@ -53,7 +53,8 @@ use synergy_identity::authorization::{
 };
 use synergy_posy::FinalizedBlockRecord;
 use synergy_state::{
-    state_root, AccountChange, FinalizedState, ProtocolChange, StateDiff, WorldState,
+    state_root, world_resources::BudgetedWorld, AccountChange, FinalizedState, ProtocolChange,
+    StateDiff, StateError, WorldState,
 };
 
 #[cfg(test)]
@@ -307,6 +308,32 @@ impl FinalizedSnapshot<'_> {
     }
 }
 
+trait ProtectedExecutionWorld {
+    fn state(&self) -> &WorldState;
+    fn apply_protected(&mut self, diffs: &[&StateDiff]) -> Result<(), StateError>;
+}
+
+impl ProtectedExecutionWorld for BudgetedWorld {
+    fn state(&self) -> &WorldState {
+        self.as_ref()
+    }
+
+    fn apply_protected(&mut self, diffs: &[&StateDiff]) -> Result<(), StateError> {
+        self.try_apply_ordered_atomic(diffs)
+    }
+}
+
+#[cfg(test)]
+impl ProtectedExecutionWorld for WorldState {
+    fn state(&self) -> &WorldState {
+        self
+    }
+
+    fn apply_protected(&mut self, diffs: &[&StateDiff]) -> Result<(), StateError> {
+        StateDiff::apply_ordered_atomic(diffs, self)
+    }
+}
+
 pub(super) struct CandidateProtectedAccounts<'a> {
     network: Network,
     chain: ExternalChainPolicy,
@@ -557,7 +584,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
         identity_verifier: &ApqeIdentityVerifier,
         network_id: &str,
         finalized: &FinalizedSnapshot<'_>,
-        world: &mut WorldState,
+        world: &mut impl ProtectedExecutionWorld,
         inclusion: Position,
         payload: &[u8],
         proof: &SponsorProof<'_>,
@@ -565,6 +592,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
         gas_used: u64,
         opening: Option<&settlement::EngineeringEtdagOpening>,
     ) -> Result<(bool, u128), String> {
+        let state = world.state();
         use super::protected_action_wire::{decode, Payload, ENROLL_COMMIT};
         use sponsor_settlement::{prepare_sponsor_settlement, SponsoredOutcome};
         let Payload::Commit(hash) = decode(ENROLL_COMMIT, payload)? else {
@@ -575,7 +603,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
             identity_verifier,
             network_id,
             finalized,
-            world,
+            state,
             inclusion,
             ENROLL_COMMIT,
             payload,
@@ -584,7 +612,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
             gas_used,
         )?;
         let commitment = EnrollmentCommitment::from_bytes(hash);
-        let existing = world.protocol.get(&commit_key(commitment));
+        let existing = state.protocol.get(&commit_key(commitment));
         let applied = existing.is_none();
         let (commit, outcome) = if let Some(bytes) = existing {
             let record = self.decode_commitment(bytes, commitment)?;
@@ -596,13 +624,13 @@ impl<'a> CandidateProtectedAccounts<'a> {
             (StateDiff::default(), SponsoredOutcome::DuplicatePaidCommit)
         } else {
             (
-                self.prepare_commit(world, commitment, inclusion)?,
+                self.prepare_commit(state, commitment, inclusion)?,
                 SponsoredOutcome::CommitApplied,
             )
         };
         let settlement = prepare_sponsor_settlement(
             finalized,
-            world,
+            state,
             &fee.payer,
             &fee.signed_digest,
             hash,
@@ -614,7 +642,9 @@ impl<'a> CandidateProtectedAccounts<'a> {
             opening,
         )?;
         fee.diff.protocol_changes.push(settlement);
-        StateDiff::apply_ordered_atomic(&[&commit, &fee.diff], world).map_err(debug)?;
+        world
+            .apply_protected(&[&commit, &fee.diff])
+            .map_err(debug)?;
         Ok((applied, fee.fee))
     }
 
@@ -628,7 +658,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
         identity_verifier: &ApqeIdentityVerifier,
         network_id: &str,
         finalized: &FinalizedSnapshot<'_>,
-        world: &mut WorldState,
+        world: &mut impl ProtectedExecutionWorld,
         inclusion: Position,
         payload: &[u8],
         sponsor: &SponsorProof<'_>,
@@ -637,6 +667,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
         gas_used: u64,
         opening: Option<&settlement::EngineeringEtdagOpening>,
     ) -> Result<(sponsor_settlement::SponsoredOutcome, u128), String> {
+        let state = world.state();
         use super::protected_action_wire::{decode, Payload, ENROLL_REVEAL};
         use sponsor_settlement::{prepare_sponsor_settlement, SponsoredOutcome};
         let Payload::Reveal { enrollment, salt } = decode(ENROLL_REVEAL, payload)? else {
@@ -650,7 +681,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
             identity_verifier,
             network_id,
             finalized,
-            world,
+            state,
             inclusion,
             ENROLL_REVEAL,
             payload,
@@ -666,13 +697,13 @@ impl<'a> CandidateProtectedAccounts<'a> {
             enrollment,
             proofs,
         )?;
-        write.check_fee(world, &fee.diff)?;
-        let (outcome, business) = if world.accounts.contains_key(&write.address)
+        write.check_fee(state, &fee.diff)?;
+        let (outcome, business) = if state.accounts.contains_key(&write.address)
             && write
                 .diff
                 .protocol_changes
                 .iter()
-                .all(|change| world.protocol.get(&change.key) == change.value.as_ref())
+                .all(|change| state.protocol.get(&change.key) == change.value.as_ref())
         {
             // The same commitment and initial policy were applied earlier in
             // this block. The registration height is part of the policy bytes.
@@ -686,7 +717,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
         let settlement = StateDiff {
             protocol_changes: vec![prepare_sponsor_settlement(
                 finalized,
-                world,
+                state,
                 &fee.payer,
                 &fee.signed_digest,
                 write.commitment,
@@ -699,7 +730,8 @@ impl<'a> CandidateProtectedAccounts<'a> {
             )?],
             ..StateDiff::default()
         };
-        StateDiff::apply_ordered_atomic(&[&business, &fee.diff, &settlement], world)
+        world
+            .apply_protected(&[&business, &fee.diff, &settlement])
             .map_err(debug)?;
         Ok((outcome, fee.fee))
     }
@@ -1454,12 +1486,13 @@ impl<'a> CandidateProtectedAccounts<'a> {
         &self,
         provider: &PqProvider<Mldsa87>,
         finalized: &FinalizedSnapshot<'_>,
-        world: &mut WorldState,
+        world: &mut impl ProtectedExecutionWorld,
         action_content: TransferCandidateContent<'_>,
         fee_schedule: &synergy_execution::FeeSchedule,
         gas: u64,
         inclusion: Position,
     ) -> Result<CandidateTransferExecution, String> {
+        let state = world.state();
         use super::protected_action_wire::{decode_transfer, decode_transfer_content};
         use settlement::TransferRevertReason;
         const TRANSFER_MAX: usize = 60;
@@ -1497,7 +1530,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
         let ((recipient, amount), _) = self.verify_spend(
             provider,
             finalized,
-            world,
+            state,
             content.intent,
             TRANSFER_MAX,
             decode_transfer,
@@ -1506,7 +1539,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
         if recipient == body.account {
             return Err("protected transfer cannot credit its sender".into());
         }
-        let recipient_address = self.require_finalized_recipient(finalized, world, recipient)?;
+        let recipient_address = self.require_finalized_recipient(finalized, state, recipient)?;
         let sender = body.account.to_native(&Primitives).map_err(display)?;
         if let Some((opened, admission)) = opened {
             let envelope = opened.envelope();
@@ -1528,14 +1561,14 @@ impl<'a> CandidateProtectedAccounts<'a> {
         let debit = amount
             .checked_add(fee)
             .ok_or("protected transfer debit overflow")?;
-        let available = world
+        let available = state
             .accounts
             .get(&sender)
             .ok_or("protected sender ledger state is missing")?
             .balance_nwei;
         let revert_reason = if available < debit {
             Some(TransferRevertReason::InsufficientTransferBalance)
-        } else if world.accounts[&recipient_address]
+        } else if state.accounts[&recipient_address]
             .balance_nwei
             .checked_add(amount)
             .is_none()
@@ -1548,7 +1581,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
         // operation whose recorded effects may have changed those balances.
         let settlement = settlement::prepare_transfer_settlement(
             finalized,
-            world,
+            state,
             &intent,
             decrypted_content,
             opened_envelope,
@@ -1609,7 +1642,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
             changes,
             protocol_changes: vec![settlement],
         };
-        StateDiff::apply_ordered_atomic(&[&diff], world).map_err(debug)?;
+        world.apply_protected(&[&diff]).map_err(debug)?;
         Ok(CandidateTransferExecution {
             fee_nwei: fee,
             revert_reason,
@@ -2196,6 +2229,22 @@ mod tests {
             "opened enrollment differs from the signed sponsor admission",
         );
         assert_eq!(world, base);
+        let ordered_inclusion = position(2, 1001);
+        let (ordered, ordered_result) = first_opening
+            .execute_ordered(|candidate| {
+                registry.execute_opened_sponsored_enrollment(
+                    &provider,
+                    &verifier,
+                    &snapshot,
+                    candidate,
+                    ordered_inclusion,
+                    first_opening.payload(),
+                    &first_admission,
+                    &schedule,
+                )
+            })
+            .unwrap();
+        assert_eq!(ordered_result, (CommitApplied, 10));
         assert_eq!(
             registry.execute_opened_sponsored_enrollment(
                 &provider, &verifier, &snapshot, &mut world, position(2, 1001),
@@ -2203,6 +2252,10 @@ mod tests {
             ).unwrap(),
             (CommitApplied, 10)
         );
+        assert_eq!(ordered.accounts, world.accounts);
+        for (key, bytes) in &world.protocol {
+            assert_eq!(ordered.protocol.get(key), Some(bytes));
+        }
         let after_first = state_root(&world).unwrap();
         let second = commit_intent(1, 10, 1);
         let mut changed_payload = payload.clone();
@@ -2392,6 +2445,21 @@ mod tests {
         );
         let (reveal_opening, reveal_admission) =
             open(&reveal_content, &reveal_intent, &snapshot, &certificate).unwrap();
+        let (ordered, ordered_result) = reveal_opening
+            .execute_ordered(|candidate| {
+                registry.execute_opened_sponsored_enrollment(
+                    &provider,
+                    &verifier,
+                    &snapshot,
+                    candidate,
+                    position,
+                    reveal_opening.payload(),
+                    &reveal_admission,
+                    &schedule,
+                )
+            })
+            .unwrap();
+        assert_eq!(ordered_result, (RevealApplied, 10));
         assert_eq!(
             registry.execute_opened_sponsored_enrollment(
                 &provider, &verifier, &snapshot, &mut world, position, reveal_opening.payload(),
@@ -2399,6 +2467,13 @@ mod tests {
             ).unwrap(),
             (RevealApplied, 10)
         );
+        assert_eq!(ordered.accounts, world.accounts);
+        assert!(registry
+            .pending_commit(ordered.as_ref(), commitment)
+            .is_err());
+        for (key, bytes) in &world.protocol {
+            assert_eq!(ordered.protocol.get(key), Some(bytes));
+        }
         assert_eq!(world.accounts[&target], AccountState::default());
         assert_eq!(world.accounts[&address].balance_nwei, 70);
         assert_eq!(world.accounts[&address].nonce, 3);
@@ -3478,6 +3553,37 @@ mod tests {
             )
             .unwrap(),
         };
+        let execute_ordered_transfer = |candidate: &mut BudgetedWorld| {
+            registry.execute_engineering_transfer(
+                &provider,
+                &snapshot,
+                candidate,
+                OpenedEtdag(opened.payload(), &admission),
+                &schedule,
+                21_000,
+                inclusion,
+            )
+        };
+        let (ordered, result) = opened.execute_ordered(execute_ordered_transfer).unwrap();
+        assert_eq!(
+            result,
+            CandidateTransferExecution {
+                fee_nwei: 840_000,
+                revert_reason: None
+            }
+        );
+        let failure = invalid.execute_ordered(|candidate| {
+            registry.execute_engineering_transfer(
+                &provider,
+                &snapshot,
+                candidate,
+                OpenedEtdag(invalid.payload(), &invalid_admission),
+                &schedule,
+                21_000,
+                inclusion,
+            )
+        });
+        assert!(failure.is_err());
         let mut world = spend_base.clone();
         assert_eq!(
             registry
@@ -3500,6 +3606,10 @@ mod tests {
         assert_eq!(world.accounts[&address].nonce, 1);
         assert_eq!(world.accounts[&recipient_address].balance_nwei, 7);
         assert_eq!(world.accounts[&schedule.collector].balance_nwei, 840_000);
+        assert_eq!(ordered.accounts, world.accounts);
+        for (key, bytes) in &world.protocol {
+            assert_eq!(ordered.protocol.get(key), Some(bytes));
+        }
         let after = state_root(&world).unwrap();
         let (retried_opening, retried_admission) =
             open(&content, &intent, body.transaction_nonce, &snapshot, &snapshot_proof).unwrap();

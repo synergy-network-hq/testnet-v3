@@ -8,7 +8,7 @@ use std::sync::Arc;
 use synergy_block::BlockBody;
 use synergy_etdag::execution::ProcessingOrderGroup;
 use synergy_etdag::{EtdagDigest, EtdagError};
-use synergy_state::world_resources::{BudgetedWorld, WorldResourceError};
+use synergy_state::world_resources::{BudgetedWorld, WorldResourceBudget, WorldResourceError};
 use synergy_state::{state_root, StateError, WorldState};
 use synergy_transaction::{
     AegisTransactionVerifier, NetworkBinding, SignedTransaction, TransactionClass,
@@ -125,6 +125,42 @@ pub fn processing_payload_root(
         "SYNERGY_ETDAG_PROCESSING_READY_PLAINTEXT_V1",
         &(context, envelope, plaintext),
     )
+}
+
+pub fn verify_processing_payload(
+    record: &ProcessingReadyRecord,
+    plaintext: &[u8],
+    budget: &Arc<WorldResourceBudget>,
+) -> Result<(), ProcessingCandidateError> {
+    if plaintext.is_empty()
+        || plaintext.len() > MAX_PROCESSING_PLAINTEXT_BYTES
+        || u64::try_from(plaintext.len()).ok() != Some(record.item.encoded_bytes)
+    {
+        return Err(ProcessingCandidateError::Invalid(
+            "processing payload length differs from committed ready record".into(),
+        ));
+    }
+    let _scratch = budget.reserve(
+        plaintext
+            .len()
+            .checked_mul(8)
+            .and_then(|n| n.checked_add(4096))
+            .ok_or(WorldResourceError::ArithmeticOverflow)?,
+    )?;
+    let root = processing_payload_root(
+        &record.processing_context_root,
+        &record.item.envelope_id,
+        plaintext,
+    )
+    .map_err(|error| {
+        ProcessingCandidateError::Invalid(format!("processing payload commitment: {error:?}"))
+    })?;
+    if root != record.item.payload_root {
+        return Err(ProcessingCandidateError::Invalid(
+            "processing payload is not the committed plaintext".into(),
+        ));
+    }
+    Ok(())
 }
 
 impl<D: TransactionExecutor, V: AegisTransactionVerifier> BlockExecutionScheduler<D, V> {
@@ -311,29 +347,8 @@ impl<D: TransactionExecutor, V: AegisTransactionVerifier> BlockExecutionSchedule
         let registry =
             ParentProcessingRegistry::read(parent.as_ref(), context.namespace_root, budget)?;
         let selected = registry.select(readiness, context.maximum_gas, context.maximum_bytes)?;
-        let transition = selected.transition(
-            publications,
-            readiness,
-            context.maximum_gas,
-            context.maximum_bytes,
-        )?;
-        let groups = crate::processing_group_transition(
-            parent.as_ref(),
-            context.namespace_root,
-            selected.records(),
-            context.ordered_group,
-            readiness,
-            budget,
-        )?;
-        // Publications also use OLD-parent closure; same-block assignment or
-        // successor creation grants no early plaintext permission.
-        for record in publications {
-            crate::verify_processing_record_assignment(
-                parent.as_ref(),
-                context.namespace_root,
-                record,
-            )?;
-        }
+        let lifecycle =
+            selected.prepare_lifecycle(publications, context.ordered_group, readiness)?;
         let count = selected.selection().item_indices.len();
         let _index = budget.reserve(
             count
@@ -366,26 +381,7 @@ impl<D: TransactionExecutor, V: AegisTransactionVerifier> BlockExecutionSchedule
         let mut transactions = Vec::with_capacity(count);
         let mut expected_nonces = BTreeMap::new();
         for (record, plaintext) in selected.records().zip(plaintexts) {
-            let _hash_scratch = budget.reserve(
-                plaintext
-                    .len()
-                    .checked_mul(8)
-                    .and_then(|n| n.checked_add(4096))
-                    .ok_or(WorldResourceError::ArithmeticOverflow)?,
-            )?;
-            let root = processing_payload_root(
-                &record.processing_context_root,
-                &record.item.envelope_id,
-                plaintext,
-            )
-            .map_err(|e| {
-                ProcessingCandidateError::Invalid(format!("processing payload commitment: {e:?}"))
-            })?;
-            if root != record.item.payload_root {
-                return Err(ProcessingCandidateError::Invalid(
-                    "processing payload is not the committed plaintext".into(),
-                ));
-            }
+            verify_processing_payload(record, plaintext, budget)?;
             let transaction: SignedTransaction =
                 serde_json::from_slice(plaintext).map_err(|e| {
                     ProcessingCandidateError::Invalid(format!("decode processing transaction: {e}"))
@@ -424,7 +420,7 @@ impl<D: TransactionExecutor, V: AegisTransactionVerifier> BlockExecutionSchedule
             transactions.push(transaction);
         }
         let body = BlockBody { transactions };
-        let mut outcome = self.execute_async_at_budgeted(
+        let outcome = self.execute_async_at_budgeted(
             &body,
             context.network,
             context.height,
@@ -439,15 +435,10 @@ impl<D: TransactionExecutor, V: AegisTransactionVerifier> BlockExecutionSchedule
                 ));
             }
         }
-        outcome
-            .state
-            .try_apply(transition.diff())
+        let state = lifecycle
+            .apply(outcome.state)
             .map_err(ProcessingCandidateError::State)?;
-        outcome
-            .state
-            .try_apply(groups.diff())
-            .map_err(ProcessingCandidateError::State)?;
-        let mut material = selected.proposal_material(context.height, &transition)?;
+        let mut material = selected.proposal_material(context.height, &lifecycle.ready)?;
         material.ordered_group = context
             .ordered_group
             .map(ProcessingOrderGroup::commitment)
@@ -458,19 +449,22 @@ impl<D: TransactionExecutor, V: AegisTransactionVerifier> BlockExecutionSchedule
         material.transition_root = match epoch_transition {
             None => EtdagDigest::from_canonical(
                 "SYNERGY_POSY_PROCESSING_LIFECYCLE_TRANSITION_V1",
-                &(transition.diff(), groups.diff()),
+                &(lifecycle.ready.diff(), lifecycle.groups.diff()),
             ),
             Some(epoch) => EtdagDigest::from_canonical(
                 "SYNERGY_POSY_PROCESSING_EPOCH_LIFECYCLE_TRANSITION_V1",
-                &(epoch.diff(), transition.diff(), groups.diff()),
+                &(
+                    epoch.diff(),
+                    lifecycle.ready.diff(),
+                    lifecycle.groups.diff(),
+                ),
             ),
         }
         .map_err(|e| {
             ProcessingCandidateError::Invalid(format!("processing lifecycle commitment: {e:?}"))
         })?;
         let _root_scratch = budget.reserve(8192)?;
-        let state_root =
-            state_root(outcome.state.as_ref()).map_err(ProcessingCandidateError::State)?;
+        let state_root = state_root(state.as_ref()).map_err(ProcessingCandidateError::State)?;
         let protected_execution_root =
             synergy_block::hash_block_bytes(&material.commitment_bytes().map_err(|e| {
                 ProcessingCandidateError::Invalid(format!("processing material commitment: {e:?}"))
@@ -485,7 +479,7 @@ impl<D: TransactionExecutor, V: AegisTransactionVerifier> BlockExecutionSchedule
             state_root,
             transactions: body.transactions,
             receipts: outcome.receipts,
-            state: Arc::new(outcome.state),
+            state: Arc::new(state),
         };
         candidate.block_id = candidate
             .commitment_id()
