@@ -11,6 +11,8 @@ use crate::{EtdagDigest, EtdagError, TargetAdmissionContextV3};
 pub const PROCESSING_PROFILE_ID: &str = "etdag-async-processing-v1";
 pub const PW13_TRANSFER_CANDIDATE_PROFILE_ID: &str = "etdag-pw13-transfer-candidate-v1";
 pub const PW13_TRANSFER_CANDIDATE_LANE: &str = "protected-transfer";
+pub const PW13_SPONSOR_CANDIDATE_PROFILE_ID: &str = "etdag-pw13-sponsored-enrollment-candidate-v1";
+pub const PW13_SPONSOR_CANDIDATE_LANE: &str = "protected-enrollment";
 const CONTEXT_DOMAIN: &str = "SYNERGY_ETDAG_PROCESSING_CONTEXT_V1";
 const AAD_DOMAIN: &str = "SYNERGY_ETDAG_PROCESSING_AAD_V1";
 const ENVELOPE_DOMAIN: &str = "SYNERGY_ETDAG_PROCESSING_ENVELOPE_V1";
@@ -35,6 +37,7 @@ fn profile_lane(profile: &str) -> Option<&'static str> {
     match profile {
         PROCESSING_PROFILE_ID => Some("ordinary-user"),
         PW13_TRANSFER_CANDIDATE_PROFILE_ID => Some(PW13_TRANSFER_CANDIDATE_LANE),
+        PW13_SPONSOR_CANDIDATE_PROFILE_ID => Some(PW13_SPONSOR_CANDIDATE_LANE),
         _ => None,
     }
 }
@@ -536,20 +539,25 @@ mod tests {
     #[test]
     fn pw13_envelope_has_no_ordinary_admission_path() {
         let ordinary = context();
-        let mut candidate = ordinary.clone();
-        candidate.profile_id = PW13_TRANSFER_CANDIDATE_PROFILE_ID.into();
-        let mut request = request();
-        request.context_root = candidate.root().unwrap();
-        request.envelope.aad.processing_context_root = request.context_root.clone();
-        request.envelope.aad.profile_id = candidate.profile_id.clone();
-        request.envelope.aad.lane_id = PW13_TRANSFER_CANDIDATE_LANE.into();
-        request.envelope.envelope_id = request.envelope.commitment().unwrap();
-        request.envelope.validate_context(&candidate).unwrap();
-        assert!(request.envelope.validate_context(&ordinary).is_err());
-        assert!(request.validate_context(&candidate).is_err());
-        assert!(request.signing_bytes().is_err());
-        request.envelope.aad.lane_id = "ordinary-user".into();
-        assert!(request.envelope.aad.canonical_bytes().is_err());
+        for (profile, lane) in [
+            (PW13_TRANSFER_CANDIDATE_PROFILE_ID, PW13_TRANSFER_CANDIDATE_LANE),
+            (PW13_SPONSOR_CANDIDATE_PROFILE_ID, PW13_SPONSOR_CANDIDATE_LANE),
+        ] {
+            let mut candidate = ordinary.clone();
+            candidate.profile_id = profile.into();
+            let mut request = request();
+            request.context_root = candidate.root().unwrap();
+            request.envelope.aad.processing_context_root = request.context_root.clone();
+            request.envelope.aad.profile_id = candidate.profile_id.clone();
+            request.envelope.aad.lane_id = lane.into();
+            request.envelope.envelope_id = request.envelope.commitment().unwrap();
+            request.envelope.validate_context(&candidate).unwrap();
+            assert!(request.envelope.validate_context(&ordinary).is_err());
+            assert!(request.validate_context(&candidate).is_err());
+            assert!(request.signing_bytes().is_err());
+            request.envelope.aad.lane_id = "ordinary-user".into();
+            assert!(request.envelope.aad.canonical_bytes().is_err());
+        }
     }
 
     #[test]

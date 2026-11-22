@@ -1,6 +1,7 @@
 //! Paid candidate enrollment outcomes, committed atomically with fee/business diffs.
 //! No authority, public action assignment, inclusion or non-consumption is inferred.
 use super::*;
+use super::settlement::EngineeringEtdagOpening;
 use serde_json::{json, Value};
 
 const SPONSOR_PREFIX: &str = "apqe-protected-account-candidate/v1/sponsored-enrollment/";
@@ -39,6 +40,8 @@ struct SponsorSettlement {
     network: Network,
     payer: String,
     signed_sponsor_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    engineering_etdag_opening: Option<EngineeringEtdagOpening>,
     commitment: [u8; 32],
     action: u16,
     outcome: SponsoredOutcome,
@@ -84,6 +87,12 @@ fn receipt_key(payer: &str, nonce_before: u64) -> String {
 fn validate(record: &SponsorSettlement) -> Result<(), String> {
     canonical_payer(&record.payer)?;
     canonical_digest(&record.signed_sponsor_digest)?;
+    if let Some(opening) = &record.engineering_etdag_opening {
+        opening.validate()?;
+        if opening.authorization_height <= record.source_finalized_height {
+            return Err("candidate sponsor opening must follow its finalized source".into());
+        }
+    }
     if record.version != 1
         || record.action != record.outcome.action()
         || record.commitment == [0; 32]
@@ -116,6 +125,7 @@ pub(super) fn prepare_sponsor_settlement(
     fee_nwei: u128,
     nonce_before: u64,
     inclusion: Position,
+    opening: Option<&EngineeringEtdagOpening>,
 ) -> Result<ProtocolChange, String> {
     canonical_payer(payer)?;
     canonical_digest(signed_digest)?;
@@ -140,6 +150,7 @@ pub(super) fn prepare_sponsor_settlement(
         network: finalized.registry.network,
         payer: payer.into(),
         signed_sponsor_digest: signed_digest.into(),
+        engineering_etdag_opening: opening.cloned(),
         commitment,
         action: outcome.action(),
         outcome,
@@ -171,9 +182,13 @@ pub(super) fn inspect_sponsor_settlement(
     payer: &str,
     nonce_before: u64,
     signed_digest: &str,
+    expected_opening: Option<&EngineeringEtdagOpening>,
 ) -> Result<Value, String> {
     canonical_payer(payer)?;
     canonical_digest(signed_digest)?;
+    if let Some(opening) = expected_opening {
+        opening.validate()?;
+    }
     let Some(bytes) = snapshot
         .world
         .protocol
@@ -192,19 +207,24 @@ pub(super) fn inspect_sponsor_settlement(
         || record.payer != payer
         || record.nonce_before != nonce_before
         || record.signed_sponsor_digest != signed_digest
+        || expected_opening.is_some_and(|expected| record.engineering_etdag_opening.as_ref() != Some(expected))
         || record.included_height > snapshot.position.height
         || record.consensus_time > snapshot.position.consensus_time
     {
         return Err("candidate sponsor settlement conflicts with exact request or snapshot".into());
     }
-    Ok(json!({
+    let mut result = json!({
         "payer":record.payer,"signed_sponsor_digest":record.signed_sponsor_digest,
         "commitment":inspection::hex_bytes(&record.commitment),"action":record.action,"status":record.outcome.status(),
         "source_finalized_height":record.source_finalized_height,"source_finalized_time":record.source_finalized_time,
         "included_height":record.included_height,"inclusion_consensus_timestamp_unix":record.consensus_time,
         "gas_used":record.gas_used,"fee_nwei":record.fee_nwei.to_string(),
         "nonce_before":record.nonce_before,"nonce_after":record.nonce_after,
-    }))
+    });
+    if let Some(opening) = record.engineering_etdag_opening {
+        result["engineering_etdag_opening"] = json!(opening);
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -267,6 +287,7 @@ mod tests {
                 height: 4,
                 consensus_time: 1001,
             },
+            None,
         )
         .unwrap()
     }
@@ -317,13 +338,14 @@ mod tests {
             .unwrap();
             let finalized = snapshot(&registry, &working, 4, 1001);
             let result =
-                inspect_sponsor_settlement(&finalized, &payer, 7, &"ab".repeat(64)).unwrap();
+                inspect_sponsor_settlement(&finalized, &payer, 7, &"ab".repeat(64), None).unwrap();
             assert_eq!(result["status"], status);
             assert_eq!(result["action"], outcome.action());
             assert_eq!(result["fee_nwei"], "25");
             assert_eq!(result["gas_used"], 5);
             assert_eq!(result["nonce_before"], 7);
             assert_eq!(result["nonce_after"], 8);
+            assert!(result.get("engineering_etdag_opening").is_none());
             assert_eq!(working.accounts[&payer].nonce, 8);
             assert_eq!(working.accounts[&payer].balance_nwei, 975);
             assert_eq!(working.accounts["fixture-fee-collector"].balance_nwei, 25);
@@ -333,7 +355,7 @@ mod tests {
                     .unwrap(),
                 bytes
             );
-            assert!(inspect_sponsor_settlement(&finalized, &payer, 7, &"cd".repeat(64)).is_err());
+            assert!(inspect_sponsor_settlement(&finalized, &payer, 7, &"cd".repeat(64), None).is_err());
             // A conflicting same-payer nonce cannot be staged under a new digest.
             assert!(prepare_sponsor_settlement(
                 &parent,
@@ -348,7 +370,8 @@ mod tests {
                 Position {
                     height: 5,
                     consensus_time: 1002
-                }
+                },
+                None,
             )
             .is_err());
         }
@@ -391,7 +414,8 @@ mod tests {
             Position {
                 height: 5,
                 consensus_time: 1002
-            }
+            },
+            None,
         )
         .is_err());
         assert!(prepare_sponsor_settlement(
@@ -407,7 +431,8 @@ mod tests {
             Position {
                 height: 4,
                 consensus_time: 1001
-            }
+            },
+            None,
         )
         .is_err());
     }
@@ -449,7 +474,8 @@ mod tests {
                     &snapshot(&registry, &bad, 4, 1001),
                     &payer,
                     7,
-                    &"ab".repeat(64)
+                    &"ab".repeat(64),
+                    None,
                 )
                 .is_err(),
                 "mutation {kind}"
@@ -474,7 +500,8 @@ mod tests {
                 &snapshot(&registry, &bad, 4, 1001),
                 &payer,
                 7,
-                &"ab".repeat(64)
+                &"ab".repeat(64),
+                None,
             )
             .is_err());
         }
@@ -487,19 +514,19 @@ mod tests {
         let mut base = world(&payer);
         base.accounts.get_mut(&payer).unwrap().nonce = 8; // An ordinary action already used nonce7.
         let snapshot = snapshot(&registry, &base, 4, 1001);
-        let result = inspect_sponsor_settlement(&snapshot, &payer, 7, &"ab".repeat(64)).unwrap();
+        let result = inspect_sponsor_settlement(&snapshot, &payer, 7, &"ab".repeat(64), None).unwrap();
         assert_eq!(result["status"], "no_settlement_in_snapshot");
         assert!(result.get("nonce_unused").is_none());
         for digest in ["ab".repeat(63), "AB".repeat(64), "x".repeat(128)] {
-            assert!(inspect_sponsor_settlement(&snapshot, &payer, 7, &digest).is_err())
+            assert!(inspect_sponsor_settlement(&snapshot, &payer, 7, &digest, None).is_err())
         }
         assert!(
-            inspect_sponsor_settlement(&snapshot, &payer.to_uppercase(), 7, &"ab".repeat(64))
+            inspect_sponsor_settlement(&snapshot, &payer.to_uppercase(), 7, &"ab".repeat(64), None)
                 .is_err()
         );
         let nonpayer = AccountIdentifier::from_bytes([33; 20])
             .to_native(&Primitives)
             .unwrap();
-        assert!(inspect_sponsor_settlement(&snapshot, &nonpayer, 7, &"ab".repeat(64)).is_err());
+        assert!(inspect_sponsor_settlement(&snapshot, &nonpayer, 7, &"ab".repeat(64), None).is_err());
     }
 }

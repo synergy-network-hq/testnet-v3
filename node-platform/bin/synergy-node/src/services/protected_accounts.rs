@@ -15,6 +15,9 @@ mod etdag_candidate;
 #[cfg(test)]
 #[path = "protected_transfer_admission.rs"]
 mod transfer_admission;
+#[cfg(test)]
+#[path = "protected_sponsored_admission.rs"]
+mod sponsored_admission;
 #[path = "protected_recovery.rs"]
 pub(super) mod recovery;
 #[path = "protected_transition_queue.rs"]
@@ -445,40 +448,10 @@ impl<'a> CandidateProtectedAccounts<'a> {
                 "sponsor intent not bound to this finalized network, action or expiry".into(),
             );
         }
-        if self.network.native_chain[..24] != [0; 24]
-            || synergy_address::decode_address(sponsor.payer)?.hrp != "syna"
-        {
-            return Err("unsupported sponsor network or address".into());
-        }
-        let chain_id = u64::from_be_bytes(self.network.native_chain[24..].try_into().unwrap());
-        let commitment =
-            canonical_binding_commitment_if_present(&finalized.world.protocol, sponsor.payer)?
-                .ok_or("sponsor is not registered in finalized state")?;
-        if canonical_binding_commitment_if_present(&world.protocol, sponsor.payer)?.as_ref()
-            != Some(&commitment)
-        {
-            return Err("sponsor binding changed in execution state".into());
-        }
-        let payer = proof
-            .binding
-            .identity_address_for_key_for_admission_at_with_verifier(
-                SPONSOR_SIGNATURE_DOMAIN,
-                chain_id,
-                network_id,
-                "ML-DSA-87",
-                proof.signing_key.as_bytes(),
-                SPONSOR_PURPOSE,
-                finalized.position.consensus_time,
-                &commitment.binding_payload_sha3_256,
-                Some(identity_verifier),
-            )?;
-        if payer != sponsor.payer
-            || proof.binding.binding.identity_root.public_key_sha3_256
-                != commitment.identity_root_public_key_sha3_256
-            || commitment.effective_at_unix > finalized.position.consensus_time
-        {
-            return Err("sponsor payer differs from finalized binding".into());
-        }
+        let payer = self.verify_sponsor_binding(
+            identity_verifier, network_id, finalized, world, sponsor.payer, proof.binding,
+            proof.signing_key,
+        )?;
         let signed_digest = sponsor_digest(proof.intent)?;
         provider
             .verify(
@@ -532,6 +505,48 @@ impl<'a> CandidateProtectedAccounts<'a> {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn verify_sponsor_binding(
+        &self,
+        identity_verifier: &ApqeIdentityVerifier,
+        network_id: &str,
+        finalized: &FinalizedSnapshot<'_>,
+        world: &WorldState,
+        payer: &str,
+        binding: &IdentityAuthorizationCarrier,
+        key: &PublicKey<Mldsa87>,
+    ) -> Result<String, String> {
+        if self.network.native_chain[..24] != [0; 24]
+            || synergy_address::decode_address(payer)?.hrp != "syna"
+        {
+            return Err("unsupported sponsor network or address".into());
+        }
+        let chain_id = u64::from_be_bytes(self.network.native_chain[24..].try_into().unwrap());
+        let commitment = canonical_binding_commitment_if_present(&finalized.world.protocol, payer)?
+            .ok_or("sponsor is not registered in finalized state")?;
+        if canonical_binding_commitment_if_present(&world.protocol, payer)?.as_ref() != Some(&commitment) {
+            return Err("sponsor binding changed in execution state".into());
+        }
+        let authorized = binding.identity_address_for_key_for_admission_at_with_verifier(
+            SPONSOR_SIGNATURE_DOMAIN,
+            chain_id,
+            network_id,
+            "ML-DSA-87",
+            key.as_bytes(),
+            SPONSOR_PURPOSE,
+            finalized.position.consensus_time,
+            &commitment.binding_payload_sha3_256,
+            Some(identity_verifier),
+        )?;
+        if authorized != payer
+            || binding.binding.identity_root.public_key_sha3_256 != commitment.identity_root_public_key_sha3_256
+            || commitment.effective_at_unix > finalized.position.consensus_time
+        {
+            return Err("sponsor payer differs from finalized binding".into());
+        }
+        Ok(authorized)
+    }
+
     /// No network routes call this candidate. A paid deterministic duplicate
     /// has an explicit outcome; signing/fee/wire errors never enter settlement.
     #[cfg(test)]
@@ -548,6 +563,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
         proof: &SponsorProof<'_>,
         fee_schedule: &synergy_execution::FeeSchedule,
         gas_used: u64,
+        opening: Option<&settlement::EngineeringEtdagOpening>,
     ) -> Result<(bool, u128), String> {
         use super::protected_action_wire::{decode, Payload, ENROLL_COMMIT};
         use sponsor_settlement::{prepare_sponsor_settlement, SponsoredOutcome};
@@ -595,6 +611,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
             fee.fee,
             fee.nonce,
             inclusion,
+            opening,
         )?;
         fee.diff.protocol_changes.push(settlement);
         StateDiff::apply_ordered_atomic(&[&commit, &fee.diff], world).map_err(debug)?;
@@ -619,6 +636,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
         proofs: EnrollmentProofs<'_>,
         fee_schedule: &synergy_execution::FeeSchedule,
         gas_used: u64,
+        opening: Option<&settlement::EngineeringEtdagOpening>,
     ) -> Result<(sponsor_settlement::SponsoredOutcome, u128), String> {
         use super::protected_action_wire::{decode, Payload, ENROLL_REVEAL};
         use sponsor_settlement::{prepare_sponsor_settlement, SponsoredOutcome};
@@ -678,6 +696,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
                 fee.fee,
                 fee.nonce,
                 inclusion,
+                opening,
             )?],
             ..StateDiff::default()
         };
@@ -1877,9 +1896,15 @@ mod tests {
     #[test]
     #[ignore = "requires independently authenticated engineering and validation APQE artifacts"]
     fn protected_sponsor_commit_and_reveal_settle_once_with_exact_native_proofs() {
+        use super::super::protected_action_wire::{decode_sponsor, ENROLL_COMMIT, ENROLL_REVEAL};
         use super::super::protected_enrollment_wire::{decode_sponsored, encode_sponsored_fixture};
+        use sponsor_settlement::SponsoredOutcome::{CommitApplied, RevealApplied, RevealRevertedCommitUsed};
         use std::sync::{Arc, Mutex};
         use synergy_address_engine::{apqe::native_manifest::validator_engine, types::Algorithm};
+        use synergy_etdag::{
+            admission::{Pw13SponsoredAdmission, Pw13SponsoredResources, PW13_SPONSOR_ADMISSION_CONTEXT},
+            EtdagParameters,
+        };
         use synergy_identity::authorization::*;
 
         let report = PathBuf::from(std::env::var_os("APQE_TRUSTED_NATIVE_REPORT").unwrap());
@@ -1890,6 +1915,7 @@ mod tests {
             unsafe { validator_engine(&report, report_pin) }.unwrap(),
         ));
         let verifier = ApqeIdentityVerifier::new(engine.clone()).unwrap();
+        let authoring_engine = engine.clone();
         let provider = unsafe {
             PqProvider::<Mldsa87>::open_verified(
                 PathBuf::from(std::env::var_os("CORE_APQE_MLDSA87_LIBRARY").unwrap()),
@@ -2001,6 +2027,45 @@ mod tests {
             base_fee_per_gas_nwei: 2,
             collector: "test-collector".into(),
         };
+        let limits = EtdagParameters::default();
+        let pin = std::env::var("APQE_AUTHENTICATED_REPORT_SHA256").unwrap();
+        let open = |content: &[u8], authorized_intent: &[u8], snapshot: &FinalizedSnapshot<'_>,
+                    source: &FinalizedBlockRecord| {
+            let sponsor = decode_sponsor(authorized_intent)?;
+            etdag_candidate::open_candidate_envelope(
+                content, &report, &pin, 99999, source, &address, sponsor.nonce,
+                etdag_candidate::CandidateEnvelopeProfile::SponsoredEnrollment,
+                |envelope, context| {
+                    let resources = Pw13SponsoredResources {
+                        genesis: sponsor.genesis,
+                        action: sponsor.action,
+                        gas_limit: 5,
+                        maximum_total_fee: sponsor.max_fee,
+                        valid_until_finalized_height: sponsor.valid_until,
+                        sponsor_intent_digest: sponsor_digest(authorized_intent)?,
+                        envelope_id: envelope.envelope_id.clone(),
+                    };
+                    let digest = resources.signing_digest().map_err(debug)?;
+                    let signature = authoring_engine.lock().unwrap().sign(
+                        Algorithm::MlDsa87, signer.private_key.as_bytes(), &digest,
+                        SignOptions::Pure { context: PW13_SPONSOR_ADMISSION_CONTEXT },
+                    ).map_err(debug)?;
+                    let request = Pw13SponsoredAdmission {
+                        resources, signature, binding: carrier.clone(),
+                        public_key: key.as_bytes().to_vec(),
+                    };
+                    let authorize = |request: &Pw13SponsoredAdmission| registry.verify_sponsored_admission(
+                        &provider, &verifier, snapshot, context, envelope, request, &limits,
+                        &schedule, 5,
+                    );
+                    let admitted = authorize(&request)?;
+                    let mut tampered = request.clone();
+                    tampered.resources.maximum_total_fee[0] ^= 1;
+                    assert!(authorize(&tampered).is_err());
+                    Ok(admitted)
+                },
+            )
+        };
         let intent_for = |nonce: u8, cap: u8, expiry: u8, action: u16, content: &[u8]| {
             let mut bytes = vec![0xa8, 0, 1, 1, 0x58, 32];
             bytes.extend_from_slice(genesis.as_bytes());
@@ -2047,9 +2112,9 @@ mod tests {
                 },
                 &schedule,
                 5,
+                None,
             )
         };
-        use super::super::protected_action_wire::{ENROLL_COMMIT, ENROLL_REVEAL};
         let commit_intent =
             |nonce, cap, expiry| intent_for(nonce, cap, expiry, ENROLL_COMMIT, &payload);
         let first = commit_intent(0, 10, 1);
@@ -2067,9 +2132,37 @@ mod tests {
             decode_sponsored(&noncanonical).err(),
             Some("INVALID_SPONSOR_CARRIER")
         );
+        let first_content = encode_sponsored_fixture(
+            &first, &payload, [canonical_carrier.as_slice(), key.as_bytes(), first_signature.as_bytes()],
+            None,
+        );
+        let (first_opening, first_admission) = open(&first_content, &first, &snapshot, &certificate).unwrap();
+        let mut alternate_payload = payload.clone();
+        alternate_payload[6] ^= 1;
+        let alternate = intent_for(0, 10, 1, ENROLL_COMMIT, &alternate_payload);
+        let alternate_signature =
+            verifier_test_signer(&report, report_pin, signer.private_key.as_bytes(), &alternate);
+        let altered_content = encode_sponsored_fixture(
+            &alternate, &alternate_payload,
+            [canonical_carrier.as_slice(), key.as_bytes(), alternate_signature.as_bytes()],
+            None,
+        );
+        let (altered_opening, altered_admission) =
+            open(&altered_content, &first, &snapshot, &certificate).unwrap();
         assert_eq!(
-            execute(&mut world, &first, &first, "test-sponsor", &payload).unwrap(),
-            (true, 10)
+            registry.execute_opened_sponsored_enrollment(
+                &provider, &verifier, &snapshot, &mut world, position(2, 1001),
+                &altered_opening, &altered_admission, &schedule,
+            ).unwrap_err(),
+            "opened enrollment differs from the signed sponsor admission",
+        );
+        assert_eq!(world, base);
+        assert_eq!(
+            registry.execute_opened_sponsored_enrollment(
+                &provider, &verifier, &snapshot, &mut world, position(2, 1001),
+                &first_opening, &first_admission, &schedule,
+            ).unwrap(),
+            (CommitApplied, 10)
         );
         let after_first = state_root(&world).unwrap();
         let second = commit_intent(1, 10, 1);
@@ -2186,6 +2279,7 @@ mod tests {
                 },
                 &schedule,
                 5,
+                None,
             )
         };
         let mut bad_salt = salt;
@@ -2233,7 +2327,6 @@ mod tests {
         .is_err());
         assert_eq!(collector_overflow, before_overflow);
 
-        use sponsor_settlement::SponsoredOutcome::{RevealApplied, RevealRevertedCommitUsed};
         let expired_at = Position {
             consensus_time: 1001 + REVEAL_WINDOW_SECONDS,
             ..position
@@ -2253,17 +2346,18 @@ mod tests {
             "protected reveal expired before candidate inclusion"
         );
         assert_eq!(world, committed);
+        let reveal_content = encode_sponsored_fixture(
+            &reveal_intent, &reveal,
+            [canonical_carrier.as_slice(), key.as_bytes(), signature.as_bytes()],
+            Some(EnrollmentProofs { ordinary: &ordinary, recovery: &recovery, ownership: &ownership, salt: &salt }),
+        );
+        let (reveal_opening, reveal_admission) =
+            open(&reveal_content, &reveal_intent, &snapshot, &certificate).unwrap();
         assert_eq!(
-            execute_reveal(
-                &mut world,
-                &reveal,
-                &salt,
-                &snapshot,
-                position,
-                &reveal_intent,
-                &signature
-            )
-            .unwrap(),
+            registry.execute_opened_sponsored_enrollment(
+                &provider, &verifier, &snapshot, &mut world, position, &reveal_opening,
+                &reveal_admission, &schedule,
+            ).unwrap(),
             (RevealApplied, 10)
         );
         assert_eq!(world.accounts[&target], AccountState::default());
@@ -2440,18 +2534,32 @@ mod tests {
             before["sponsorships"][0]["status"],
             "no_settlement_in_snapshot"
         );
+        let first_evidence = settlement::EngineeringEtdagOpening::from_opening(
+            first_opening.envelope(), &first_content,
+        ).unwrap();
+        let reveal_evidence = settlement::EngineeringEtdagOpening::from_opening(
+            reveal_opening.envelope(), &reveal_content,
+        ).unwrap();
+        let mut commit_selector = selector(0, &first);
+        commit_selector["engineering_etdag_opening"] = serde_json::json!(first_evidence);
+        let mut reveal_selector = selector(2, &reveal_intent);
+        reveal_selector["engineering_etdag_opening"] = serde_json::json!(reveal_evidence);
         let after = query_receipt(
             &reopened,
             4,
             1003,
             vec![
-                selector(0, &first),
+                commit_selector,
                 selector(1, &second),
-                selector(2, &reveal_intent),
+                reveal_selector.clone(),
                 selector(3, &fresh_intent),
             ],
         )
         .unwrap();
+        assert_eq!(after["sponsorships"][0]["engineering_etdag_opening"], serde_json::json!(first_evidence));
+        assert_eq!(after["sponsorships"][2]["engineering_etdag_opening"], serde_json::json!(reveal_evidence));
+        reveal_selector["engineering_etdag_opening"] = serde_json::json!(first_evidence);
+        assert!(query_receipt(&reopened, 4, 1003, vec![reveal_selector]).is_err());
         assert_eq!(after["commitments"][0]["status"], "consumed");
         for (nonce, status) in [
             "commit_applied_candidate",
@@ -3197,6 +3305,7 @@ mod tests {
                 source,
                 &address,
                 nonce,
+                etdag_candidate::CandidateEnvelopeProfile::Transfer,
                 |envelope, context| {
                     authenticate(snapshot, envelope, context, &make_admission(envelope, &signed))
                 },

@@ -47,6 +47,8 @@ struct SponsorshipQuery {
     payer: String,
     nonce_before: u64,
     signed_sponsor_digest: String,
+    #[serde(default)]
+    engineering_etdag_opening: Option<settlement::EngineeringEtdagOpening>,
 }
 
 #[derive(Deserialize)]
@@ -178,6 +180,7 @@ pub(crate) fn inspect(
                 &query.payer,
                 query.nonce_before,
                 &query.signed_sponsor_digest,
+                query.engineering_etdag_opening.as_ref(),
             )
         })
         .collect::<Result<Vec<_>, _>>()?;

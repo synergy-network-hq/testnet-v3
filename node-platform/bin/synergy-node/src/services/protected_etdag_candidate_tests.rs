@@ -5,7 +5,10 @@ use std::path::Path;
 use synergy_address_engine::{apqe::SecretBytes, types::Algorithm};
 use synergy_aegis::{AegisProtectedPrimitives, ApqeKem};
 use synergy_etdag::{
-    admission::{PW13_TRANSFER_CANDIDATE_LANE, PW13_TRANSFER_CANDIDATE_PROFILE_ID},
+    admission::{
+        PW13_SPONSOR_CANDIDATE_LANE, PW13_SPONSOR_CANDIDATE_PROFILE_ID,
+        PW13_TRANSFER_CANDIDATE_LANE, PW13_TRANSFER_CANDIDATE_PROFILE_ID,
+    },
     crypto::{
         decrypt_protected_payload, decrypt_share_capsule_with_kem_diagnostic,
         encrypt_protected_payload_with_kem, governed_reveal_threshold, pad_plaintext,
@@ -21,6 +24,11 @@ pub(super) struct OpenedCandidateEnvelope {
     plaintext: SecretBytes,
     envelope: ProcessingEnvelope,
     context: ProcessingContext,
+}
+
+pub(super) enum CandidateEnvelopeProfile {
+    Transfer,
+    SponsoredEnrollment,
 }
 impl OpenedCandidateEnvelope {
     pub(super) fn plaintext(&self) -> &[u8] {
@@ -58,6 +66,7 @@ pub(super) fn open_candidate_envelope<T>(
     source: &FinalizedBlockRecord,
     sender_id: &str,
     nonce: u64,
+    profile: CandidateEnvelopeProfile,
     before_open: impl FnOnce(&ProcessingEnvelope, &ProcessingContext) -> Result<T, String>,
 ) -> Result<(OpenedCandidateEnvelope, T), String> {
     let source_height = source.height;
@@ -107,19 +116,34 @@ pub(super) fn open_candidate_envelope<T>(
         records: recipients,
     };
     registry.validate_protected_profile().map_err(err)?;
+    let (profile, lane, network) = match profile {
+        CandidateEnvelopeProfile::Transfer => (
+            PW13_TRANSFER_CANDIDATE_PROFILE_ID,
+            PW13_TRANSFER_CANDIDATE_LANE,
+            "isolated-protected-content-fixture",
+        ),
+        CandidateEnvelopeProfile::SponsoredEnrollment => (
+            PW13_SPONSOR_CANDIDATE_PROFILE_ID,
+            PW13_SPONSOR_CANDIDATE_LANE,
+            "test-sponsor",
+        ),
+    };
     let context = ProcessingContext {
         context_version: 1,
-        profile_id: PW13_TRANSFER_CANDIDATE_PROFILE_ID.into(),
+        profile_id: profile.into(),
         authority: TargetAdmissionContextV3 {
             context_version: 1,
             chain_id,
-            network_id: "isolated-protected-content-fixture".into(),
+            network_id: network.into(),
             protocol_version: "v3".into(),
             epoch: 1,
             target_height,
             target_height_offset: parameters.target_height_offset,
             source_finalized_height: source_height,
-            source_finality_context_root: super::super::authority::processing_finality_root(source)?.0,
+            source_finality_context_root: super::super::authority::processing_finality_root(
+                source,
+            )?
+            .0,
             active_validator_set_root: roots.clone(),
             validator_consensus_key_root: roots.clone(),
             frozen_voting_weight_root: roots.clone(),
@@ -138,7 +162,7 @@ pub(super) fn open_candidate_envelope<T>(
     };
     context.validate().map_err(err)?;
     let aad = ProcessingEnvelopeAad {
-        profile_id: PW13_TRANSFER_CANDIDATE_PROFILE_ID.into(),
+        profile_id: profile.into(),
         chain_id,
         network_id: context.authority.network_id.clone(),
         protocol_version: context.authority.protocol_version.clone(),
@@ -146,7 +170,7 @@ pub(super) fn open_candidate_envelope<T>(
         processing_context_root: context.root().map_err(err)?,
         authorization_height: target_height,
         assigned_cluster_id: context.authority.assigned_cluster_id,
-        lane_id: PW13_TRANSFER_CANDIDATE_LANE.into(),
+        lane_id: lane.into(),
         sender_id: sender_id.into(),
         nonce_slot: nonce,
     };
@@ -260,6 +284,7 @@ fn isolated_etdag_candidate_missing_provider_cannot_fall_back() {
         &fixture_source(),
         "fixture-sender",
         0,
+        CandidateEnvelopeProfile::Transfer,
         |_, _| Ok(()),
     )
     .is_err());
@@ -278,6 +303,7 @@ fn isolated_etdag_candidate_real_native_mlkem_roundtrip_and_rejection_checks() {
         &fixture_source(),
         "fixture-sender",
         9,
+        CandidateEnvelopeProfile::Transfer,
         |_, _| Ok(()),
     )
     .unwrap();

@@ -95,13 +95,27 @@ payer checks. The 128 KiB content limit and 32 KiB slot limit are engineering
 ceilings. The frozen CDDL is unchanged. This proposal still requires approval
 with the protected ETDAG content profile, AAD and resource policy.
 
-The local sponsor test now uses the same salted commitment for a paid commit
-and a valid reveal. Each charged candidate outcome writes evidence keyed by
-the canonical payer and nonce, bound to the exact signed sponsor digest and
-the selected Genesis. The authenticated snapshot reader distinguishes the
-original commit, a separately paid duplicate, and the consuming reveal after
-reopening the state store. Invalid reveal proof or a failed fee credit rolls
-back sponsor and enrollment state together. The ordered candidate also records
+The candidate enrollment profile is `etdag-pw13-sponsored-enrollment-candidate-v1`
+with AAD lane `protected-enrollment`. The envelope ID commits the payer and
+nonce in the AAD. The outer sponsor proof uses the existing finalized
+sponsorship delegation, with pure ML-DSA-87 context
+`AEGIS.PW13.SPONSOR.ADMISSION.CANDIDATE.V1`. It signs SHA3-512 over
+`AEGIS/PW13-SPONSOR-ADMISSION-CANDIDATE/v1`, a zero byte and compact JSON in
+this member order: `genesis`, `action`, `gas_limit`, `maximum_total_fee`,
+`valid_until_finalized_height`, `sponsor_intent_digest`, `envelope_id`.
+The outer request contains the resource record, complete identity carrier,
+ML-DSA-87 public key and signature. The original sponsor intent, enrollment
+bytes and D/P/R evidence remain encrypted. Approve the outer disclosure of
+payer, nonce, action and resource bounds before any activation.
+
+The local native APQE test authorizes the envelope before decryption, checks
+the exact opened sponsor intent and delegated key, and uses the same salted
+commitment for a paid commit and valid reveal. Each encrypted settlement
+records the original envelope ID, processing context, authorization height and
+payload root atomically with the sponsor fee, nonce and enrollment changes.
+The reader can require an exact match to that opening after reopening the
+state store. Invalid reveal proof or a failed fee credit rolls back sponsor
+and enrollment state together. The ordered candidate also records
 a paid revert when a second fully authorized reveal for the same finalized
 commitment encounters the exact earlier reveal in the same working block.
 Only the second sponsor fee, nonce, and outcome change. This is a specific

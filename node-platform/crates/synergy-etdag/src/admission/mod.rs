@@ -6,6 +6,7 @@ mod processing;
 mod protected_transfer;
 mod request;
 mod resource_limits;
+mod sponsored_enrollment;
 mod target_height;
 mod validator;
 mod verifier;
@@ -16,7 +17,8 @@ pub use nonce_window::AdmissionNonceWindow;
 pub use policy::EtdagAdmission;
 pub use processing::{
     ProcessingAdmissionRequest, ProcessingContext, ProcessingEnvelope, ProcessingEnvelopeAad,
-    WalletProcessingAdmission, PROCESSING_PROFILE_ID, PW13_TRANSFER_CANDIDATE_LANE,
+    WalletProcessingAdmission, PROCESSING_PROFILE_ID, PW13_SPONSOR_CANDIDATE_LANE,
+    PW13_SPONSOR_CANDIDATE_PROFILE_ID, PW13_TRANSFER_CANDIDATE_LANE,
     PW13_TRANSFER_CANDIDATE_PROFILE_ID,
 };
 pub use protected_transfer::{
@@ -27,6 +29,9 @@ pub use request::{
     ADMISSION_REQUEST_VERSION,
 };
 pub use resource_limits::AdmissionResourceLimits;
+pub use sponsored_enrollment::{
+    Pw13SponsoredAdmission, Pw13SponsoredResources, PW13_SPONSOR_ADMISSION_CONTEXT,
+};
 pub use target_height::{
     protected_target_height, protected_target_height_with_offset,
     source_finalized_height_with_offset, validate_protected_target_height,

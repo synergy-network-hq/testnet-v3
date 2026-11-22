@@ -50,7 +50,27 @@ pub(super) struct EngineeringEtdagOpening {
 }
 
 impl EngineeringEtdagOpening {
-    fn validate(&self) -> Result<(), String> {
+    #[cfg(test)]
+    pub(super) fn from_opening(
+        envelope: &synergy_etdag::ProcessingEnvelope,
+        decrypted_content: &[u8],
+    ) -> Result<Self, String> {
+        let opening = Self {
+            envelope_id: envelope.envelope_id.clone(),
+            processing_context_root: envelope.aad.processing_context_root.clone(),
+            authorization_height: envelope.aad.authorization_height,
+            payload_root: synergy_execution::processing_payload_root(
+                &envelope.aad.processing_context_root,
+                &envelope.envelope_id,
+                decrypted_content,
+            )
+            .map_err(debug)?,
+        };
+        opening.validate()?;
+        Ok(opening)
+    }
+
+    pub(super) fn validate(&self) -> Result<(), String> {
         for digest in [
             &self.envelope_id,
             &self.processing_context_root,
@@ -110,21 +130,7 @@ pub(super) fn prepare_transfer_settlement(
         .hash(HashAlgorithm::Sha3256, decrypted_content)
         .map_err(debug)?;
     let engineering_etdag_opening = opened_envelope
-        .map(|envelope| {
-            let opening = EngineeringEtdagOpening {
-                envelope_id: envelope.envelope_id.clone(),
-                processing_context_root: envelope.aad.processing_context_root.clone(),
-                authorization_height: envelope.aad.authorization_height,
-                payload_root: synergy_execution::processing_payload_root(
-                    &envelope.aad.processing_context_root,
-                    &envelope.envelope_id,
-                    decrypted_content,
-                )
-                .map_err(debug)?,
-            };
-            opening.validate()?;
-            Ok::<_, String>(opening)
-        })
+        .map(|envelope| EngineeringEtdagOpening::from_opening(envelope, decrypted_content))
         .transpose()?;
     let value = TransferSettlement {
         version: 1,

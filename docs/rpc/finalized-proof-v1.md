@@ -267,6 +267,14 @@ without a second charge. A conflicting digest at that payer and nonce fails
 closed. A missing sponsorship record only states absence from the selected
 World. An ordinary action could have consumed the same payer nonce.
 
+Encrypted sponsored enrollment fixtures also return
+`engineering_etdag_opening` with the same four fields as protected transfer
+settlements. A `sponsorships` selector may supply the entire opening to require
+the exact envelope, context and payload root in the verified World. Older
+plaintext fixture settlements omit the field. A witness for another
+envelope cannot satisfy the selector even when the sponsor intent digest
+matches.
+
 The proposed paid revert covers one exact ordering conflict. The reveal and
 sponsor must pass the finalized-parent, proof, expiry, payer, and fee checks.
 The working block must already hold the exact consumed commitment and initial

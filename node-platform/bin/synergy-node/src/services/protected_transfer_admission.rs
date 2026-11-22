@@ -17,7 +17,7 @@ pub(super) struct VerifiedTransferAdmission {
     fee_schedule: FeeSchedule,
 }
 
-fn require_source(
+pub(super) fn require_source(
     finalized: &FinalizedSnapshot<'_>,
     context: &ProcessingContext,
 ) -> Result<(), String> {
@@ -28,6 +28,49 @@ fn require_source(
         || selected.source_finality_context_root != finalized.processing_finality_root.0
     {
         return Err("PW13 admission differs from the authenticated finalized source".into());
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn verify_processing_resources(
+    finalized: &FinalizedSnapshot<'_>,
+    context: &ProcessingContext,
+    envelope: &ProcessingEnvelope,
+    limits: &EtdagParameters,
+    fee_schedule: &FeeSchedule,
+    gas: u64,
+    gas_limit: u64,
+    maximum_total_fee: &[u8; 32],
+) -> Result<(), String> {
+    limits
+        .validate_target_height(finalized.position.height, context.authority.target_height)
+        .map_err(debug)?;
+    if context.authority.target_height_offset != limits.target_height_offset {
+        return Err("PW13 admission differs from the selected processing offset".into());
+    }
+    let payer = &envelope.aad.sender_id;
+    let ledger = finalized
+        .world
+        .accounts
+        .get(payer)
+        .ok_or("PW13 payer state unavailable")?;
+    fee_schedule.validate().map_err(display)?;
+    let fee = u128::from(gas) * u128::from(fee_schedule.base_fee_per_gas_nwei);
+    let mut total = [0u8; 32];
+    total[16..].copy_from_slice(&fee.to_be_bytes());
+    let nonce_ahead = envelope.aad.nonce_slot.checked_sub(ledger.nonce);
+    if ledger.code_hash.is_some()
+        || nonce_ahead.is_none_or(|ahead| ahead >= limits.max_outstanding_nonce_slots as u64)
+        || gas == 0
+        || gas > gas_limit
+        || gas_limit > limits.max_protected_gas
+        || envelope.ciphertext.len() as u64 > limits.max_protected_bytes
+        || fee_schedule.collector == *payer
+        || total > *maximum_total_fee
+        || ledger.balance_nwei < fee
+    {
+        return Err("PW13 admission cannot cover the authorized nonce and resource cost".into());
     }
     Ok(())
 }
@@ -52,12 +95,6 @@ impl CandidateProtectedAccounts<'_> {
         admission
             .validate_context(envelope, context)
             .map_err(debug)?;
-        limits
-            .validate_target_height(finalized.position.height, context.authority.target_height)
-            .map_err(debug)?;
-        if context.authority.target_height_offset != limits.target_height_offset {
-            return Err("PW13 admission differs from the selected processing offset".into());
-        }
         let resources = &admission.resources;
         let digest = resources.signing_digest().map_err(debug)?;
         let account = AccountIdentifier::from_bytes(resources.account);
@@ -76,30 +113,16 @@ impl CandidateProtectedAccounts<'_> {
                 "PW13 admission differs from the current protected policy or account".into(),
             );
         }
-        let ledger = finalized
-            .world
-            .accounts
-            .get(&sender)
-            .ok_or("PW13 sender ledger state unavailable")?;
-        fee_schedule.validate().map_err(display)?;
-        let fee = u128::from(gas) * u128::from(fee_schedule.base_fee_per_gas_nwei);
-        let mut total = [0u8; 32];
-        total[16..].copy_from_slice(&fee.to_be_bytes());
-        let nonce_ahead = envelope.aad.nonce_slot.checked_sub(ledger.nonce);
-        if ledger.code_hash.is_some()
-            || nonce_ahead.is_none_or(|ahead| ahead >= limits.max_outstanding_nonce_slots as u64)
-            || gas == 0
-            || gas > resources.gas_limit
-            || resources.gas_limit > limits.max_protected_gas
-            || envelope.ciphertext.len() as u64 > limits.max_protected_bytes
-            || fee_schedule.collector == sender
-            || total > resources.maximum_total_fee
-            || ledger.balance_nwei < fee
-        {
-            return Err(
-                "PW13 admission cannot cover the authorized nonce and resource cost".into(),
-            );
-        }
+        verify_processing_resources(
+            finalized,
+            context,
+            envelope,
+            limits,
+            fee_schedule,
+            gas,
+            resources.gas_limit,
+            &resources.maximum_total_fee,
+        )?;
 
         // Exact D then P. The request carries no replacement verification keys.
         for (registered, proof) in policy.policy().roles[..2].iter().zip(&admission.proofs) {
