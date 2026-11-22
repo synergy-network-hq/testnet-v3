@@ -791,26 +791,64 @@ impl<'a> NativeProcessingParent<'a> {
 /// An authorized reveal of one exact envelope. Plaintext stays charged and
 /// is wiped even if a subsequent content decoder refuses the payload.
 /// A successful opening grants no permission to execute its contents.
-struct AuthenticatedProcessingOpening<'a> {
-    envelope: &'a ProcessingEnvelope,
+pub(super) struct AuthenticatedProcessingOpening {
+    envelope_id: EtdagDigest,
+    context_root: EtdagDigest,
     plaintext: SecretBytes,
     plaintext_capacity: usize,
     permit: WorldResourcePermit,
 }
 
-impl<'a> AuthenticatedProcessingOpening<'a> {
+#[derive(Clone, Copy)]
+pub(super) struct RevealedProcessingPayload<'a> {
+    envelope: &'a ProcessingEnvelope,
+    context: &'a ProcessingContext,
+    plaintext: &'a [u8],
+}
+
+impl<'a> RevealedProcessingPayload<'a> {
+    pub(super) fn envelope(&self) -> &'a ProcessingEnvelope {
+        self.envelope
+    }
+    pub(super) fn context(&self) -> &'a ProcessingContext {
+        self.context
+    }
+    pub(super) fn plaintext(&self) -> &'a [u8] {
+        self.plaintext
+    }
+}
+
+impl AuthenticatedProcessingOpening {
     fn open_in(
         parent: &NativeProcessingParent<'_>,
-        vertex: &'a NativeProcessingVertex<'_>,
+        vertex: &NativeProcessingVertex<'_>,
         shares: &[ProcessingDecryptShare],
         budget: &Arc<WorldResourceBudget>,
     ) -> Result<Self, String> {
         let authority = parent.authority;
+        let permission = parent.reveal_permission_in(vertex, budget)?;
+        let envelope = &vertex.vertex.admission.request.envelope;
+        Self::open_signed_shares(authority, envelope, &permission, shares, budget)
+    }
+
+    fn open_signed_shares(
+        authority: &VerifiedAuthority,
+        envelope: &ProcessingEnvelope,
+        permission: &ProcessingRevealPermission,
+        shares: &[ProcessingDecryptShare],
+        budget: &Arc<WorldResourceBudget>,
+    ) -> Result<Self, String> {
+        permission.validate().map_err(err)?;
+        if permission.envelope_id != envelope.envelope_id
+            || permission.processing_context_root != envelope.aad.processing_context_root
+            || envelope.aad.chain_id != authority.epoch.chain_id
+            || envelope.aad.network_id != authority.epoch.network_id
+        {
+            return Err("processing reveal permission or authority differs from the original envelope".into());
+        }
         if shares.len() > authority.registry.active_count() {
             return Err("processing share count exceeds membership".into());
         }
-        let permission = parent.reveal_permission_in(vertex, budget)?;
-        let envelope = &vertex.vertex.admission.request.envelope;
         let mut permit = reserve(shares, budget)?;
         permit
             .grow(
@@ -834,7 +872,7 @@ impl<'a> AuthenticatedProcessingOpening<'a> {
         }
         let mut verified = SecretShares(Vec::new());
         for message in shares {
-            if message.permission != permission
+            if &message.permission != permission
                 || message.signature.len() > 16 * 1024
                 || !signers.insert(&message.validator_id)
                 || !indices.insert(message.share_index)
@@ -890,11 +928,41 @@ impl<'a> AuthenticatedProcessingOpening<'a> {
         let plaintext = synergy_etdag::crypto::unpad_plaintext(padded.as_bytes()).map_err(err)?;
         let plaintext_capacity = plaintext.capacity();
         Ok(Self {
-            envelope,
+            envelope_id: envelope.envelope_id.clone(),
+            context_root: envelope.aad.processing_context_root.clone(),
             plaintext: SecretBytes::from_bytes(plaintext),
             plaintext_capacity,
             permit,
         })
+    }
+
+    pub(super) fn payload<'a>(
+        &'a self,
+        envelope: &'a ProcessingEnvelope,
+        context: &'a ProcessingContext,
+    ) -> Result<RevealedProcessingPayload<'a>, String> {
+        if envelope.envelope_id != self.envelope_id
+            || envelope.aad.processing_context_root != self.context_root
+        {
+            return Err("processing payload differs from the authenticated opening".into());
+        }
+        envelope.validate_context(context).map_err(err)?;
+        Ok(RevealedProcessingPayload {
+            envelope,
+            context,
+            plaintext: self.plaintext.as_bytes(),
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn open_qualification_shares(
+        authority: &VerifiedAuthority,
+        envelope: &ProcessingEnvelope,
+        permission: &ProcessingRevealPermission,
+        shares: &[ProcessingDecryptShare],
+        budget: &Arc<WorldResourceBudget>,
+    ) -> Result<Self, String> {
+        Self::open_signed_shares(authority, envelope, permission, shares, budget)
     }
 }
 
@@ -977,7 +1045,7 @@ impl NativeProcessingCompletion {
         .map_err(err)?;
         let payload_root = synergy_execution::processing_payload_root(
             &request.context_root,
-            &opened.envelope.envelope_id,
+            &opened.envelope_id,
             plaintext,
         )
         .map_err(err)?;
@@ -995,7 +1063,7 @@ impl NativeProcessingCompletion {
                 group_number: claim.group_number,
                 group_root: claim.group_root,
                 order_position: claim.order_position,
-                envelope_id: opened.envelope.envelope_id.clone(),
+                envelope_id: opened.envelope_id.clone(),
                 payload_root,
                 readiness_root,
                 gas_class_units: request.gas_class_units,

@@ -102,6 +102,16 @@ pub(crate) fn qualification_authority_with_provider(
     entries: Vec<(ValidatorRecord, Vec<u8>)>,
     engine: Option<Arc<Mutex<synergy_address_engine::apqe::crypto_engine::CryptoEngine>>>,
 ) -> Arc<VerifiedAuthority> {
+    qualification_authority_for_network(entries, engine, 1266, "qualification")
+}
+
+#[cfg(test)]
+pub(crate) fn qualification_authority_for_network(
+    entries: Vec<(ValidatorRecord, Vec<u8>)>,
+    engine: Option<Arc<Mutex<synergy_address_engine::apqe::crypto_engine::CryptoEngine>>>,
+    chain_id: u64,
+    network_id: &str,
+) -> Arc<VerifiedAuthority> {
     let verifier = |policy| {
         match &engine {
             Some(engine) => PqvmVerifier::with_apqe(policy, engine.clone()),
@@ -112,8 +122,8 @@ pub(crate) fn qualification_authority_with_provider(
     let registry =
         FrozenValidatorRegistry::new(1, entries.iter().map(|(r, _)| r.clone()).collect()).unwrap();
     let epoch = SimplifiedEpochContext::from_frozen_registry(
-        1266,
-        "qualification".into(),
+        chain_id,
+        network_id.into(),
         1,
         1,
         10_000,
@@ -158,7 +168,7 @@ pub(crate) fn qualification_authority_with_provider(
                 )
             })
             .collect(),
-        chain_id: 1266,
+        chain_id,
         binding_bytes: Arc::new(Vec::new()),
         protected: None,
         signature_cache: Arc::new(Mutex::new(ConsensusSignatureCache::default())),

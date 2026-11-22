@@ -50,7 +50,6 @@ pub(super) struct EngineeringEtdagOpening {
 }
 
 impl EngineeringEtdagOpening {
-    #[cfg(test)]
     pub(super) fn from_opening(
         envelope: &synergy_etdag::ProcessingEnvelope,
         decrypted_content: &[u8],
@@ -100,7 +99,6 @@ fn receipt_key(account: AccountIdentifier, intent: &[u8; 32]) -> String {
     )
 }
 
-#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_transfer_settlement(
     finalized: &FinalizedSnapshot<'_>,

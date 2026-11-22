@@ -15,10 +15,8 @@ mod etdag_candidate;
 #[cfg(test)]
 #[path = "protected_processing_admission.rs"]
 mod processing_admission;
-#[cfg(test)]
 #[path = "protected_transfer_admission.rs"]
 mod transfer_admission;
-#[cfg(test)]
 #[path = "protected_sponsored_admission.rs"]
 mod sponsored_admission;
 #[path = "protected_recovery.rs"]
@@ -275,16 +273,15 @@ pub(super) struct EnrollmentProofs<'a> {
     pub(super) salt: &'a [u8; 32],
 }
 
-#[cfg(test)]
 enum TransferCandidateContent<'a> {
+    #[cfg(test)]
     PlaintextFixture(&'a [u8]),
     OpenedEtdag(
-        &'a etdag_candidate::OpenedCandidateEnvelope,
+        super::processing_pipeline::RevealedProcessingPayload<'a>,
         &'a transfer_admission::VerifiedTransferAdmission,
     ),
 }
 
-#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 struct CandidateTransferExecution {
     fee_nwei: u128,
@@ -297,7 +294,6 @@ pub(super) struct FinalizedSnapshot<'a> {
     registry: &'a CandidateProtectedAccounts<'a>,
     world: &'a WorldState,
     position: Position,
-    #[cfg(test)]
     processing_finality_root: synergy_etdag::EtdagDigest,
 }
 
@@ -381,7 +377,6 @@ impl<'a> CandidateProtectedAccounts<'a> {
                 height: durable.finalized_height,
                 consensus_time,
             },
-            #[cfg(test)]
             processing_finality_root: super::authority::processing_finality_root(verified_finality)?,
         })
     }
@@ -556,7 +551,6 @@ impl<'a> CandidateProtectedAccounts<'a> {
 
     /// No network routes call this candidate. A paid deterministic duplicate
     /// has an explicit outcome; signing/fee/wire errors never enter settlement.
-    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn execute_sponsored_commit(
         &self,
@@ -628,7 +622,6 @@ impl<'a> CandidateProtectedAccounts<'a> {
     /// Execute inside the ordered candidate block. Validate enrollment against
     /// its finalized parent before classifying an exact earlier reveal as a
     /// paid revert. Any other failed write leaves both parties unchanged.
-    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn execute_sponsored_reveal(
         &self,
@@ -1424,7 +1417,6 @@ impl<'a> CandidateProtectedAccounts<'a> {
         Ok(activated)
     }
 
-    #[cfg(test)]
     fn require_finalized_recipient(
         &self,
         finalized: &FinalizedSnapshot<'_>,
@@ -1456,9 +1448,8 @@ impl<'a> CandidateProtectedAccounts<'a> {
         Ok(address)
     }
 
-    /// Candidate execution is test-only until an actual admission profile binds
-    /// these bytes, verification rules and the fee schedule to consensus.
-    #[cfg(test)]
+    /// Consume only the authenticated opening for the candidate admission.
+    /// A governed profile must bind these rules to consensus before deployment.
     #[allow(clippy::too_many_arguments)]
     fn execute_engineering_transfer(
         &self,
@@ -1474,6 +1465,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
         use settlement::TransferRevertReason;
         const TRANSFER_MAX: usize = 60;
         let (decrypted_content, opened) = match action_content {
+            #[cfg(test)]
             TransferCandidateContent::PlaintextFixture(bytes) => (bytes, None),
             TransferCandidateContent::OpenedEtdag(opened, admission) => {
                 (opened.plaintext(), Some((opened, admission)))
@@ -2199,7 +2191,7 @@ mod tests {
         assert_eq!(
             registry.execute_opened_sponsored_enrollment(
                 &provider, &verifier, &snapshot, &mut world, position(2, 1001),
-                &altered_opening, &altered_admission, &schedule,
+                altered_opening.payload(), &altered_admission, &schedule,
             ).unwrap_err(),
             "opened enrollment differs from the signed sponsor admission",
         );
@@ -2207,7 +2199,7 @@ mod tests {
         assert_eq!(
             registry.execute_opened_sponsored_enrollment(
                 &provider, &verifier, &snapshot, &mut world, position(2, 1001),
-                &first_opening, &first_admission, &schedule,
+                first_opening.payload(), &first_admission, &schedule,
             ).unwrap(),
             (CommitApplied, 10)
         );
@@ -2402,7 +2394,7 @@ mod tests {
             open(&reveal_content, &reveal_intent, &snapshot, &certificate).unwrap();
         assert_eq!(
             registry.execute_opened_sponsored_enrollment(
-                &provider, &verifier, &snapshot, &mut world, position, &reveal_opening,
+                &provider, &verifier, &snapshot, &mut world, position, reveal_opening.payload(),
                 &reveal_admission, &schedule,
             ).unwrap(),
             (RevealApplied, 10)
@@ -3447,7 +3439,7 @@ mod tests {
                     &provider,
                     &snapshot,
                     &mut rejected,
-                    OpenedEtdag(&mismatched, &mismatched_admission),
+                    OpenedEtdag(mismatched.payload(), &mismatched_admission),
                     &schedule,
                     21_000,
                     inclusion,
@@ -3465,7 +3457,7 @@ mod tests {
                 &provider,
                 &snapshot,
                 &mut rejected,
-                OpenedEtdag(&invalid, &invalid_admission),
+                OpenedEtdag(invalid.payload(), &invalid_admission),
                 &schedule,
                 21_000,
                 inclusion,
@@ -3492,7 +3484,7 @@ mod tests {
                     &provider,
                     &snapshot,
                     &mut world,
-                    OpenedEtdag(&opened, &admission),
+                    OpenedEtdag(opened.payload(), &admission),
                     &schedule,
                     21_000,
                     inclusion,
@@ -3519,7 +3511,7 @@ mod tests {
                 &provider,
                 &snapshot,
                 &mut world,
-                OpenedEtdag(&retried_opening, &retried_admission),
+                OpenedEtdag(retried_opening.payload(), &retried_admission),
                 &schedule,
                 21_000,
                 inclusion,
@@ -3533,7 +3525,7 @@ mod tests {
                 &provider,
                 &snapshot,
                 &mut too_expensive,
-                OpenedEtdag(&opened, &admission),
+                OpenedEtdag(opened.payload(), &admission),
                 &schedule,
                 21_001,
                 inclusion,
@@ -3563,7 +3555,7 @@ mod tests {
                 &provider,
                 &saturated_snapshot,
                 &mut failed,
-                OpenedEtdag(&saturated_opening, &saturated_admission),
+                OpenedEtdag(saturated_opening.payload(), &saturated_admission),
                 &schedule,
                 21_000,
                 inclusion,
@@ -3585,7 +3577,7 @@ mod tests {
                 &provider,
                 &funded_snapshot,
                 &mut ordered,
-                OpenedEtdag(&funded_opening, &funded_admission),
+                OpenedEtdag(funded_opening.payload(), &funded_admission),
                 &schedule,
                 21_000,
                 inclusion,
@@ -3633,7 +3625,7 @@ mod tests {
                     &provider,
                     &funded_snapshot,
                     &mut substitution_candidate,
-                    OpenedEtdag(&substituted, &substituted_admission),
+                    OpenedEtdag(substituted.payload(), &substituted_admission),
                     &schedule,
                     21_000,
                     inclusion,
@@ -3647,7 +3639,7 @@ mod tests {
                 &provider,
                 &funded_snapshot,
                 candidate,
-                OpenedEtdag(&second_opening, &second_admission),
+                OpenedEtdag(second_opening.payload(), &second_admission),
                 &schedule,
                 21_000,
                 inclusion,
@@ -3777,7 +3769,7 @@ mod tests {
                     &provider,
                     &snapshot,
                     &mut ordered_credit,
-                    OpenedEtdag(&opened, &admission),
+                    OpenedEtdag(opened.payload(), &admission),
                     &schedule,
                     21_000,
                     inclusion,

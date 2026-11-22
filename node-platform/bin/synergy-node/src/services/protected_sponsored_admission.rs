@@ -4,10 +4,10 @@ use super::{
     Mldsa87, Position, PqProvider, PublicKey, SignOptions, Signature, SponsorProof, WorldState,
 };
 use super::{
-    etdag_candidate::OpenedCandidateEnvelope, settlement::EngineeringEtdagOpening,
-    sponsor_settlement::SponsoredOutcome, transfer_admission,
+    settlement::EngineeringEtdagOpening, sponsor_settlement::SponsoredOutcome, transfer_admission,
 };
 use crate::services::{
+    processing_pipeline::RevealedProcessingPayload,
     protected_action_wire::{decode_sponsor, ENROLL_COMMIT, ENROLL_REVEAL},
     protected_enrollment_wire::decode_sponsored,
 };
@@ -95,7 +95,7 @@ impl CandidateProtectedAccounts<'_> {
         finalized: &FinalizedSnapshot<'_>,
         world: &mut WorldState,
         inclusion: Position,
-        opened: &OpenedCandidateEnvelope,
+        opened: RevealedProcessingPayload<'_>,
         admission: &VerifiedSponsoredAdmission,
         fee_schedule: &FeeSchedule,
     ) -> Result<(SponsoredOutcome, u128), String> {

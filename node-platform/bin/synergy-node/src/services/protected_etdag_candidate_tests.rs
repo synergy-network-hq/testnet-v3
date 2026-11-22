@@ -1,8 +1,14 @@
 //! Native-APQE fixture for the distinct PW13 envelope profile. It exercises
 //! local encrypt and reveal without starting any validator or network.
 #![cfg(test)]
+use super::super::processing_pipeline::{
+    AuthenticatedProcessingOpening, RevealedProcessingPayload,
+};
 use std::path::Path;
-use synergy_address_engine::{apqe::SecretBytes, types::Algorithm};
+use synergy_address_engine::{
+    apqe::{provider::SignOptions, SecretBytes},
+    types::Algorithm,
+};
 use synergy_aegis::{AegisProtectedPrimitives, ApqeKem};
 use synergy_etdag::{
     admission::{
@@ -10,18 +16,19 @@ use synergy_etdag::{
         PW13_TRANSFER_CANDIDATE_LANE, PW13_TRANSFER_CANDIDATE_PROFILE_ID,
     },
     crypto::{
-        decrypt_protected_payload, decrypt_share_capsule_with_kem_diagnostic,
-        encrypt_protected_payload_with_kem, governed_reveal_threshold, pad_plaintext,
-        unpad_plaintext, IngressKemKeyRecord, IngressKemKeyRegistry, IngressKemPublicKey,
-        ShamirShare, ML_KEM_1024_ALGORITHM,
+        decrypt_share_capsule_with_kem_diagnostic, encrypt_protected_payload_with_kem,
+        governed_reveal_threshold, pad_plaintext, IngressKemKeyRecord, IngressKemKeyRegistry,
+        IngressKemPublicKey, ML_KEM_1024_ALGORITHM,
     },
+    execution::{ProcessingDecryptShare, ProcessingRevealPermission},
     EtdagDigest, EtdagParameters, ProcessingContext, ProcessingEnvelope, ProcessingEnvelopeAad,
     TargetAdmissionContextV3,
 };
-use synergy_posy::FinalizedBlockRecord;
+use synergy_posy::{FinalizedBlockRecord, ValidatorRecord, ValidatorStatus};
+use synergy_state::world_resources::WorldResourceBudget;
 
 pub(super) struct OpenedCandidateEnvelope {
-    plaintext: SecretBytes,
+    opening: AuthenticatedProcessingOpening,
     envelope: ProcessingEnvelope,
     context: ProcessingContext,
 }
@@ -32,7 +39,12 @@ pub(super) enum CandidateEnvelopeProfile {
 }
 impl OpenedCandidateEnvelope {
     pub(super) fn plaintext(&self) -> &[u8] {
-        self.plaintext.as_bytes()
+        self.payload().plaintext()
+    }
+    pub(super) fn payload(&self) -> RevealedProcessingPayload<'_> {
+        self.opening
+            .payload(&self.envelope, &self.context)
+            .expect("qualification retains the exact opened envelope and context")
     }
     pub(super) fn envelope(&self) -> &ProcessingEnvelope {
         &self.envelope
@@ -41,11 +53,11 @@ impl OpenedCandidateEnvelope {
         &self.context
     }
 }
-struct Shares(Vec<(String, ShamirShare)>);
-impl Drop for Shares {
+struct SignedShares(Vec<ProcessingDecryptShare>);
+impl Drop for SignedShares {
     fn drop(&mut self) {
-        for (_, share) in &mut self.0 {
-            share.value.fill(0);
+        for message in &mut self.0 {
+            message.share_bytes.fill(0);
         }
     }
 }
@@ -76,10 +88,10 @@ pub(super) fn open_candidate_envelope<T>(
     let padded = SecretBytes::from_bytes(pad_plaintext(content).map_err(err)?);
     let engine = synergy_aegis::load_authenticated_native_engine(report, report_sha256)?;
     let kem = ApqeKem::mlkem1024(engine.clone()).map_err(err)?;
-    // A synthetic four-member strict-count quorum. The actual reveal threshold
-    // is derived by the existing shared governed primitive, never reassigned.
-    const MEMBERS: usize = 4;
-    const COUNT_QUORUM: usize = 3;
+    // Five in-memory signing records satisfy the existing PoSy registry
+    // validation. The native reveal owner applies the same share threshold.
+    const MEMBERS: usize = 5;
+    const COUNT_QUORUM: usize = MEMBERS - 1;
     let threshold = governed_reveal_threshold(MEMBERS, COUNT_QUORUM).map_err(err)?;
     let parameters = EtdagParameters::default();
     let target_height = parameters
@@ -128,6 +140,31 @@ pub(super) fn open_candidate_envelope<T>(
             "test-sponsor",
         ),
     };
+    let mut signers = Vec::with_capacity(MEMBERS);
+    let mut validators = Vec::with_capacity(MEMBERS);
+    for (index, record) in registry.records.iter().enumerate() {
+        let pair = engine
+            .lock()
+            .map_err(|_| "isolated APQE lock poisoned")?
+            .generate_keypair(Algorithm::MlDsa65)
+            .map_err(err)?;
+        validators.push((
+            ValidatorRecord {
+                validator_id: record.validator_id.clone(),
+                consensus_key_id: format!("fixture-consensus-key-{index}"),
+                frozen_voting_weight: 1,
+                status: ValidatorStatus::Active,
+            },
+            pair.public_key,
+        ));
+        signers.push(pair.private_key);
+    }
+    let authority = super::super::authority::qualification_authority_for_network(
+        validators,
+        Some(engine.clone()),
+        chain_id,
+        network,
+    );
     let context = ProcessingContext {
         context_version: 1,
         profile_id: profile.into(),
@@ -144,9 +181,9 @@ pub(super) fn open_candidate_envelope<T>(
                 source,
             )?
             .0,
-            active_validator_set_root: roots.clone(),
-            validator_consensus_key_root: roots.clone(),
-            frozen_voting_weight_root: roots.clone(),
+            active_validator_set_root: authority.epoch.active_validator_set_root.clone(),
+            validator_consensus_key_root: authority.epoch.validator_consensus_key_root.clone(),
+            frozen_voting_weight_root: authority.epoch.frozen_voting_weight_root.clone(),
             cluster_schedule_version: "1".into(),
             finalized_epoch_seed_root: roots.clone(),
             assigned_height_schedule_root: roots.clone(),
@@ -199,14 +236,25 @@ pub(super) fn open_candidate_envelope<T>(
     envelope.envelope_id = envelope.commitment().map_err(err)?;
     envelope.validate_context(&context).map_err(err)?;
     let admission = before_open(&envelope, &context)?;
-    let mut shares = Shares(Vec::with_capacity(MEMBERS));
-    for ((capsule, record), secret) in envelope
+    let permission = ProcessingRevealPermission {
+        namespace_root: envelope.content_blind_order_key.clone(),
+        group_number: 1,
+        group_root: envelope.share_commitment_root.clone(),
+        successor_root: envelope.share_capsule_root.clone(),
+        processing_context_root: envelope.aad.processing_context_root.clone(),
+        envelope_id: envelope.envelope_id.clone(),
+        parent_block_id: source.block_id.clone(),
+        validation_id: source.finality_certificate_id.clone(),
+    };
+    let mut shares = SignedShares(Vec::with_capacity(MEMBERS));
+    for (index, ((capsule, record), secret)) in envelope
         .share_capsules
         .iter()
         .zip(&registry.records)
         .zip(&secrets)
+        .enumerate()
     {
-        let share = decrypt_share_capsule_with_kem_diagnostic(
+        let mut share = decrypt_share_capsule_with_kem_diagnostic(
             &envelope,
             capsule,
             record,
@@ -215,30 +263,66 @@ pub(super) fn open_candidate_envelope<T>(
             &kem,
         )
         .map_err(|failure| err(failure.stage))?;
-        shares.0.push((record.validator_id.clone(), share));
+        let share_bytes = share.canonical_bytes();
+        share.value.fill(0);
+        shares.0.push(ProcessingDecryptShare {
+            share_version: 1,
+            permission: permission.clone(),
+            validator_id: record.validator_id.clone(),
+            key_id: format!("fixture-consensus-key-{index}"),
+            ingress_kem_key_id: record.key_id.clone(),
+            share_index: capsule.share_index,
+            share_commitment: capsule.share_commitment.clone(),
+            share_bytes: share_bytes.map_err(err)?,
+            signature: Vec::new(),
+        });
+        let message = shares.0.last_mut().expect("inserted share");
+        let transcript = SecretBytes::from_bytes(message.signing_bytes().map_err(err)?);
+        message.signature = engine
+            .lock()
+            .map_err(|_| "isolated APQE lock poisoned")?
+            .sign(
+                Algorithm::MlDsa65,
+                signers[index].as_bytes(),
+                transcript.as_bytes(),
+                SignOptions::default(),
+            )
+            .map_err(err)?;
     }
-    let opened = SecretBytes::from_bytes(
-        decrypt_protected_payload(&envelope, &shares.0[..threshold], MEMBERS, COUNT_QUORUM)
-            .map_err(err)?,
-    );
-    let plaintext = SecretBytes::from_bytes(unpad_plaintext(opened.as_bytes()).map_err(err)?);
-    if plaintext.as_bytes() != content {
+    let budget = WorldResourceBudget::new(128 * 1024 * 1024);
+    let open = |envelope: &ProcessingEnvelope, shares: &[ProcessingDecryptShare]| {
+        AuthenticatedProcessingOpening::open_qualification_shares(
+            &authority,
+            envelope,
+            &permission,
+            shares,
+            &budget,
+        )
+    };
+    let opening = open(&envelope, &shares.0[..threshold])?;
+    if opening.payload(&envelope, &context)?.plaintext() != content {
         return Err("isolated ETDAG open changed original content".into());
     }
-    if decrypt_protected_payload(&envelope, &shares.0[..threshold - 1], MEMBERS, COUNT_QUORUM)
-        .is_ok()
-    {
+    if open(&envelope, &shares.0[..threshold - 1]).is_ok() {
         return Err("isolated ETDAG accepted insufficient shares".into());
     }
+    shares.0[0].signature[0] ^= 1;
+    if open(&envelope, &shares.0[..threshold]).is_ok() {
+        return Err("isolated ETDAG accepted a changed validator share signature".into());
+    }
+    shares.0[0].signature[0] ^= 1;
     let mut wrong_context = context.clone();
     wrong_context.authority.epoch += 1;
-    if envelope.validate_context(&wrong_context).is_ok() {
+    if opening.payload(&envelope, &wrong_context).is_ok() {
         return Err("isolated ETDAG accepted foreign context".into());
     }
     // Recompute the outer commitment so rejection must involve authenticated
     // AAD/capsule/key binding, rather than only a stale envelope identifier.
     let mut wrong_aad = envelope.clone();
     wrong_aad.aad.nonce_slot ^= 1;
+    if opening.payload(&wrong_aad, &context).is_ok() {
+        return Err("isolated ETDAG reused opened content with changed envelope fields".into());
+    }
     wrong_aad.envelope_id = wrong_aad.commitment().map_err(err)?;
     wrong_aad.validate().map_err(err)?;
     if decrypt_share_capsule_with_kem_diagnostic(
@@ -250,14 +334,13 @@ pub(super) fn open_candidate_envelope<T>(
         &kem,
     )
     .is_ok()
-        || decrypt_protected_payload(&wrong_aad, &shares.0[..threshold], MEMBERS, COUNT_QUORUM)
-            .is_ok()
+        || open(&wrong_aad, &shares.0[..threshold]).is_ok()
     {
         return Err("isolated ETDAG accepted substituted AAD".into());
     }
     Ok((
         OpenedCandidateEnvelope {
-            plaintext,
+            opening,
             envelope,
             context,
         },
@@ -314,5 +397,5 @@ fn isolated_etdag_candidate_real_native_mlkem_roundtrip_and_rejection_checks() {
         .envelope()
         .validate_context(opened.context())
         .unwrap();
-    assert_eq!(opened.envelope().share_capsules.len(), 4);
+    assert_eq!(opened.envelope().share_capsules.len(), 5);
 }

@@ -164,8 +164,13 @@ Core's native processing pipeline now constructs a budgeted, zeroizing
 plaintext owner after checking reveal permission, signed shares and the
 original authenticated envelope. The existing ordinary decoder consumes
 that owner and verifies the exact admission carrier and signature before
-publishing a ready transaction. The shared opening is the boundary for
-integrating the separately governed PW13 content decoder.
+publishing a ready transaction. The compiled PW13 sponsored enrollment and
+transfer executors consume the same owner's checked payload against the
+original envelope and context. Isolated qualification uses real native
+ML-KEM-1024 capsules and APQE ML-DSA-65 signed shares through that owner.
+The tests reject insufficient shares, changed signatures, and substituted
+envelopes or contexts. The live processing profile still requires ratified
+admission, readiness and dispatch rules for PW13.
 
 The canonical pending processing store now accepts typed admission records.
 The protected fixtures persist each original encrypted enrollment or transfer

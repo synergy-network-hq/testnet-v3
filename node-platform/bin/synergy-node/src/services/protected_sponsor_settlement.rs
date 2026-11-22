@@ -112,7 +112,6 @@ fn validate(record: &SponsorSettlement) -> Result<(), String> {
 /// Called only after root's exact sponsor signature/binding/fee verification.
 /// The result must join the same atomic StateDiff as the fee/business outcome.
 /// It does not apply anything or grant sponsor authority over the new account.
-#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_sponsor_settlement(
     finalized: &FinalizedSnapshot<'_>,
