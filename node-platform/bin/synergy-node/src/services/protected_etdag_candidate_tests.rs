@@ -13,7 +13,7 @@ use super::{
         execute_protected_candidate, execute_protected_journal_candidate,
         replay_protected_candidate, replay_protected_journal_candidate, CandidateActionOutcome,
         CandidateDispatch, CandidateSlot, PreparedProtectedAction, ProtectedAdmissionRecovery,
-        ProtectedCandidateContext, ProtectedJournalRecovery, ProtectedRecoveryTerms,
+        ProtectedCandidateContext, ProtectedIntake, ProtectedJournalRecovery, ProtectedRecoveryTerms,
     },
     tests::Scratch,
     FinalizedSnapshot, Position, WorldState,
@@ -873,7 +873,8 @@ fn qualify_retained_replay(
         },
         terms.recovery,
     )?;
-    let snapshot = source_recovery.snapshot().position;
+    let intake = ProtectedIntake::new(terms.source.registry, &native, terms.recovery)?;
+    let snapshot = intake.snapshot().position;
     let parameters = authority.protected_parameters()?;
     let latest_authorization_height = parameters
         .protected_target_height(retained.latest.finalized.height)
@@ -958,9 +959,18 @@ fn qualify_retained_replay(
     };
     let request_bytes = serde_json::to_vec(&retained.vertex.admission).map_err(err)?;
     let mut pending = open()?;
-    let identity = pending
-        .admit(context, snapshot.consensus_time, &request_bytes, &recovery)
-        .map_err(err)?;
+    let identity = match &retained.vertex.admission.authorization {
+        CandidateAuthorization::SponsoredEnrollment(_) => {
+            let first = intake.admit_sponsored_enrollment(&mut pending, &request_bytes).map_err(err)?;
+            let retried = intake.admit_sponsored_enrollment(&mut pending, &request_bytes).map_err(err)?;
+            assert_eq!(first, retried);
+            first
+        }
+        CandidateAuthorization::Transfer(_) => {
+            assert!(intake.admit_sponsored_enrollment(&mut pending, &request_bytes).is_err());
+            pending.admit(context, snapshot.consensus_time, &request_bytes, &recovery).map_err(err)?
+        }
+    };
     let mut changed = evidence.clone();
     changed.reveal_validation.echoes[0].signature[0] ^= 1;
     assert!(matches!(

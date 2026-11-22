@@ -11,11 +11,12 @@ use super::{
     FinalizedSnapshot, Position, TransferCandidateContent,
 };
 use crate::services::processing_pipeline::{
-    AuthenticatedProcessingOpening, NativeProcessingRecovery, ProcessingCompletionEvidence,
-    Pw13FinalizedSource, RevealedProcessingPayload,
+    AuthenticatedProcessingOpening, NativeProcessingContext, NativeProcessingRecovery,
+    ProcessingCompletionEvidence, Pw13FinalizedSource, RevealedProcessingPayload,
 };
 use crate::services::processing_store::{
-    PendingProcessingStore, ProcessingAdmissionAuthenticator, ProcessingStoreError,
+    PendingProcessingIdentity, PendingProcessingStore, ProcessingAdmissionAuthenticator,
+    ProcessingStoreError,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -255,10 +256,10 @@ impl CandidateProtectedAccounts<'_> {
     }
 }
 
-/// Authenticates the unchanged pending journal against the certified source.
-pub(super) struct ProtectedAdmissionRecovery<'a> {
+/// A sponsored admission can be persisted as soon as the original source is
+/// authenticated. No reveal parent or decrypted content exists at intake.
+pub(super) struct ProtectedIntake<'a> {
     registry: &'a CandidateProtectedAccounts<'a>,
-    recovery: NativeProcessingRecovery<'a>,
     snapshot: FinalizedSnapshot<'a>,
     context: &'a ProcessingContext,
     context_root: EtdagDigest,
@@ -266,17 +267,16 @@ pub(super) struct ProtectedAdmissionRecovery<'a> {
     terms: ProtectedRecoveryTerms<'a>,
 }
 
-impl<'a> ProtectedAdmissionRecovery<'a> {
+impl<'a> ProtectedIntake<'a> {
     pub(super) fn new(
         registry: &'a CandidateProtectedAccounts<'a>,
-        recovery: NativeProcessingRecovery<'a>,
+        source: &'a NativeProcessingContext<'a>,
         terms: ProtectedRecoveryTerms<'a>,
     ) -> Result<Self, String> {
-        let verified = recovery.source.pw13_finalized_source()?;
+        let verified = source.pw13_finalized_source()?;
         let snapshot = registry.native_finalized_snapshot(&verified)?;
         Ok(Self {
             registry,
-            recovery,
             snapshot,
             context: verified.context,
             context_root: verified.context.root().map_err(debug)?,
@@ -287,6 +287,26 @@ impl<'a> ProtectedAdmissionRecovery<'a> {
 
     pub(super) fn snapshot(&self) -> &FinalizedSnapshot<'a> {
         &self.snapshot
+    }
+
+    /// Admission-stage identity for the original bytes, returned only after
+    /// the journal commits. The engineering path does not confer finality.
+    pub(super) fn admit_sponsored_enrollment(
+        &self,
+        pending: &mut PendingProcessingStore<CandidateAdmission>,
+        original: &[u8],
+    ) -> Result<PendingProcessingIdentity, ProcessingStoreError> {
+        if self.context.profile_id != synergy_etdag::admission::PW13_SPONSOR_CANDIDATE_PROFILE_ID {
+            return Err(ProcessingStoreError::Verification(
+                "sponsored enrollment requires the authenticated sponsor profile".into(),
+            ));
+        }
+        pending.admit(
+            self.context,
+            self.snapshot.position.consensus_time,
+            original,
+            self,
+        )
     }
 
     fn authorize(
@@ -306,6 +326,41 @@ impl<'a> ProtectedAdmissionRecovery<'a> {
             },
         )
     }
+}
+
+impl ProcessingAdmissionAuthenticator<CandidateAdmission> for ProtectedIntake<'_> {
+    fn verify(
+        &self,
+        context: &ProcessingContext,
+        timestamp: u64,
+        admission: &CandidateAdmission,
+    ) -> Result<(), String> {
+        if context != self.context || timestamp != self.snapshot.position.consensus_time {
+            return Err(
+                "protected journal changed the authenticated context or source time".into(),
+            );
+        }
+        self.authorize(admission).map(drop)
+    }
+}
+
+/// Authenticates the unchanged pending journal and the later reveal proof.
+pub(super) struct ProtectedAdmissionRecovery<'a> {
+    intake: ProtectedIntake<'a>,
+    recovery: NativeProcessingRecovery<'a>,
+}
+
+impl<'a> ProtectedAdmissionRecovery<'a> {
+    pub(super) fn new(
+        registry: &'a CandidateProtectedAccounts<'a>,
+        recovery: NativeProcessingRecovery<'a>,
+        terms: ProtectedRecoveryTerms<'a>,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            intake: ProtectedIntake::new(registry, recovery.source, terms)?,
+            recovery,
+        })
+    }
 
     pub(super) fn recover<'b>(
         &'b self,
@@ -316,20 +371,20 @@ impl<'a> ProtectedAdmissionRecovery<'a> {
         let (opening, authorized) =
             self.recovery
                 .recover_pw13(admission, evidence, budget, |original| {
-                    self.authorize(original)
+                    self.intake.authorize(original)
                 })?;
         Ok(RecoveredProtectedAction {
             opening,
             admission: authorized,
             source: FinalizedSnapshot {
-                registry: self.registry,
-                world: self.snapshot.world,
-                position: self.snapshot.position,
-                processing_finality_root: self.snapshot.processing_finality_root.clone(),
+                registry: self.intake.registry,
+                world: self.intake.snapshot.world,
+                position: self.intake.snapshot.position,
+                processing_finality_root: self.intake.snapshot.processing_finality_root.clone(),
             },
-            context: self.context,
+            context: self.intake.context,
             envelope: &admission.envelope,
-            terms: self.terms,
+            terms: self.intake.terms,
         })
     }
 }
@@ -390,7 +445,7 @@ impl ProtectedJournalRecovery<'_> {
         self.sources
             .iter()
             .find(|source| {
-                source.context_root == admission.envelope.aad.processing_context_root
+                source.intake.context_root == admission.envelope.aad.processing_context_root
                     && source.recovery.reveal_parent.block_id
                         == evidence.reveal_validation.candidate.block_id
                     && source
@@ -418,7 +473,7 @@ impl ProtectedJournalRecovery<'_> {
                 |context, admission, evidence, workspace| {
                     let run = || {
                         let source = self.completion_source(admission, evidence)?;
-                        if source.context != context || source.parameters != *parameters {
+                        if source.intake.context != context || source.intake.parameters != *parameters {
                             return Err(
                                 "protected processing context or limits differ from the authenticated admission"
                                     .into(),
@@ -443,7 +498,7 @@ impl ProcessingAdmissionAuthenticator<CandidateAdmission> for ProtectedJournalRe
     ) -> Result<(), String> {
         self.sources
             .iter()
-            .find(|source| source.context == context)
+            .find(|source| source.intake.context == context)
             .ok_or("protected journal lacks its original authenticated context")?
             .verify(context, timestamp, admission)
     }
@@ -467,12 +522,7 @@ impl ProcessingAdmissionAuthenticator<CandidateAdmission> for ProtectedAdmission
         timestamp: u64,
         admission: &CandidateAdmission,
     ) -> Result<(), String> {
-        if context != self.context || timestamp != self.snapshot.position.consensus_time {
-            return Err(
-                "protected journal changed the authenticated context or source time".into(),
-            );
-        }
-        self.authorize(admission).map(drop)
+        self.intake.verify(context, timestamp, admission)
     }
 
     fn verify_completion(
@@ -482,7 +532,7 @@ impl ProcessingAdmissionAuthenticator<CandidateAdmission> for ProtectedAdmission
         evidence: &ProcessingCompletionEvidence,
         budget: &Arc<WorldResourceBudget>,
     ) -> Result<(), String> {
-        if context != self.context {
+        if context != self.intake.context {
             return Err("protected completion changed the authenticated context".into());
         }
         self.recover(admission, evidence, budget).map(drop)

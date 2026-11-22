@@ -267,6 +267,14 @@ Offline receipt inspection can check first appearance against adjacent certified
 Worlds. This proposal does not assign production wire identifiers or enable
 the public route. Its resource and retention rules remain subject to ratification.
 
+Sponsored intake uses the original three-QC-authorized source and commits the
+exact encrypted request to the native pending journal before returning its
+envelope identity. Intake is independent of the later certified reveal parent.
+Identical retries return the original identity, and a transfer profile cannot
+enter sponsored enrollment through this interface. A journal acknowledgement
+is admission-stage evidence. Public commit and reveal still require ratified
+dispatch and finalized receipt verification.
+
 The offline settlement verifier checks the exact encrypted transfer and
 sponsored enrollment receipts against adjacent three-QC-certified blocks
 and their Worlds. It checks first appearance, the certified inclusion time,
