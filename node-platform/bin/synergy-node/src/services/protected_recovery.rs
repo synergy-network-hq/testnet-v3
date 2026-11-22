@@ -626,14 +626,8 @@ mod tests {
             },
         );
         let original = world.clone();
-        let snapshot = FinalizedSnapshot {
-            registry: &registry,
-            world: &world,
-            position: Position {
-                height: 10,
-                consensus_time: 1000,
-            },
-        };
+        let (pointer, proof) = super::super::tests::finalized(10, &world);
+        let snapshot = registry.finalized_snapshot(&world, &pointer, &proof, 1000).unwrap();
         let inclusion = Position {
             height: 11,
             consensus_time: 1001,
@@ -803,11 +797,16 @@ mod tests {
                     &possession
                 )
                 .is_err());
-            let pending_snapshot = FinalizedSnapshot {
-                registry: &registry,
-                world: &pending,
-                position: snapshot.position,
-            };
+            let (pending_pointer, pending_proof) =
+                super::super::tests::finalized(snapshot.position.height, &pending);
+            let pending_snapshot = registry
+                .finalized_snapshot(
+                    &pending,
+                    &pending_pointer,
+                    &pending_proof,
+                    snapshot.position.consensus_time,
+                )
+                .unwrap();
             assert!(registry
                 .inspect_recovery_schedule(
                     &provider,

@@ -9,6 +9,8 @@ use crate::crypto::{canonical_signing_bytes, ShareCapsule, ShareCommitment};
 use crate::{EtdagDigest, EtdagError, TargetAdmissionContextV3};
 
 pub const PROCESSING_PROFILE_ID: &str = "etdag-async-processing-v1";
+pub const PW13_TRANSFER_CANDIDATE_PROFILE_ID: &str = "etdag-pw13-transfer-candidate-v1";
+pub const PW13_TRANSFER_CANDIDATE_LANE: &str = "protected-transfer";
 const CONTEXT_DOMAIN: &str = "SYNERGY_ETDAG_PROCESSING_CONTEXT_V1";
 const AAD_DOMAIN: &str = "SYNERGY_ETDAG_PROCESSING_AAD_V1";
 const ENVELOPE_DOMAIN: &str = "SYNERGY_ETDAG_PROCESSING_ENVELOPE_V1";
@@ -27,6 +29,14 @@ fn valid_text(value: &str, maximum: usize) -> bool {
 
 fn invalid(message: &str) -> EtdagError {
     EtdagError::InvalidEnvelope(message.into())
+}
+
+fn profile_lane(profile: &str) -> Option<&'static str> {
+    match profile {
+        PROCESSING_PROFILE_ID => Some("ordinary-user"),
+        PW13_TRANSFER_CANDIDATE_PROFILE_ID => Some(PW13_TRANSFER_CANDIDATE_LANE),
+        _ => None,
+    }
 }
 
 /// Frozen finalized snapshot, schedule and key authority. The embedded legacy
@@ -61,7 +71,7 @@ impl ProcessingContext {
             .any(|value| !valid_text(value, MAX_ID_BYTES))
             || self.authority.ingress_kem_registry_root.is_zero()
             || self.context_version != 1
-            || self.profile_id != PROCESSING_PROFILE_ID
+            || profile_lane(&self.profile_id).is_none()
             || self.authority.epoch == 0
             || self.authority.assigned_cluster_validator_count > 255
             || !valid_text(&self.authority.network_id, MAX_NETWORK_BYTES)
@@ -98,12 +108,11 @@ pub struct ProcessingEnvelopeAad {
 impl ProcessingEnvelopeAad {
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, EtdagError> {
         self.processing_context_root.validate()?;
-        if self.profile_id != PROCESSING_PROFILE_ID
-            || self.chain_id == 0
+        if self.chain_id == 0
             || self.epoch == 0
             || self.authorization_height < 3
             || self.processing_context_root.is_zero()
-            || self.lane_id != "ordinary-user"
+            || profile_lane(&self.profile_id) != Some(self.lane_id.as_str())
             || !valid_text(&self.network_id, MAX_NETWORK_BYTES)
             || !valid_text(&self.protocol_version, MAX_ID_BYTES)
             || !valid_text(&self.sender_id, MAX_ID_BYTES)
@@ -307,6 +316,7 @@ impl ProcessingAdmissionRequest {
         self.context_root.validate()?;
         self.envelope.validate()?;
         if self.request_version != 1
+            || self.envelope.aad.profile_id != PROCESSING_PROFILE_ID
             || self.gas_class_units == 0
             // Terminal current-nonce execution consumes the nonce. Never
             // authorize a value that cannot advance without wrapping.
@@ -521,6 +531,25 @@ mod tests {
             changed[field] = 999.into();
             assert!(serde_json::from_value::<ProcessingAdmissionRequest>(changed).is_err());
         }
+    }
+
+    #[test]
+    fn pw13_envelope_has_no_ordinary_admission_path() {
+        let ordinary = context();
+        let mut candidate = ordinary.clone();
+        candidate.profile_id = PW13_TRANSFER_CANDIDATE_PROFILE_ID.into();
+        let mut request = request();
+        request.context_root = candidate.root().unwrap();
+        request.envelope.aad.processing_context_root = request.context_root.clone();
+        request.envelope.aad.profile_id = candidate.profile_id.clone();
+        request.envelope.aad.lane_id = PW13_TRANSFER_CANDIDATE_LANE.into();
+        request.envelope.envelope_id = request.envelope.commitment().unwrap();
+        request.envelope.validate_context(&candidate).unwrap();
+        assert!(request.envelope.validate_context(&ordinary).is_err());
+        assert!(request.validate_context(&candidate).is_err());
+        assert!(request.signing_bytes().is_err());
+        request.envelope.aad.lane_id = "ordinary-user".into();
+        assert!(request.envelope.aad.canonical_bytes().is_err());
     }
 
     #[test]

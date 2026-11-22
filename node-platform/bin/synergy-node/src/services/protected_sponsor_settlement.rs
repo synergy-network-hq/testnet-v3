@@ -244,14 +244,8 @@ mod tests {
         height: u64,
         time: u64,
     ) -> FinalizedSnapshot<'a> {
-        FinalizedSnapshot {
-            registry,
-            world,
-            position: Position {
-                height,
-                consensus_time: time,
-            },
-        }
+        let (pointer, proof) = super::super::tests::finalized(height, world);
+        registry.finalized_snapshot(world, &pointer, &proof, time).unwrap()
     }
     fn staged(
         snapshot: &FinalizedSnapshot<'_>,

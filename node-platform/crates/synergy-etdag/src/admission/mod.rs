@@ -3,6 +3,7 @@ mod context;
 mod nonce_window;
 mod policy;
 mod processing;
+mod protected_transfer;
 mod request;
 mod resource_limits;
 mod target_height;
@@ -15,7 +16,11 @@ pub use nonce_window::AdmissionNonceWindow;
 pub use policy::EtdagAdmission;
 pub use processing::{
     ProcessingAdmissionRequest, ProcessingContext, ProcessingEnvelope, ProcessingEnvelopeAad,
-    WalletProcessingAdmission, PROCESSING_PROFILE_ID,
+    WalletProcessingAdmission, PROCESSING_PROFILE_ID, PW13_TRANSFER_CANDIDATE_LANE,
+    PW13_TRANSFER_CANDIDATE_PROFILE_ID,
+};
+pub use protected_transfer::{
+    Pw13AdmissionProof, Pw13TransferAdmission, Pw13TransferResources, PW13_ADMISSION_CONTEXT,
 };
 pub use request::{
     envelope_commitment, AdmissionRequest, WalletAdmission, WalletAdmissionContext,

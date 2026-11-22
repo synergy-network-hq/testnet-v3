@@ -1,11 +1,11 @@
-//! Real native-APQE crypto fixture, never PW13 ingress/admission authority.
-//! Uses the existing ordinary-user processing envelope only to exercise its
-//! cryptographic primitives. All recipients and source roots are ephemeral.
+//! Native-APQE fixture for the distinct PW13 envelope profile. It exercises
+//! local encrypt and reveal without starting any validator or network.
 #![cfg(test)]
 use std::path::Path;
 use synergy_address_engine::{apqe::SecretBytes, types::Algorithm};
 use synergy_aegis::{AegisProtectedPrimitives, ApqeKem};
 use synergy_etdag::{
+    admission::{PW13_TRANSFER_CANDIDATE_LANE, PW13_TRANSFER_CANDIDATE_PROFILE_ID},
     crypto::{
         decrypt_protected_payload, decrypt_share_capsule_with_kem_diagnostic,
         encrypt_protected_payload_with_kem, governed_reveal_threshold, pad_plaintext,
@@ -13,8 +13,9 @@ use synergy_etdag::{
         ShamirShare, ML_KEM_1024_ALGORITHM,
     },
     EtdagDigest, EtdagParameters, ProcessingContext, ProcessingEnvelope, ProcessingEnvelopeAad,
-    TargetAdmissionContextV3, PROCESSING_PROFILE_ID,
+    TargetAdmissionContextV3,
 };
+use synergy_posy::FinalizedBlockRecord;
 
 pub(super) struct OpenedCandidateEnvelope {
     plaintext: SecretBytes,
@@ -49,15 +50,17 @@ fn err(error: impl std::fmt::Debug) -> String {
 /// Passed chain/source/sender/nonce values are fixture coordinates only. This
 /// constructs neither a signed authority context nor a network admission.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn open_candidate_envelope(
+pub(super) fn open_candidate_envelope<T>(
     content: &[u8],
     report: &Path,
     report_sha256: &str,
     chain_id: u64,
-    source_height: u64,
+    source: &FinalizedBlockRecord,
     sender_id: &str,
     nonce: u64,
-) -> Result<OpenedCandidateEnvelope, String> {
+    before_open: impl FnOnce(&ProcessingEnvelope, &ProcessingContext) -> Result<T, String>,
+) -> Result<(OpenedCandidateEnvelope, T), String> {
+    let source_height = source.height;
     if chain_id == 0 || source_height == 0 {
         return Err("invalid isolated fixture coordinate".into());
     }
@@ -106,7 +109,7 @@ pub(super) fn open_candidate_envelope(
     registry.validate_protected_profile().map_err(err)?;
     let context = ProcessingContext {
         context_version: 1,
-        profile_id: PROCESSING_PROFILE_ID.into(),
+        profile_id: PW13_TRANSFER_CANDIDATE_PROFILE_ID.into(),
         authority: TargetAdmissionContextV3 {
             context_version: 1,
             chain_id,
@@ -116,7 +119,7 @@ pub(super) fn open_candidate_envelope(
             target_height,
             target_height_offset: parameters.target_height_offset,
             source_finalized_height: source_height,
-            source_finality_context_root: roots.clone(),
+            source_finality_context_root: super::super::authority::processing_finality_root(source)?.0,
             active_validator_set_root: roots.clone(),
             validator_consensus_key_root: roots.clone(),
             frozen_voting_weight_root: roots.clone(),
@@ -135,7 +138,7 @@ pub(super) fn open_candidate_envelope(
     };
     context.validate().map_err(err)?;
     let aad = ProcessingEnvelopeAad {
-        profile_id: PROCESSING_PROFILE_ID.into(),
+        profile_id: PW13_TRANSFER_CANDIDATE_PROFILE_ID.into(),
         chain_id,
         network_id: context.authority.network_id.clone(),
         protocol_version: context.authority.protocol_version.clone(),
@@ -143,7 +146,7 @@ pub(super) fn open_candidate_envelope(
         processing_context_root: context.root().map_err(err)?,
         authorization_height: target_height,
         assigned_cluster_id: context.authority.assigned_cluster_id,
-        lane_id: "ordinary-user".into(),
+        lane_id: PW13_TRANSFER_CANDIDATE_LANE.into(),
         sender_id: sender_id.into(),
         nonce_slot: nonce,
     };
@@ -171,6 +174,7 @@ pub(super) fn open_candidate_envelope(
     envelope.refresh_capsule_roots().map_err(err)?;
     envelope.envelope_id = envelope.commitment().map_err(err)?;
     envelope.validate_context(&context).map_err(err)?;
+    let admission = before_open(&envelope, &context)?;
     let mut shares = Shares(Vec::with_capacity(MEMBERS));
     for ((capsule, record), secret) in envelope
         .share_capsules
@@ -227,11 +231,23 @@ pub(super) fn open_candidate_envelope(
     {
         return Err("isolated ETDAG accepted substituted AAD".into());
     }
-    Ok(OpenedCandidateEnvelope {
-        plaintext,
-        envelope,
-        context,
-    })
+    Ok((
+        OpenedCandidateEnvelope {
+            plaintext,
+            envelope,
+            context,
+        },
+        admission,
+    ))
+}
+
+fn fixture_source() -> FinalizedBlockRecord {
+    FinalizedBlockRecord {
+        height: 3,
+        block_id: "1".repeat(64),
+        finality_certificate_id: "2".repeat(64),
+        protected_execution_root: "3".repeat(64),
+    }
 }
 
 #[test]
@@ -241,9 +257,10 @@ fn isolated_etdag_candidate_missing_provider_cannot_fall_back() {
         Path::new("/missing/isolated-apqe-report.json"),
         &"0".repeat(64),
         77,
-        3,
+        &fixture_source(),
         "fixture-sender",
-        0
+        0,
+        |_, _| Ok(()),
     )
     .is_err());
 }
@@ -253,8 +270,17 @@ fn isolated_etdag_candidate_real_native_mlkem_roundtrip_and_rejection_checks() {
     let report = std::path::PathBuf::from(std::env::var_os("APQE_TRUSTED_NATIVE_REPORT").unwrap());
     let digest = std::env::var("APQE_AUTHENTICATED_REPORT_SHA256").unwrap();
     let original = b"\x84\x19\x70\x03exact candidate content\x00\xff";
-    let opened =
-        open_candidate_envelope(original, &report, &digest, 77, 3, "fixture-sender", 9).unwrap();
+    let (opened, _) = open_candidate_envelope(
+        original,
+        &report,
+        &digest,
+        77,
+        &fixture_source(),
+        "fixture-sender",
+        9,
+        |_, _| Ok(()),
+    )
+    .unwrap();
     assert_eq!(opened.plaintext(), original);
     assert_eq!(opened.envelope().aad.chain_id, 77);
     assert_eq!(opened.envelope().aad.nonce_slot, 9);

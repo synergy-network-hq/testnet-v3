@@ -109,15 +109,29 @@ candidate classification for ACT-12 and FEE-05. The deciding body still must
 approve the classification, signed ingress carrier, resource pricing and
 production receipt publication.
 
-The isolated transfer fixture opens the exact frozen D/P content using the
-existing ETDAG envelope crypto and an explicitly pinned native APQE ML-KEM-1024
-provider. Its durable execution record binds the original envelope ID, processing
-context and payload root to the signed intent and ledger changes. This uses
-synthetic recipient keys and context with the existing ordinary envelope
-structure as a crypto test. The active ordinary admission still requires its
-single-key identity carrier. PW13 needs its separately approved outer resource
-authorization and content-profile selection before any of these bytes can enter
-production processing.
+The transfer candidate uses processing profile `etdag-pw13-transfer-candidate-v1`
+and AAD lane `protected-transfer`. The original envelope ID commits the AAD,
+ciphertext and capsules. D and P independently sign SHA3-512 over
+`AEGIS/PW13-TRANSFER-ADMISSION-CANDIDATE/v1`, a zero byte and the compact JSON
+resource record. The canonical member order is `genesis`, `account`,
+`policy_epoch`, `policy_hash`, `gas_limit`, `maximum_total_fee`,
+`valid_until_finalized_height`, `native_intent_digest`, `envelope_id`.
+Integers use decimal JSON, binary fields use byte arrays, and the envelope ID
+uses its canonical lowercase hexadecimal string. The two proofs are D then P,
+each naming its enrolled participant and key version and using pure ML-DSA-87
+context `AEGIS.PW13.TRANSFER.ADMISSION.CANDIDATE.V1`. The 663-byte resource test
+vector is pinned in `synergy-etdag/src/admission/protected_transfer.rs`.
+
+The candidate verifies finalized source, policy, nonce window, gas limit,
+fee affordability and both proofs before opening the ciphertext. It compares
+the exact decrypted native intent digest and resource fields with the signed
+header, then applies the original native D/P checks again before ledger writes.
+The test uses native APQE ML-KEM-1024 and ML-DSA-87 with an isolated state fixture.
+The live ordinary ingress rejects this profile. Before ratification, approve
+disclosure of payer identity, nonce and resource bounds before reveal, qualify
+mobile D/P signing of the separate transcript, and integrate the approved
+fee reservation, durable dispatch and recovery rules. Recipient and amount
+remain encrypted through the existing reveal path.
 
 Core's native processing pipeline now constructs a budgeted, zeroizing
 plaintext owner after checking reveal permission, signed shares and the

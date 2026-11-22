@@ -29,6 +29,13 @@ const MAX_SIGNATURE_CACHE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SIGNATURE_CACHE_ENTRY_BYTES: usize = 64 * 1024;
 use synergy_genesis::authority::{ProtectedEpochPolicy, SignedAuthorityBinding};
 
+pub(super) fn processing_finality_root(
+    record: &FinalizedBlockRecord,
+) -> Result<synergy_etdag::EtdagDigest, String> {
+    synergy_etdag::EtdagDigest::from_canonical("SYNERGY_ETDAG_FINALIZED_SOURCE_V1", record)
+        .map_err(|error| format!("finalized source: {error:?}"))
+}
+
 /// Exact successful primitive verification, scoped to this immutable authority.
 /// Certificate structure, quorum, ancestry and durable bindings are never cached.
 #[derive(Debug, PartialEq)]
@@ -622,15 +629,7 @@ impl VerifiedAuthority {
             .as_ref()
             .ok_or("signed protected policy is absent")?;
         let (source_height, source_root) = match source {
-            Some(record) => (
-                record.height,
-                synergy_etdag::EtdagDigest::from_canonical(
-                    "SYNERGY_ETDAG_FINALIZED_SOURCE_V1",
-                    record,
-                )
-                .map_err(|e| format!("finalized source: {e:?}"))?
-                .0,
-            ),
+            Some(record) => (record.height, processing_finality_root(record)?.0),
             None if self.anchor_parent.height() == 0 => {
                 (0, self.anchor_parent.reference_id().to_owned())
             }

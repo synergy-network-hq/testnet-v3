@@ -273,6 +273,9 @@ impl<'a> NativeProcessingContext<'a> {
         budget: &Arc<WorldResourceBudget>,
         transition: Option<&super::authority::VerifiedTransitionContext>,
     ) -> Result<Self, String> {
+        if context.profile_id != synergy_etdag::PROCESSING_PROFILE_ID {
+            return Err("unsupported live processing profile".into());
+        }
         context.validate().map_err(err)?;
         if let Some(transition) = transition {
             transition.verify_current(authority)?;

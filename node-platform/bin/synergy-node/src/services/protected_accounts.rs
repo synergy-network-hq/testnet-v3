@@ -12,6 +12,9 @@ mod sponsor_settlement;
 #[cfg(test)]
 #[path = "protected_etdag_candidate_tests.rs"]
 mod etdag_candidate;
+#[cfg(test)]
+#[path = "protected_transfer_admission.rs"]
+mod transfer_admission;
 #[path = "protected_recovery.rs"]
 pub(super) mod recovery;
 #[path = "protected_transition_queue.rs"]
@@ -265,7 +268,10 @@ pub(super) struct EnrollmentProofs<'a> {
 #[cfg(test)]
 enum TransferCandidateContent<'a> {
     PlaintextFixture(&'a [u8]),
-    OpenedEtdag(&'a etdag_candidate::OpenedCandidateEnvelope),
+    OpenedEtdag(
+        &'a etdag_candidate::OpenedCandidateEnvelope,
+        &'a transfer_admission::VerifiedTransferAdmission,
+    ),
 }
 
 #[cfg(test)]
@@ -281,6 +287,8 @@ pub(super) struct FinalizedSnapshot<'a> {
     registry: &'a CandidateProtectedAccounts<'a>,
     world: &'a WorldState,
     position: Position,
+    #[cfg(test)]
+    processing_finality_root: synergy_etdag::EtdagDigest,
 }
 
 impl FinalizedSnapshot<'_> {
@@ -363,6 +371,8 @@ impl<'a> CandidateProtectedAccounts<'a> {
                 height: durable.finalized_height,
                 consensus_time,
             },
+            #[cfg(test)]
+            processing_finality_root: super::authority::processing_finality_root(verified_finality)?,
         })
     }
 
@@ -1407,7 +1417,9 @@ impl<'a> CandidateProtectedAccounts<'a> {
         const TRANSFER_MAX: usize = 60;
         let (decrypted_content, opened) = match action_content {
             TransferCandidateContent::PlaintextFixture(bytes) => (bytes, None),
-            TransferCandidateContent::OpenedEtdag(opened) => (opened.plaintext(), Some(opened)),
+            TransferCandidateContent::OpenedEtdag(opened, admission) => {
+                (opened.plaintext(), Some((opened, admission)))
+            }
         };
         let content = decode_transfer_content(decrypted_content)?;
         let intent =
@@ -1455,27 +1467,11 @@ impl<'a> CandidateProtectedAccounts<'a> {
         self.canonical_policy(&recipient_record, &recipient_enrollment)?;
         let sender = body.account.to_native(&Primitives).map_err(display)?;
         let recipient_address = recipient.to_native(&Primitives).map_err(display)?;
-        let opened_envelope = if let Some(opened) = opened {
+        if let Some((opened, admission)) = opened {
             let envelope = opened.envelope();
-            envelope.validate().map_err(debug)?;
-            envelope
-                .aad
-                .validate_context(opened.context())
-                .map_err(debug)?;
-            if ChainId::from_u64(envelope.aad.chain_id).as_be_bytes() != &self.network.native_chain
-                || opened.context().authority.source_finalized_height != finalized.position.height
-                || envelope.aad.sender_id != sender
-                || envelope.aad.nonce_slot != body.transaction_nonce
-            {
-                return Err(
-                    "candidate ETDAG opening does not match signed account, nonce or snapshot"
-                        .into(),
-                );
-            }
-            Some(envelope)
-        } else {
-            None
-        };
+            admission.verify_opened(finalized, &intent, envelope, opened.context(), fee_schedule, gas)?;
+        }
+        let opened_envelope = opened.map(|(opened, _)| opened.envelope());
         for source in [finalized.world, &*world] {
             if !source
                 .accounts
@@ -1855,13 +1851,19 @@ mod tests {
         }
     }
 
-    fn finalized(height: u64, world: &WorldState) -> (FinalizedState, FinalizedBlockRecord) {
-        let block_id = format!("{height:064x}");
+    pub(super) fn finalized(
+        height: u64,
+        world: &WorldState,
+    ) -> (FinalizedState, FinalizedBlockRecord) {
+        let root = state_root(world).unwrap();
+        let block_id = synergy_block::hash_block_bytes(
+            &serde_json::to_vec(&("pw13-fixture-block", height, &root)).unwrap(),
+        );
         (
             FinalizedState {
                 finalized_height: height,
                 finalized_block_id: block_id.clone(),
-                state_root: state_root(world).unwrap(),
+                state_root: root,
             },
             FinalizedBlockRecord {
                 height,
@@ -2643,6 +2645,10 @@ mod tests {
     #[ignore = "requires explicit APQE fixture and pinned native signing, validation and KEM artifacts"]
     fn protected_candidate_apqe_proofs_are_atomic_and_survive_restart() {
         use TransferCandidateContent::{OpenedEtdag, PlaintextFixture};
+        use synergy_etdag::admission::{
+            Pw13AdmissionProof, Pw13TransferAdmission, Pw13TransferResources, PW13_ADMISSION_CONTEXT,
+        };
+        use synergy_etdag::{EtdagParameters, ProcessingContext, ProcessingEnvelope};
         let fixture = load_enrollment_fixture();
         let bytes = |name: &str| fixture_bytes(&fixture, name);
         let library_path = PathBuf::from(std::env::var_os("CORE_APQE_MLDSA87_LIBRARY").unwrap());
@@ -3142,21 +3148,93 @@ mod tests {
         }
         let report_path = PathBuf::from(std::env::var_os("APQE_TRUSTED_NATIVE_REPORT").unwrap());
         let report_pin = std::env::var("APQE_AUTHENTICATED_REPORT_SHA256").unwrap();
-        let open = |bytes: &[u8], nonce| {
+        let limits = EtdagParameters::default();
+        let make_admission = |envelope: &ProcessingEnvelope, intent: &CanonicalNativeIntent<'_>| {
+            let body = intent.body();
+            let resources = Pw13TransferResources {
+                genesis: *body.genesis.as_bytes(),
+                account: *body.account.as_bytes(),
+                policy_epoch: body.policy_epoch,
+                policy_hash: new_hash,
+                gas_limit: body.gas_limit,
+                maximum_total_fee: body.maximum_total_fee,
+                valid_until_finalized_height: body.valid_until_finalized_height,
+                native_intent_digest: intent.digest().unwrap().as_bytes().to_vec(),
+                envelope_id: envelope.envelope_id.clone(),
+            };
+            let digest = resources.signing_digest().unwrap();
+            let proofs = [0, 1].map(|i| Pw13AdmissionProof {
+                participant_id: policy.roles[i].participant_id,
+                key_version: policy.roles[i].key_version,
+                signature: provider
+                    .sign(
+                        &digest,
+                        &keys[i].1,
+                        SignOptions::Pure { context: PW13_ADMISSION_CONTEXT },
+                    )
+                    .unwrap()
+                    .as_bytes()
+                    .to_vec(),
+            });
+            Pw13TransferAdmission { resources, proofs }
+        };
+        let authenticate = |snapshot: &FinalizedSnapshot<'_>,
+                            envelope: &ProcessingEnvelope,
+                            context: &ProcessingContext,
+                            request: &Pw13TransferAdmission| {
+            registry.verify_transfer_admission(
+                &provider, snapshot, context, envelope, request, &limits, &schedule, 21_000,
+            )
+        };
+        let open = |bytes: &[u8], signed_intent: &[u8], nonce,
+                    snapshot: &FinalizedSnapshot<'_>, source: &FinalizedBlockRecord| {
+            let signed = CanonicalNativeIntent::decode(signed_intent, 128).unwrap();
             etdag_candidate::open_candidate_envelope(
                 bytes,
                 &report_path,
                 &report_pin,
-                99999, // This matches the local registry fixture, with its own Genesis.
-                snapshot.position.height,
+                99999,
+                source,
                 &address,
                 nonce,
+                |envelope, context| {
+                    authenticate(snapshot, envelope, context, &make_admission(envelope, &signed))
+                },
             )
-            .unwrap()
         };
-        let opened = open(&content, body.transaction_nonce);
+        let (opened, admission) =
+            open(&content, &intent, body.transaction_nonce, &snapshot, &snapshot_proof).unwrap();
         assert_eq!(opened.plaintext(), content);
-        let mismatched = open(&content, body.transaction_nonce + 1);
+        let original_request = make_admission(
+            opened.envelope(),
+            &CanonicalNativeIntent::decode(&intent, 128).unwrap(),
+        );
+        let mut bad_role = original_request.clone();
+        let recovery = policy.roles[2];
+        bad_role.proofs[1] = Pw13AdmissionProof {
+            participant_id: recovery.participant_id,
+            key_version: recovery.key_version,
+            signature: provider
+                .sign(
+                    &bad_role.resources.signing_digest().unwrap(),
+                    &keys[2].1,
+                    SignOptions::Pure { context: PW13_ADMISSION_CONTEXT },
+                )
+                .unwrap()
+                .as_bytes()
+                .to_vec(),
+        };
+        let mut resources_tampered = original_request.clone();
+        resources_tampered.resources.maximum_total_fee[0] ^= 1;
+        let mut wrong_signature = original_request.clone();
+        wrong_signature.proofs[0].signature = ordinary[0].signature.as_bytes().to_vec();
+        for invalid in [&bad_role, &resources_tampered, &wrong_signature] {
+            assert!(authenticate(&snapshot, opened.envelope(), opened.context(), invalid).is_err());
+        }
+        assert!(open(&content, &intent, 4, &snapshot, &snapshot_proof).is_err());
+        let (mismatched, mismatched_admission) = open(
+            &content, &intent, body.transaction_nonce + 1, &snapshot, &snapshot_proof,
+        ).unwrap();
         let mut rejected = spend_base.clone();
         assert_eq!(
             registry
@@ -3164,24 +3242,25 @@ mod tests {
                     &provider,
                     &snapshot,
                     &mut rejected,
-                    OpenedEtdag(&mismatched),
+                    OpenedEtdag(&mismatched, &mismatched_admission),
                     &schedule,
                     21_000,
                     inclusion,
                 )
                 .unwrap_err(),
-            "candidate ETDAG opening does not match signed account, nonce or snapshot",
+            "opened PW13 intent differs from the signed resource authorization",
         );
         assert_eq!(rejected, spend_base);
         let mut tampered_proof = content.clone();
         tampered_proof[first_role + 108] ^= 2;
-        let invalid = open(&tampered_proof, body.transaction_nonce);
+        let (invalid, invalid_admission) =
+            open(&tampered_proof, &intent, body.transaction_nonce, &snapshot, &snapshot_proof).unwrap();
         assert!(registry
             .execute_engineering_transfer(
                 &provider,
                 &snapshot,
                 &mut rejected,
-                OpenedEtdag(&invalid),
+                OpenedEtdag(&invalid, &invalid_admission),
                 &schedule,
                 21_000,
                 inclusion,
@@ -3208,7 +3287,7 @@ mod tests {
                     &provider,
                     &snapshot,
                     &mut world,
-                    OpenedEtdag(&opened),
+                    OpenedEtdag(&opened, &admission),
                     &schedule,
                     21_000,
                     inclusion,
@@ -3224,14 +3303,18 @@ mod tests {
         assert_eq!(world.accounts[&recipient_address].balance_nwei, 7);
         assert_eq!(world.accounts[&schedule.collector].balance_nwei, 840_000);
         let after = state_root(&world).unwrap();
-        let retried_opening = open(&content, body.transaction_nonce);
+        let (retried_opening, retried_admission) =
+            open(&content, &intent, body.transaction_nonce, &snapshot, &snapshot_proof).unwrap();
         assert_ne!(retried_opening.envelope().envelope_id, envelope.envelope_id);
+        assert!(authenticate(
+            &snapshot, retried_opening.envelope(), retried_opening.context(), &original_request,
+        ).is_err());
         assert!(registry
             .execute_engineering_transfer(
                 &provider,
                 &snapshot,
                 &mut world,
-                OpenedEtdag(&retried_opening),
+                OpenedEtdag(&retried_opening, &retried_admission),
                 &schedule,
                 21_000,
                 inclusion,
@@ -3245,7 +3328,7 @@ mod tests {
                 &provider,
                 &snapshot,
                 &mut too_expensive,
-                OpenedEtdag(&opened),
+                OpenedEtdag(&opened, &admission),
                 &schedule,
                 21_001,
                 inclusion,
@@ -3264,13 +3347,18 @@ mod tests {
         let saturated_snapshot = registry
             .finalized_snapshot(&saturated, &saturated_pointer, &saturated_proof, 1002)
             .unwrap();
+        assert!(authenticate(
+            &saturated_snapshot, opened.envelope(), opened.context(), &original_request,
+        ).is_err());
+        let (saturated_opening, saturated_admission) =
+            open(&content, &intent, body.transaction_nonce, &saturated_snapshot, &saturated_proof).unwrap();
         let mut failed = saturated.clone();
         assert!(registry
             .execute_engineering_transfer(
                 &provider,
                 &saturated_snapshot,
                 &mut failed,
-                OpenedEtdag(&opened),
+                OpenedEtdag(&saturated_opening, &saturated_admission),
                 &schedule,
                 21_000,
                 inclusion,
@@ -3284,13 +3372,15 @@ mod tests {
         let funded_snapshot = registry
             .finalized_snapshot(&funded, &funded_tip, &funded_proof, 1002)
             .unwrap();
+        let (funded_opening, funded_admission) =
+            open(&content, &intent, body.transaction_nonce, &funded_snapshot, &funded_proof).unwrap();
         let mut ordered = funded.clone();
         registry
             .execute_engineering_transfer(
                 &provider,
                 &funded_snapshot,
                 &mut ordered,
-                OpenedEtdag(&opened),
+                OpenedEtdag(&funded_opening, &funded_admission),
                 &schedule,
                 21_000,
                 inclusion,
@@ -3325,13 +3415,34 @@ mod tests {
         });
         let (second_content, _) =
             transfer_frame(&second_intent, second_digest.as_bytes(), &second_roles);
-        let second_opening = open(&second_content, second_body.transaction_nonce);
+        let (second_opening, second_admission) = open(
+            &second_content, &second_intent, second_body.transaction_nonce, &funded_snapshot, &funded_proof,
+        ).unwrap();
+        let (substituted, substituted_admission) = open(
+            &second_content, &intent, second_body.transaction_nonce, &funded_snapshot, &funded_proof,
+        ).unwrap();
+        let mut substitution_candidate = ordered.clone();
+        assert_eq!(
+            registry
+                .execute_engineering_transfer(
+                    &provider,
+                    &funded_snapshot,
+                    &mut substitution_candidate,
+                    OpenedEtdag(&substituted, &substituted_admission),
+                    &schedule,
+                    21_000,
+                    inclusion,
+                )
+                .unwrap_err(),
+            "opened PW13 intent differs from the signed resource authorization",
+        );
+        assert_eq!(substitution_candidate, ordered);
         let second_transfer = |candidate: &mut WorldState| {
             registry.execute_engineering_transfer(
                 &provider,
                 &funded_snapshot,
                 candidate,
-                OpenedEtdag(&second_opening),
+                OpenedEtdag(&second_opening, &second_admission),
                 &schedule,
                 21_000,
                 inclusion,
@@ -3427,7 +3538,7 @@ mod tests {
                     &provider,
                     &snapshot,
                     &mut ordered_credit,
-                    OpenedEtdag(&opened),
+                    OpenedEtdag(&opened, &admission),
                     &schedule,
                     21_000,
                     inclusion,
