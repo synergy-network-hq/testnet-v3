@@ -123,6 +123,19 @@ candidate classification for ACT-12 and FEE-05. The deciding body still must
 approve the classification, signed ingress carrier, resource pricing and
 production receipt publication.
 
+The isolated funding qualification starts with a separate authenticated
+treasury holding the 5,000,000 SNRG fixture allocation. After sponsored reveal,
+an ordinary native transfer signed with the pinned APQE provider credits
+100 SNRG to the same enrolled account. The scheduler requires matching
+canonical policy and ledger records in the finalized and ordered Worlds.
+It rejects unfinalized enrollment, missing records and a modified signed
+amount. The credit leaves the recipient policy and nonce intact, charges the
+treasury 840,000 nWei, and survives reopening the World store. Replaying the
+original signed bytes charges zero and leaves the restored state unchanged.
+The selected credit policy is test-only. Live Canary funding requires an
+approved protected registry, the governed treasury allocation and authority,
+and proof of the resulting finalized balance and receipt.
+
 The transfer candidate uses processing profile `etdag-pw13-transfer-candidate-v1`
 and AAD lane `protected-transfer`. The original envelope ID commits the AAD,
 ciphertext and capsules. D and P independently sign SHA3-512 over

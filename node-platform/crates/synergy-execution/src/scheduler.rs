@@ -1140,11 +1140,36 @@ mod permissionless_tests {
     use aegis_pqvm::pqc::signatures::{fndsa::fndsa1024, mldsa::mldsa87};
     use pqrust_traits::sign::{DetachedSignature as _, PublicKey as _};
     use sha3::{Digest, Sha3_256};
+    use std::{path::PathBuf, sync::OnceLock};
+    use synergy_aegis::{load_authenticated_native_engine, ApqeIdentityVerifier};
     use synergy_identity::authorization::*;
     use synergy_transaction::{FeeLimit, SignedTransaction, UnsignedTransaction};
-    struct RealVerifier;
+
+    struct RealVerifier(ApqeIdentityVerifier);
+
+    impl RealVerifier {
+        fn from_pinned_report() -> Self {
+            static VERIFIER: OnceLock<ApqeIdentityVerifier> = OnceLock::new();
+            let verifier = VERIFIER.get_or_init(|| {
+                let report = PathBuf::from(
+                    std::env::var_os("APQE_TRUSTED_NATIVE_REPORT").expect("explicit trusted report"),
+                );
+                let pin = std::env::var("APQE_AUTHENTICATED_REPORT_SHA256")
+                    .expect("explicit authenticated digest");
+                ApqeIdentityVerifier::new(load_authenticated_native_engine(&report, &pin).unwrap())
+                    .unwrap()
+            });
+            Self(verifier.clone())
+        }
+    }
+
     impl AegisTransactionVerifier for RealVerifier {
         type Error = String;
+
+        fn authorization_verifier(&self) -> Option<&dyn AuthorizationSignatureVerifier> {
+            Some(&self.0)
+        }
+
         fn verify_transaction(
             &self,
             message: &[u8],
@@ -1155,10 +1180,9 @@ mod permissionless_tests {
             if algorithm != "ML-DSA-87" {
                 return Ok(false);
             }
-            let key = mldsa87::PublicKey::from_bytes(key).map_err(|_| "key")?;
-            let signature =
-                mldsa87::DetachedSignature::from_bytes(signature).map_err(|_| "signature")?;
-            Ok(mldsa87::verify_detached_signature(&signature, message, &key).is_ok())
+            self.0
+                .verify_raw(algorithm, key, message, signature)
+                .map(|()| true)
         }
     }
     fn hash(bytes: &[u8]) -> String {
@@ -1170,7 +1194,7 @@ mod permissionless_tests {
     ) -> (IdentityAuthorizationCarrier, mldsa87::SecretKey, Vec<u8>) {
         let (key, secret) = mldsa87::keypair();
         let sender =
-            synergy_address::derive_key_controlled_address("synw", root.as_bytes()).unwrap();
+            synergy_address::derive_key_controlled_address("syna", root.as_bytes()).unwrap();
         let key_hash = hash(key.as_bytes());
         let mut binding: IdentityAuthorizationBinding = serde_json::from_value(serde_json::json!({
             "schema_version":AUTH_BINDING_SCHEMA_VERSION,"binary_encoding":AUTH_BINDING_BINARY_ENCODING,
@@ -1254,7 +1278,7 @@ mod permissionless_tests {
     ) -> Result<BlockExecutionOutcome, BlockExecutionError> {
         BlockExecutionScheduler::new(
             crate::NativeTransferDispatcher,
-            RealVerifier,
+            RealVerifier::from_pinned_report(),
             FeeSchedule {
                 base_fee_per_gas_nwei: 1,
                 collector: "fees".into(),
@@ -1271,6 +1295,7 @@ mod permissionless_tests {
         )
     }
     #[test]
+    #[ignore = "requires an explicitly authenticated native APQE report"]
     fn unregistered_real_crypto_sender_binds_atomically_and_replays_deterministically() {
         let (root, root_secret) = fndsa1024::keypair();
         let (c, s, k) = identity(&root, &root_secret);
@@ -1307,6 +1332,7 @@ mod permissionless_tests {
         assert_eq!(stale.state, outcome.state);
     }
     #[test]
+    #[ignore = "requires an explicitly authenticated native APQE report"]
     fn independent_first_use_bindings_merge_and_imported_carriers_preserve_existing_authority() {
         let (root_a, secret_a) = fndsa1024::keypair();
         let (root_b, secret_b) = fndsa1024::keypair();
@@ -1363,6 +1389,7 @@ mod permissionless_tests {
         );
     }
     #[test]
+    #[ignore = "requires an explicitly authenticated native APQE report"]
     fn conflicting_concurrent_binding_invalid_proof_and_failed_fee_never_take_over() {
         let (root, root_secret) = fndsa1024::keypair();
         let (c, s, k) = identity(&root, &root_secret);

@@ -821,18 +821,34 @@ impl TransactionPqvmVerifier {
         }
     }
     pub(super) fn from_configuration(configuration: &NodeConfiguration) -> Result<Self, String> {
-        let verifier = super::apqe_provider::verifier(
-            configuration,
-            AegisPolicy {
-                allowed_algorithms: vec![SignatureAlgorithm::MlDsa87],
-                maximum_message_bytes: MAX_TRANSACTION_BYTES,
-                maximum_signature_bytes: 16 * 1024,
-            },
-        )?;
+        let verifier = super::apqe_provider::verifier(configuration, Self::policy())?;
         Ok(Self {
             verifier,
             identity_verifier: super::apqe_provider::identity_verifier(configuration)?,
             chain_id: configuration.chain_id,
+        })
+    }
+
+    fn policy() -> AegisPolicy {
+        AegisPolicy {
+            allowed_algorithms: vec![SignatureAlgorithm::MlDsa87],
+            maximum_message_bytes: MAX_TRANSACTION_BYTES,
+            maximum_signature_bytes: 16 * 1024,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_fixture_engine(
+        engine: Arc<
+            std::sync::Mutex<synergy_address_engine::apqe::crypto_engine::CryptoEngine>,
+        >,
+        chain_id: u64,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            verifier: PqvmVerifier::with_apqe(Self::policy(), engine.clone())
+                .map_err(|error| error.to_string())?,
+            identity_verifier: Some(synergy_aegis::ApqeIdentityVerifier::new(engine)?),
+            chain_id,
         })
     }
 }

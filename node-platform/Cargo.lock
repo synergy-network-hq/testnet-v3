@@ -2195,6 +2195,7 @@ dependencies = [
  "serde_json",
  "sha3",
  "synergy-address",
+ "synergy-aegis",
  "synergy-block",
  "synergy-etdag",
  "synergy-identity",

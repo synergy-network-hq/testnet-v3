@@ -56,6 +56,10 @@ use synergy_state::{
     state_root, AccountChange, FinalizedState, ProtocolChange, StateDiff, WorldState,
 };
 
+#[cfg(test)]
+#[path = "protected_funding.rs"]
+mod funding;
+
 const COMMIT_PREFIX: &str = "apqe-protected-account-candidate/v1/commit/";
 const ACCOUNT_PREFIX: &str = "apqe-protected-account-candidate/v1/policy/";
 const TRANSITION_PREFIX: &str = "apqe-protected-account-candidate/v1/transition/";
@@ -1417,6 +1421,38 @@ impl<'a> CandidateProtectedAccounts<'a> {
         Ok(activated)
     }
 
+    #[cfg(test)]
+    fn require_finalized_recipient(
+        &self,
+        finalized: &FinalizedSnapshot<'_>,
+        world: &WorldState,
+        recipient: AccountIdentifier,
+    ) -> Result<String, String> {
+        if !std::ptr::eq(self, finalized.registry) {
+            return Err("protected credit uses a different registry".into());
+        }
+        let record = self.read_policy(finalized.world, recipient)?;
+        if record.registered_height > finalized.position.height
+            || record != self.read_policy(world, recipient)?
+        {
+            return Err("invalid or unfinalized protected recipient".into());
+        }
+        let enrollment = CanonicalEnrollment::decode(&record.enrollment, self.wire)
+            .map_err(display)?;
+        self.canonical_policy(&record, &enrollment)?;
+        let address = recipient.to_native(&Primitives).map_err(display)?;
+        for source in [finalized.world, world] {
+            if !source
+                .accounts
+                .get(&address)
+                .is_some_and(|account| account.code_hash.is_none())
+            {
+                return Err("protected recipient ledger state is absent or invalid".into());
+            }
+        }
+        Ok(address)
+    }
+
     /// Candidate execution is test-only until an actual admission profile binds
     /// these bytes, verification rules and the fee schedule to consensus.
     #[cfg(test)]
@@ -1473,33 +1509,16 @@ impl<'a> CandidateProtectedAccounts<'a> {
             decode_transfer,
             &signatures,
         )?;
-        let recipient_record = self.read_policy(finalized.world, recipient)?;
-        if recipient == body.account
-            || recipient_record != self.read_policy(world, recipient)?
-            || recipient_record.registered_height > finalized.position.height
-        {
-            return Err("invalid or unfinalized protected recipient".into());
+        if recipient == body.account {
+            return Err("protected transfer cannot credit its sender".into());
         }
-        let recipient_enrollment =
-            CanonicalEnrollment::decode(&recipient_record.enrollment, self.wire)
-                .map_err(display)?;
-        self.canonical_policy(&recipient_record, &recipient_enrollment)?;
+        let recipient_address = self.require_finalized_recipient(finalized, world, recipient)?;
         let sender = body.account.to_native(&Primitives).map_err(display)?;
-        let recipient_address = recipient.to_native(&Primitives).map_err(display)?;
         if let Some((opened, admission)) = opened {
             let envelope = opened.envelope();
             admission.verify_opened(finalized, &intent, envelope, opened.context(), fee_schedule, gas)?;
         }
         let opened_envelope = opened.map(|(opened, _)| opened.envelope());
-        for source in [finalized.world, &*world] {
-            if !source
-                .accounts
-                .get(&recipient_address)
-                .is_some_and(|account| account.code_hash.is_none())
-            {
-                return Err("protected recipient ledger state is absent or invalid".into());
-            }
-        }
         fee_schedule.validate().map_err(display)?;
         let fee = u128::from(gas) * u128::from(fee_schedule.base_fee_per_gas_nwei);
         if gas == 0
@@ -1991,15 +2010,30 @@ mod tests {
             Some(&verifier),
         )
         .unwrap();
-        let mut base = WorldState::default();
-        base.protocol.insert(
-            IDENTITY_AUTHORIZATION_BINDINGS_STATE_KEY.into(),
-            serde_json::to_vec(&std::collections::BTreeMap::from([(
-                address.clone(),
-                admitted,
-            )]))
-            .unwrap(),
+        let fixture = load_enrollment_fixture();
+        let wire = wire();
+        let encoded = fixture_bytes(&fixture, "enrollment_cbor");
+        let enrollment = CanonicalEnrollment::decode(&encoded, &wire).unwrap();
+        let genesis = enrollment.genesis();
+        let registry = registry(&wire, genesis, enrollment.policy().provider_manifest_hash);
+        let (funding, mut base) = funding::FundingFixture::new(
+            authoring_engine.clone(),
+            &synergy_config::ApqeProviderConfiguration {
+                report_path: report.clone(),
+                authenticated_report_sha256: inspection::hex_bytes(&report_pin),
+            },
+            synergy_transaction::NetworkBinding::new(99999, "test-sponsor").unwrap(),
+            enrollment.account(),
+            1004,
         );
+        let bindings = base
+            .protocol
+            .get_mut(IDENTITY_AUTHORIZATION_BINDINGS_STATE_KEY)
+            .unwrap();
+        let mut commitments: std::collections::BTreeMap<_, _> =
+            serde_json::from_slice(bindings).unwrap();
+        assert!(commitments.insert(address.clone(), admitted).is_none());
+        *bindings = serde_json::to_vec(&commitments).unwrap();
         base.accounts.insert(
             address.clone(),
             AccountState {
@@ -2007,12 +2041,6 @@ mod tests {
                 ..Default::default()
             },
         );
-        let fixture = load_enrollment_fixture();
-        let wire = wire();
-        let encoded = fixture_bytes(&fixture, "enrollment_cbor");
-        let enrollment = CanonicalEnrollment::decode(&encoded, &wire).unwrap();
-        let genesis = enrollment.genesis();
-        let registry = registry(&wire, genesis, enrollment.policy().provider_manifest_hash);
         let (pointer, certificate) = finalized(1, &base);
         let snapshot = registry
             .finalized_snapshot(&base, &pointer, &certificate, 1000)
@@ -2591,6 +2619,11 @@ mod tests {
             assert_eq!(receipt["inclusion_consensus_timestamp_unix"], timestamp);
         }
         assert!(query_receipt(&reopened, 4, 1003, vec![selector(2, &bad_intent)]).is_err());
+        let (funding_tip, funding_finality) = finalized(4, &reopened);
+        let funding_parent = registry
+            .finalized_snapshot(&reopened, &funding_tip, &funding_finality, 1003)
+            .unwrap();
+        funding.qualify(&snapshot, &funding_parent, store, &scratch.0);
         assert_eq!(
             registry.require_activation(),
             Err(RegistryError::ProfileUnapproved)

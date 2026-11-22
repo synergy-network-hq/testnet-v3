@@ -2540,7 +2540,7 @@ fn funded_transaction_fixture_for_network_provider(
 ) {
     funded_transaction_fixture_for_network_provider_chain(network_id, balance_nwei, provider, 1266)
 }
-fn funded_transaction_fixture_for_network_provider_chain(
+pub(super) fn funded_transaction_fixture_for_network_provider_chain(
     network_id: &str,
     balance_nwei: u128,
     provider: Option<&synergy_config::ApqeProviderConfiguration>,

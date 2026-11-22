@@ -1118,6 +1118,7 @@ fn storage_error(error: synergy_storage::StorageError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::decode_budgeted_candidate;
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     fn root() -> std::path::PathBuf {

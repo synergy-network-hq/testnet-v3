@@ -16,6 +16,17 @@ pub struct NativeTransferDispatcher;
 pub trait NativeOperation {
     type Error: std::fmt::Display;
 
+    /// A value transfer may credit a protected account only when the selected
+    /// protocol verifies its registration against finalized authorization state.
+    fn authorize_protected_credit(
+        &self,
+        _receiver: &str,
+        _context: TransactionExecutionContext<'_>,
+        _state: &WorldState,
+    ) -> Result<(), NativeDispatchError> {
+        Err(NativeDispatchError::AccountNotEnrolled)
+    }
+
     fn execute_native(
         &self,
         module: &str,
@@ -73,9 +84,16 @@ where
         super::validate_dispatch_context(transaction, context, false)
             .map_err(CanonicalNativeDispatchError::Context)?;
         match action {
-            TransactionAction::Transfer => NativeTransferDispatcher
-                .execute(transaction, action, context, state)
-                .map_err(CanonicalNativeDispatchError::Transfer),
+            TransactionAction::Transfer => NativeTransferDispatcher::execute_with_credit_policy(
+                transaction,
+                action,
+                context,
+                |receiver| {
+                    self.operation
+                        .authorize_protected_credit(receiver, context, state)
+                },
+            )
+            .map_err(CanonicalNativeDispatchError::Transfer),
             TransactionAction::Native {
                 module,
                 method,
@@ -99,6 +117,19 @@ impl TransactionExecutor for NativeTransferDispatcher {
         context: TransactionExecutionContext<'_>,
         _state: &WorldState,
     ) -> Result<TransactionDispatch, Self::Error> {
+        Self::execute_with_credit_policy(transaction, action, context, |_| {
+            Err(NativeDispatchError::AccountNotEnrolled)
+        })
+    }
+}
+
+impl NativeTransferDispatcher {
+    fn execute_with_credit_policy(
+        transaction: &SignedTransaction,
+        action: &TransactionAction,
+        context: TransactionExecutionContext<'_>,
+        authorize_credit: impl FnOnce(&str) -> Result<(), NativeDispatchError>,
+    ) -> Result<TransactionDispatch, NativeDispatchError> {
         if transaction.unsigned.network != *context.network {
             return Err(NativeDispatchError::WrongNetwork);
         }
@@ -111,10 +142,8 @@ impl TransactionExecutor for NativeTransferDispatcher {
         if transaction.unsigned.amount_nwei == 0 {
             return Err(NativeDispatchError::ZeroValueTransfer);
         }
-        // The legacy transfer path cannot authenticate a protected account
-        // registration. Do not credit synw until the governed registry is live.
         if transaction.unsigned.receiver.starts_with("synw") {
-            return Err(NativeDispatchError::AccountNotEnrolled);
+            authorize_credit(&transaction.unsigned.receiver)?;
         }
 
         Ok(TransactionDispatch {
