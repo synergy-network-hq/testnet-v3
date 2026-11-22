@@ -46,6 +46,41 @@ use synergy_ws::{server::WsServer, WsTopic};
 pub(super) mod proofs;
 pub(crate) use proofs::verify_finality_proof_cli;
 
+// An independently checked current execution/finality watermark can cover a
+// retired historical body. It cannot supply a World, body, receipt or witness.
+fn require_finality_execution_height(
+    requested: u64,
+    latest: Option<u64>,
+    anchor: Option<&synergy_rpc::provider::FinalizedBlockCommitment>,
+) -> Result<(), RpcError> {
+    let head = latest.filter(|head| *head >= requested)
+        .ok_or_else(|| RpcError::unavailable("requested height lacks finalized execution coverage"))?;
+    if anchor.is_some_and(|anchor| anchor.height != requested)
+        || (requested == head && anchor.is_none())
+    {
+        return Err(RpcError::unavailable("finalized execution anchor is missing or mismatched"));
+    }
+    Ok(())
+}
+
+fn require_finality_execution_match(
+    requested: u64,
+    anchor: Option<&synergy_rpc::provider::FinalizedBlockCommitment>,
+    finalized: &FinalizedBlockRecord,
+) -> Result<(), RpcError> {
+    if finalized.height != requested
+        || anchor.is_some_and(|anchor| {
+            anchor.height != finalized.height
+                || anchor.block_id != finalized.block_id
+                || anchor.protected_execution_root != finalized.protected_execution_root
+                || anchor.finality_certificate_id != finalized.finality_certificate_id
+        })
+    {
+        return Err(RpcError::unavailable("authenticated finality conflicts with execution anchor"));
+    }
+    Ok(())
+}
+
 /// Reads only the durable records jointly owned by execution, PoSy finality,
 /// and finalized state. Every public result is re-bound across all three
 /// owners; a speculative execution candidate is never exposed as finalized.
@@ -1022,13 +1057,21 @@ impl RpcDispatcher for RuntimeDispatcher {
                     .map_err(|_| RpcError::unavailable("proof request budget unavailable"))?.admit()?;
                 let query = proofs::ProofQuery::decode(params)?;
                 if query.kind == proofs::ProofKind::Finality {
-                    // Bind the requested height to durable execution and finality
-                    // before reading cryptographic certification history.
-                    self.query_store.block(&BlockQuery { height: Some(query.height), hash: None })?
-                        .ok_or_else(|| RpcError::unavailable("requested finalized block unavailable"))?;
+                    // Body/World retention is independent of the native QC/TC
+                    // history. Still require verified current execution coverage
+                    // and agreement with every retained selected commitment.
+                    let (head, anchor) = self.query_store.telemetry_commitments(Some(query.height))?;
+                    require_finality_execution_height(query.height, head, anchor.as_ref())?;
                     let proof = self.admission.as_ref()
                         .ok_or_else(|| RpcError::unavailable("authenticated finality unavailable"))?
                         .finality_proof(query.height).map_err(RpcError::unavailable)?;
+                    require_finality_execution_match(query.height, anchor.as_ref(), proof.finalized())?;
+                    // A concurrent legitimate retirement may remove the old
+                    // anchor; corruption or a contradictory surviving anchor
+                    // remains a refusal, including at the current head.
+                    let (head, after) = self.query_store.telemetry_commitments(Some(query.height))?;
+                    require_finality_execution_height(query.height, head, after.as_ref())?;
+                    require_finality_execution_match(query.height, after.as_ref(), proof.finalized())?;
                     proofs::page(&query, &proof)
                 } else {
                     self.query_store.finalized_proof_page(&serde_json::to_value(query)
@@ -1916,6 +1959,48 @@ fn server_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
 mod nonblocking_http_tests {
     use super::*;
     use synergy_execution::{CandidateStore, ExecutionCandidate};
+
+    #[test]
+    fn finality_transport_requires_execution_coverage_and_exact_retained_anchor() {
+        // These test only the actual dispatch guards; they confer no native
+        // QC authority. The handler still obtains its witness from ingress.
+        let record = FinalizedBlockRecord {
+            height: 7, block_id: "a".repeat(64),
+            protected_execution_root: "b".repeat(64),
+            finality_certificate_id: "c".repeat(64),
+        };
+        let anchor = synergy_rpc::provider::FinalizedBlockCommitment {
+            height: 7, block_id: record.block_id.clone(),
+            protected_execution_root: record.protected_execution_root.clone(),
+            finality_certificate_id: record.finality_certificate_id.clone(),
+            state_root: "d".repeat(64), transaction_count: 0,
+        };
+        assert!(require_finality_execution_height(7, Some(7), Some(&anchor)).is_ok());
+        assert!(require_finality_execution_match(7, Some(&anchor), &record).is_ok());
+        // A pruned historical body/anchor does not prevent certification-only
+        // transport when independently checked execution has advanced past it.
+        assert!(require_finality_execution_height(7, Some(8), None).is_ok());
+        assert!(require_finality_execution_match(7, None, &record).is_ok());
+        for head in [None, Some(6)] {
+            assert!(require_finality_execution_height(7, head, Some(&anchor)).is_err());
+        }
+        assert!(require_finality_execution_height(7, Some(7), None).is_err());
+        let mut wrong = anchor.clone(); wrong.height = 6;
+        assert!(require_finality_execution_height(7, Some(8), Some(&wrong)).is_err());
+        for field in 0..4 {
+            let mut wrong = anchor.clone();
+            match field {
+                0 => wrong.height = 6,
+                1 => wrong.block_id = "e".repeat(64),
+                2 => wrong.protected_execution_root = "e".repeat(64),
+                _ => wrong.finality_certificate_id = "e".repeat(64),
+            }
+            assert!(require_finality_execution_match(7, Some(&wrong), &record).is_err());
+        }
+        let mut wrong = record; wrong.height = 6;
+        assert!(require_finality_execution_match(7, None, &wrong).is_err());
+    }
+
     #[test]
     fn account_authorization_lookup_is_bounded_budgeted_and_canonical() {
         use synergy_identity::authorization::IDENTITY_AUTHORIZATION_BINDINGS_STATE_KEY as KEY;
@@ -2127,6 +2212,17 @@ mod nonblocking_http_tests {
             .is_none());
         assert!(query.finalized_commitment_at(1).unwrap().is_none());
         assert!(query.finalized_at(2).unwrap().is_some());
+        // Real canonical storage has independently retired this empty block's
+        // body and World, but retains PoSy's exact finalized record. The
+        // finality-only transport guards must not reconstruct either payload.
+        assert!(query.block(&BlockQuery { height: Some(1), hash: None }).unwrap().is_none());
+        let (head, anchor) = query.telemetry_commitments(Some(1)).unwrap();
+        assert_eq!(head, Some(2)); assert!(anchor.is_none());
+        require_finality_execution_height(1, head, anchor.as_ref()).unwrap();
+        let retained_finality = finality.get(1).unwrap().unwrap();
+        require_finality_execution_match(1, anchor.as_ref(), &retained_finality).unwrap();
+        assert!(query.finalized_proof_page(&json!({"height":1,"kind":"block_commitment"})).is_err());
+        assert!(query.finalized_proof_page(&json!({"height":1,"kind":"world_state"})).is_err());
         // A missing current candidate is corruption, never ordinary retention.
         fs::remove_file(
             layout
@@ -2136,6 +2232,7 @@ mod nonblocking_http_tests {
         .unwrap();
         assert!(query.finalized_at(2).is_err());
         assert!(query.finalized_commitment_at(2).is_err());
+        assert!(query.telemetry_commitments(Some(1)).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

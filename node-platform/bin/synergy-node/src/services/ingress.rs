@@ -221,6 +221,12 @@ pub(crate) struct PublicFinalityEvidence {
     _permit: synergy_state::world_resources::WorldResourcePermit,
 }
 
+impl PublicFinalityEvidence {
+    pub(crate) fn finalized(&self) -> &synergy_posy::FinalizedBlockRecord {
+        &self.finalized
+    }
+}
+
 #[derive(Clone)]
 struct FinalityHistory {
     root: std::path::PathBuf,
