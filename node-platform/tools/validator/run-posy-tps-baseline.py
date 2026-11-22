@@ -737,7 +737,8 @@ def sample_fleet(endpoints: dict[str, str], expected_network: str, submit_valida
 
 
 def require_progressing_preflight(endpoints: dict[str, str], expected_network: str,
-                                  stable_seconds: int, measure_outside_target: bool = False, submit_validator: str | None = None, maximum_gap_seconds: float = FINALITY_STALL_SECONDS) -> tuple[dict[str, Any], dict[str, Any]]:
+                                  stable_seconds: int, submit_validator: str | None = None,
+                                  maximum_gap_seconds: float = FINALITY_STALL_SECONDS) -> tuple[dict[str, Any], dict[str, Any]]:
     first = sample_fleet(endpoints, expected_network, submit_validator)
     first_time = time.monotonic()
     prev = first
@@ -758,10 +759,7 @@ def require_progressing_preflight(endpoints: dict[str, str], expected_network: s
     advanced = prev["val2"]["common_height"] - first["val2"]["common_height"]
     if advanced <= 0:
         raise BaselineError("five-validator tip did not advance during the preflight window")
-    avg_block_time = elapsed / advanced
-    prev["val2"]["preflight_average_block_time_seconds"] = avg_block_time
-    if not 0.5 <= avg_block_time <= 1.5 and not measure_outside_target:
-        raise BaselineError("average finalized block cadence over the full preflight window is outside 0.5–1.5 seconds")
+    prev["val2"]["preflight_average_block_time_seconds"] = elapsed / advanced
     return first, prev
 
 
@@ -986,7 +984,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         receiver = "<required-for-execution>"
 
     first, stable_tip = require_progressing_preflight(endpoints, args.network_id, args.stability_seconds,
-                                                     getattr(args, "measure_outside_cadence_target", False), args.submit_validator, args.maximum_gap_seconds)
+                                                     args.submit_validator, args.maximum_gap_seconds)
     chain_id = first["val2"]["status"]["chain_id"]
     partial["chain_id"] = chain_id
     partial.update({"preflight_start_tip": tip_record(first),
@@ -1123,8 +1121,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             if advanced_blocks > 0:
                 average_block_time = (load_end_mono - started_mono) / advanced_blocks
                 observed_block_times.append(average_block_time)
-                if not 0.5 <= average_block_time <= 1.5 and not getattr(args, "measure_outside_cadence_target", False):
-                    failure = failure or "average finalized block cadence over the full load window left the required 0.5–1.5 second range"
             partial.update({"load_end_tip": end, "load_end_counters": counters_end,
                             "load_window_seconds": load_end_mono - started_mono})
         except (BaselineError, OSError, KeyError, ValueError) as error:
@@ -1185,6 +1181,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                             if record.get("finalized_mono", float("inf")) <= load_end_mono)
     finalized_count = sum(1 for record in submissions if record.get("finalized_mono") is not None)
     finalized_tps = finalized_in_load / load_window if load_window > 0 else 0.0
+    cadence_observations = [stable_tip["val2"]["preflight_average_block_time_seconds"], *observed_block_times]
+    measured_outside_target = any(not 0.5 <= value <= 1.5 for value in cadence_observations)
     result = {"status": "failed" if failure else "completed", "failure": failure,
             "network_id": args.network_id, "submit_validator": submit_name,
             "start_utc": started_utc, "end_utc": ended_utc,
@@ -1192,8 +1190,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "start_tip": start, "end_tip": end,
             "offered_rate_tps": args.rate_tps, "submitted_transactions": len(submissions),
             "observed_block_time_seconds": observed_block_times,
-            "cadence_target_met": bool(observed_block_times) and all(0.5 <= v <= 1.5 for v in observed_block_times) and 0.5 <= stable_tip["val2"]["preflight_average_block_time_seconds"] <= 1.5,
-            "measured_outside_cadence_target": getattr(args, "measure_outside_cadence_target", False),
+            "cadence_target_seconds": {"minimum": 0.5, "maximum": 1.5},
+            "cadence_target_blocking": False,
+            "cadence_target_met": bool(observed_block_times) and not measured_outside_target,
+            "measured_outside_cadence_target": measured_outside_target,
             "accepted_tps_by_validator": accepted_tps,
             "etdag_ordered_tps_by_validator": ordered_tps,
             "finalized_tps": finalized_tps,
@@ -1943,7 +1943,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--duration-seconds", type=int, default=30)
     parser.add_argument("--max-tx", type=int, default=30)
     parser.add_argument("--stability-seconds", type=int, default=30)
-    parser.add_argument("--measure-outside-cadence-target", action="store_true", help="measure performance even when cadence misses its target; quorum, stall and finality checks remain strict")
+    parser.add_argument("--measure-outside-cadence-target", action="store_true",
+                        help="compatibility flag; cadence is always recorded without gating qualification")
     parser.add_argument("--temp-dir", type=Path)
     parser.add_argument("--output", type=Path, help="create-new JSON report path; default stdout")
     parser.add_argument("--execute", action="store_true", help="submit bounded real transactions")

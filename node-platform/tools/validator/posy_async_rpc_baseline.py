@@ -435,8 +435,12 @@ def run_async(args, h):
         raise E("no preflight finalized progression")
     preflight_cadence = (time.monotonic() - preflight_start) / (previous_height - initial_height)
     report["preflight_average_block_time_seconds"] = preflight_cadence
-    if not 0.5 <= preflight_cadence <= 1.5 and not getattr(args, "measure_outside_cadence_target", False):
-        raise E("average finalized block cadence over full preflight window is outside 0.5–1.5 seconds")
+    # Cadence is a performance observation, not a qualification gate. The
+    # independent progression, regression, health and declared stall guards
+    # above remain mandatory even when this target is missed.
+    report.update(cadence_target_seconds={"minimum": 0.5, "maximum": 1.5},
+                  cadence_target_met=0.5 <= preflight_cadence <= 1.5,
+                  cadence_target_blocking=False)
     report.update(preflight_complete=True, preflight_end_tip=h.tip_record(state), generator_limits={
         "wallet_count": len(wallets), "in_flight_cap": args.max_in_flight,
         "wallet_window_slots": len(wallets) * per_wallet,

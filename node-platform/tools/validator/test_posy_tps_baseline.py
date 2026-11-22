@@ -59,6 +59,31 @@ class MockRpcHandler(BaseHTTPRequestHandler):
         pass
 
 
+class CadencePolicyTests(unittest.TestCase):
+    def test_preflight_records_cadence_outside_target_without_rejecting_progress(self):
+        for advanced in (2, 20):
+            with self.subTest(advanced=advanced):
+                first = {"val2": {"common_height": 100, "status": {"chain_id": 99999}}}
+                last = {"val2": {"common_height": 100 + advanced}}
+                with (
+                    patch.object(HARNESS, "sample_fleet", side_effect=(first, last)),
+                    patch.object(HARNESS.time, "monotonic", side_effect=(0, 0, 4, 5, 5)),
+                    patch.object(HARNESS.time, "sleep"),
+                ):
+                    _, observed = HARNESS.require_progressing_preflight({}, "canary", 5)
+                self.assertEqual(observed["val2"]["preflight_average_block_time_seconds"], 5 / advanced)
+
+    def test_preflight_requires_finality_to_advance(self):
+        tip = {"val2": {"common_height": 100, "status": {"chain_id": 99999}}}
+        with (
+            patch.object(HARNESS, "sample_fleet", return_value=tip),
+            patch.object(HARNESS.time, "monotonic", side_effect=(0, 0, 4, 5, 5)),
+            patch.object(HARNESS.time, "sleep"),
+        ):
+            with self.assertRaisesRegex(HARNESS.BaselineError, "did not advance"):
+                HARNESS.require_progressing_preflight({}, "canary", 5)
+
+
 class BaselineMockRpcTests(unittest.TestCase):
     def test_cli_default_has_no_transaction_latency_deadline(self):
         with patch("sys.argv", ["run-posy-tps-baseline.py"]):

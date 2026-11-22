@@ -169,6 +169,18 @@ class AsyncProofTests(unittest.TestCase):
     def test_rpc_driver_reuses_nonce_only_after_later_exact_inclusion(self):
         self.simulated_async()
 
+    def test_cadence_target_is_reported_without_blocking_qualification(self):
+        for cadence in (0.25, 3.0):
+            with self.subTest(cadence=cadence):
+                report, _ = self.simulated_async(max_tx=1, cadence_seconds=cadence)
+                self.assertEqual(report["status"], "completed")
+                self.assertFalse(report["cadence_target_met"])
+                self.assertFalse(report["cadence_target_blocking"])
+                self.assertEqual(report["cadence_target_seconds"], {"minimum": 0.5, "maximum": 1.5})
+                self.assertFalse(report["measured_outside_cadence_target"])
+                observed = report["preflight_average_block_time_seconds"]
+                self.assertTrue(observed < 0.5 or observed > 1.5)
+
     def test_legitimate_first_use_pool_is_not_blocked_by_missing_genesis_binding(self):
         report, _ = self.simulated_async(first_use=True)
         self.assertFalse(report["workload_wallet_authority_verified_all_five"])
@@ -282,7 +294,8 @@ class AsyncProofTests(unittest.TestCase):
         self.assertLess(result["p50"], 50.5)
 
     def simulated_async(self, inclusion_delay=1, max_tx=3, drain_timeout=None, stalled=False, failure=None,
-                        per_wallet=1, wallet_count=1, batch=False, ambiguous=False, corrupt=None, first_use=False, cancel_after_submit=False):
+                        per_wallet=1, wallet_count=1, batch=False, ambiguous=False, corrupt=None, first_use=False, cancel_after_submit=False,
+                        cadence_seconds=1.0):
         real_sleep = time.sleep
         class Clock:
             value = 0.0
@@ -324,7 +337,7 @@ class AsyncProofTests(unittest.TestCase):
             native_lock = threading.Lock()
             receipt_ids = set()
             def height():
-                return 100 + int(min(clock.monotonic(), 15) if stalled else clock.monotonic())
+                return 100 + int((min(clock.monotonic(), 15) if stalled else clock.monotonic()) / cadence_seconds)
             def fleet(*args, **kwargs):
                 self.assertEqual(kwargs["expected_chain_id"], 9001)
                 return {name: {"common_height": height(), "height": height(), "native_epoch": 1} for name in harness.VALIDATORS}
