@@ -245,6 +245,15 @@ native completion workspace. The ordinary admission gate continues to require
 its own processing profile. Public activation, live acceptance and governance
 dispositions remain open.
 
+The PW13 engineering dispatcher now selects work from its parent World and
+reconstructs each selected or newly published READY item from the original
+pending-journal entry. It resolves the exact authenticated admission context,
+certified reveal parent and DAG parents. Replay reproduces the complete
+candidate from those inputs. Isolated tests reopen the journal across
+publication and settlement and reject a missing completion, a substituted
+payload commitment and a different retained reveal parent. The existing
+ordinary decoder and live ingress gates still require the approved profile.
+
 The offline settlement verifier checks the exact encrypted transfer and
 sponsored enrollment receipts against adjacent three-QC-certified blocks
 and their Worlds. It checks first appearance, the certified inclusion time,

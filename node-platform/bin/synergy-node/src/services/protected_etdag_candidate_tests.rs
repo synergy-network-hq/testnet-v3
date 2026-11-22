@@ -9,9 +9,10 @@ use super::super::processing_pipeline::{
 use super::{
     processing_admission::CandidateAdmission,
     processing_execution::{
-        execute_protected_candidate, replay_protected_candidate, CandidateActionOutcome,
+        execute_protected_candidate, execute_protected_journal_candidate,
+        replay_protected_candidate, replay_protected_journal_candidate, CandidateActionOutcome,
         CandidateDispatch, CandidateSlot, PreparedProtectedAction, ProtectedAdmissionRecovery,
-        ProtectedCandidateContext, ProtectedRecoveryTerms,
+        ProtectedCandidateContext, ProtectedJournalRecovery, ProtectedRecoveryTerms,
     },
     tests::Scratch,
     FinalizedSnapshot, Position, WorldState,
@@ -861,7 +862,7 @@ fn qualify_retained_replay(
     )
     .is_err());
 
-    let recovery = ProtectedAdmissionRecovery::new(
+    let source_recovery = ProtectedAdmissionRecovery::new(
         terms.source.registry,
         NativeProcessingRecovery {
             source: &native,
@@ -870,7 +871,7 @@ fn qualify_retained_replay(
         },
         terms.recovery,
     )?;
-    let snapshot = recovery.snapshot();
+    let snapshot = source_recovery.snapshot().position;
     let parameters = authority.protected_parameters()?;
     let latest_authorization_height = parameters
         .protected_target_height(retained.latest.finalized.height)
@@ -894,7 +895,7 @@ fn qualify_retained_replay(
         .source
         .registry
         .native_finalized_snapshot(&latest_native.pw13_finalized_source()?)?;
-    assert!(latest.position.height > snapshot.position.height);
+    assert!(latest.position.height > snapshot.height);
     let namespace = &order.permission.namespace_root;
     let evidence = ProcessingCompletionEvidence::from_inputs(
         &retained.vertex,
@@ -910,6 +911,45 @@ fn qualify_retained_replay(
         slots: 2,
         completion_bytes_per_item: 64 * 1024 * 1024,
     };
+    // The same authority may have another live protected profile and more
+    // than one retained candidate for this admission context. Neither may
+    // substitute for the exact pair named by the original completion.
+    let other_context = ProcessingContext {
+        profile_id: if context.profile_id == PW13_TRANSFER_CANDIDATE_PROFILE_ID {
+            PW13_SPONSOR_CANDIDATE_PROFILE_ID
+        } else {
+            PW13_TRANSFER_CANDIDATE_PROFILE_ID
+        }
+        .into(),
+        ..context.clone()
+    };
+    let other_native = NativeProcessingContext::verify_pw13(
+        authority,
+        &other_context,
+        &source.candidate,
+        &source.witness,
+    )?;
+    let other_scope = ProtectedAdmissionRecovery::new(
+        terms.source.registry,
+        NativeProcessingRecovery {
+            source: &other_native,
+            reveal_parent: &retained.parent,
+            dag_parents: &[],
+        },
+        terms.recovery,
+    )?;
+    let other_parent = ProtectedAdmissionRecovery::new(
+        terms.source.registry,
+        NativeProcessingRecovery {
+            source: &native,
+            reveal_parent: &source.candidate,
+            dag_parents: &[],
+        },
+        terms.recovery,
+    )?;
+    let recovery = ProtectedJournalRecovery {
+        sources: &[other_scope, other_parent, source_recovery],
+    };
     let open = || {
         PendingProcessingStore::open(&scratch.0, namespace.clone(), limits, &budget, &recovery)
             .map_err(err)
@@ -917,12 +957,7 @@ fn qualify_retained_replay(
     let request_bytes = serde_json::to_vec(&retained.vertex.admission).map_err(err)?;
     let mut pending = open()?;
     let identity = pending
-        .admit(
-            context,
-            snapshot.position.consensus_time,
-            &request_bytes,
-            &recovery,
-        )
+        .admit(context, snapshot.consensus_time, &request_bytes, &recovery)
         .map_err(err)?;
     let mut changed = evidence.clone();
     changed.reveal_validation.echoes[0].signature[0] ^= 1;
@@ -934,73 +969,109 @@ fn qualify_retained_replay(
         share.share_bytes.fill(0);
     }
     assert!(!pending.has_completion(&identity.envelope_id));
+    let foreign_source = ProtectedJournalRecovery {
+        sources: &recovery.sources[..2],
+    };
+    assert!(matches!(
+        pending.complete(&identity.envelope_id, &evidence, &foreign_source),
+        Err(ProcessingStoreError::Verification(_))
+    ));
     pending
         .complete(&identity.envelope_id, &evidence, &recovery)
         .map_err(|error| format!("persist verified PW13 completion: {error:?}"))?;
     drop(pending);
-    let mut pending = open().map_err(|error| format!("reopen PW13 pending journal: {error}"))?;
-    pending
-        .with_completion(
-            &identity.envelope_id,
-            &recovery,
-            |admission, proof, workspace| {
-                let execute = || -> Result<_, String> {
-                    assert_eq!(serde_json::to_vec(admission).map_err(err)?, request_bytes);
-                    assert_eq!(proof, &evidence);
-                    let recovered = recovery.recover(admission, proof, workspace)?;
-                    let publication_height = retained.parent.height + 1;
-                    let execution_height = publication_height + 1;
-                    let publication_slot = CandidateSlot {
-                        inclusion: Position {
-                            height: publication_height,
-                            consensus_time: authority
-                                .consensus_timestamp_unix(publication_height)?,
-                        },
-                        finalized_parent: &latest,
-                    };
-                    let parent = retained.parent.state.as_ref();
-                    let action = recovered.prepare(parent, publication_slot)?;
-                    let publication = ProtectedCandidateContext {
-                        parent_block_id: &retained.parent.block_id,
-                        namespace,
-                        parameters: &parameters,
-                        slot: publication_slot,
-                    };
-                    let (published, outcomes) =
-                        execute_protected_candidate(parent, publication, &[&action], &[&action])?;
-                    assert!(outcomes.is_empty());
-                    assert_eq!(published.state.accounts, parent.accounts);
-                    let execution = ProtectedCandidateContext {
-                        parent_block_id: &published.block_id,
-                        slot: CandidateSlot {
-                            inclusion: Position {
-                                height: execution_height,
-                                consensus_time: authority
-                                    .consensus_timestamp_unix(execution_height)?,
-                            },
-                            finalized_parent: &latest,
-                        },
-                        ..publication
-                    };
-                    let (settled, outcomes) =
-                        execute_protected_candidate(&published.state, execution, &[&action], &[])?;
-                    let [outcome] = <[_; 1]>::try_from(outcomes)
-                        .map_err(|_| "expected one native proof settlement")?;
-                    let original = serde_json::to_vec(&settled).map_err(err)?;
-                    let replayed = replay_protected_candidate(
-                        &original,
-                        &published.state,
-                        execution,
-                        &[&action],
-                        &[],
-                    )?;
-                    assert_eq!(replayed, settled);
-                    Ok((replayed.state, outcome))
-                };
-                execute().map_err(ProcessingStoreError::Verification)
+    let pending = open().map_err(|error| format!("reopen PW13 pending journal: {error}"))?;
+    let publication_height = retained.parent.height + 1;
+    let execution_height = publication_height + 1;
+    let parent = retained.parent.state.as_ref();
+    let publication = ProtectedCandidateContext {
+        parent_block_id: &retained.parent.block_id,
+        namespace,
+        parameters: &parameters,
+        slot: CandidateSlot {
+            inclusion: Position {
+                height: publication_height,
+                consensus_time: authority.consensus_timestamp_unix(publication_height)?,
             },
-        )
-        .map_err(err)
+            finalized_parent: &latest,
+        },
+    };
+    let records = std::slice::from_ref(&evidence.record);
+    let (published, outcomes) =
+        execute_protected_journal_candidate(parent, publication, records, &pending, &recovery)?;
+    assert!(outcomes.is_empty());
+    assert_eq!(published.state.accounts, parent.accounts);
+    let publication_bytes = serde_json::to_vec(&published).map_err(err)?;
+    let mut substituted_record = evidence.record.clone();
+    substituted_record.item.payload_root =
+        EtdagDigest::from_canonical("TEST", &"substituted plaintext").map_err(err)?;
+    assert!(replay_protected_journal_candidate(
+        &publication_bytes,
+        parent,
+        publication,
+        &[substituted_record],
+        &pending,
+        &recovery,
+    )
+    .is_err());
+    let published = replay_protected_journal_candidate(
+        &publication_bytes,
+        parent,
+        publication,
+        records,
+        &pending,
+        &recovery,
+    )?;
+    let execution = ProtectedCandidateContext {
+        parent_block_id: &published.block_id,
+        slot: CandidateSlot {
+            inclusion: Position {
+                height: execution_height,
+                consensus_time: authority.consensus_timestamp_unix(execution_height)?,
+            },
+            finalized_parent: &latest,
+        },
+        ..publication
+    };
+    let (settled, outcomes) =
+        execute_protected_journal_candidate(&published.state, execution, &[], &pending, &recovery)?;
+    let [outcome] =
+        <[_; 1]>::try_from(outcomes).map_err(|_| "expected one native proof settlement")?;
+    let original = serde_json::to_vec(&settled).map_err(err)?;
+    assert!(replay_protected_journal_candidate(
+        &original,
+        &published.state,
+        execution,
+        &[],
+        &pending,
+        &foreign_source,
+    )
+    .is_err());
+    let missing = Scratch::new();
+    let empty =
+        PendingProcessingStore::open(&missing.0, namespace.clone(), limits, &budget, &recovery)
+            .map_err(err)?;
+    assert!(replay_protected_journal_candidate(
+        &original,
+        &published.state,
+        execution,
+        &[],
+        &empty,
+        &recovery,
+    )
+    .is_err());
+    drop(pending);
+    let reopened = open()?;
+    let replayed = replay_protected_journal_candidate(
+        &original,
+        &published.state,
+        execution,
+        &[],
+        &reopened,
+        &recovery,
+    )?;
+    assert_eq!(replayed, settled);
+    Ok((replayed.state, outcome))
 }
 
 /// Opens exactly the original supplied bytes. Report authentication and every

@@ -4629,7 +4629,7 @@ fn processing_async_native_order_reveal_ready_and_execution_use_existing_posy_pr
     drop(pipeline4);
     drop(completion);
     drop(pending);
-    let mut pending = super::processing_store::PendingProcessingStore::open(
+    let pending = super::processing_store::PendingProcessingStore::open(
         &pending_root,
         namespace.clone(),
         limits,

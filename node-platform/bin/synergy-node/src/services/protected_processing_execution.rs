@@ -13,8 +13,12 @@ use crate::services::processing_pipeline::{
     AuthenticatedProcessingOpening, NativeProcessingRecovery, ProcessingCompletionEvidence,
     Pw13FinalizedSource, RevealedProcessingPayload,
 };
-use crate::services::processing_store::ProcessingAdmissionAuthenticator;
-use std::{collections::BTreeMap, sync::Arc};
+use crate::services::processing_store::{
+    PendingProcessingStore, ProcessingAdmissionAuthenticator, ProcessingStoreError,
+};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use synergy_address_engine::apqe::provider::{variants::Mldsa87, PqProvider};
 use synergy_aegis::ApqeIdentityVerifier;
 use synergy_etdag::{
@@ -129,12 +133,11 @@ pub(super) struct RecoveredProtectedAction<'a> {
 }
 
 impl RecoveredProtectedAction<'_> {
-    pub(super) fn prepare<'a>(
+    fn for_parent<'a>(
         &'a self,
         parent: &'a BudgetedWorld,
-        slot: CandidateSlot<'a>,
     ) -> Result<PreparedProtectedAction<'a>, String> {
-        PreparedProtectedAction::prepare(
+        PreparedProtectedAction::from_opening(
             CandidateDispatch {
                 source: &self.source,
                 provider: self.terms.provider,
@@ -144,7 +147,6 @@ impl RecoveredProtectedAction<'_> {
             },
             self.opening.payload(self.envelope, self.context)?,
             parent,
-            slot,
         )
     }
 }
@@ -183,6 +185,7 @@ pub(super) struct ProtectedAdmissionRecovery<'a> {
     recovery: NativeProcessingRecovery<'a>,
     snapshot: FinalizedSnapshot<'a>,
     context: &'a ProcessingContext,
+    context_root: EtdagDigest,
     parameters: EtdagParameters,
     terms: ProtectedRecoveryTerms<'a>,
 }
@@ -200,6 +203,7 @@ impl<'a> ProtectedAdmissionRecovery<'a> {
             recovery,
             snapshot,
             context: verified.context,
+            context_root: verified.context.root().map_err(debug)?,
             parameters: verified.authority.protected_parameters()?,
             terms,
         })
@@ -251,6 +255,92 @@ impl<'a> ProtectedAdmissionRecovery<'a> {
             envelope: &admission.envelope,
             terms: self.terms,
         })
+    }
+}
+
+/// Binds each journal item to its own certified authorization source and
+/// closed-order parent. A store can contain several contexts and several
+/// reveal parents within one context.
+pub(super) struct ProtectedJournalRecovery<'a> {
+    pub(super) sources: &'a [ProtectedAdmissionRecovery<'a>],
+}
+
+impl ProtectedJournalRecovery<'_> {
+    fn completion_source(
+        &self,
+        admission: &CandidateAdmission,
+        evidence: &ProcessingCompletionEvidence,
+    ) -> Result<&ProtectedAdmissionRecovery<'_>, String> {
+        self.sources
+            .iter()
+            .find(|source| {
+                source.context_root == admission.envelope.aad.processing_context_root
+                    && source.recovery.reveal_parent.block_id
+                        == evidence.reveal_validation.candidate.block_id
+                    && source
+                        .recovery
+                        .dag_parents
+                        .iter()
+                        .map(|parent| parent.vertex_id())
+                        .eq(evidence.parents.iter())
+            })
+            .ok_or_else(|| "protected journal lacks the exact certified reveal source".into())
+    }
+
+    fn with_action<T>(
+        &self,
+        pending: &PendingProcessingStore<CandidateAdmission>,
+        record: &ProcessingReadyRecord,
+        parent: &BudgetedWorld,
+        parameters: &EtdagParameters,
+        action: impl FnOnce(PreparedProtectedAction<'_>) -> Result<T, String>,
+    ) -> Result<T, String> {
+        pending
+            .reconstruct_completion(
+                &record.item.envelope_id,
+                self,
+                |context, admission, evidence, workspace| {
+                    let run = || {
+                        let source = self.completion_source(admission, evidence)?;
+                        if source.context != context || source.parameters != *parameters {
+                            return Err(
+                                "protected processing context or limits differ from the authenticated admission"
+                                    .into(),
+                            );
+                        }
+                        let recovered = source.recover(admission, evidence, workspace)?;
+                        action(recovered.for_parent(parent)?)
+                    };
+                    run().map_err(ProcessingStoreError::Verification)
+                },
+            )
+            .map_err(debug)
+    }
+}
+
+impl ProcessingAdmissionAuthenticator<CandidateAdmission> for ProtectedJournalRecovery<'_> {
+    fn verify(
+        &self,
+        context: &ProcessingContext,
+        timestamp: u64,
+        admission: &CandidateAdmission,
+    ) -> Result<(), String> {
+        self.sources
+            .iter()
+            .find(|source| source.context == context)
+            .ok_or("protected journal lacks its original authenticated context")?
+            .verify(context, timestamp, admission)
+    }
+
+    fn verify_completion(
+        &self,
+        context: &ProcessingContext,
+        admission: &CandidateAdmission,
+        evidence: &ProcessingCompletionEvidence,
+        budget: &Arc<WorldResourceBudget>,
+    ) -> Result<(), String> {
+        self.completion_source(admission, evidence)?
+            .verify_completion(context, admission, evidence, budget)
     }
 }
 
@@ -331,17 +421,26 @@ pub(super) struct PreparedProtectedAction<'a> {
     dispatch: CandidateDispatch<'a>,
     opened: RevealedProcessingPayload<'a>,
     record: ProcessingReadyRecord,
-    published_from: &'a BudgetedWorld,
-    publication_slot: CandidateSlot<'a>,
     _permit: WorldResourcePermit,
 }
 
 impl<'a> PreparedProtectedAction<'a> {
+    #[cfg(test)]
     pub(super) fn prepare(
         dispatch: CandidateDispatch<'a>,
         opened: RevealedProcessingPayload<'a>,
         parent: &'a BudgetedWorld,
         slot: CandidateSlot<'a>,
+    ) -> Result<Self, String> {
+        let action = Self::from_opening(dispatch, opened, parent)?;
+        action.verify_publication(parent, &action.record, slot)?;
+        Ok(action)
+    }
+
+    fn from_opening(
+        dispatch: CandidateDispatch<'a>,
+        opened: RevealedProcessingPayload<'a>,
+        parent: &BudgetedWorld,
     ) -> Result<Self, String> {
         let permit = parent
             .budget()
@@ -353,20 +452,48 @@ impl<'a> PreparedProtectedAction<'a> {
                 "protected authorization differs from the original ordered admission".into(),
             );
         }
-        let action = Self {
+        Ok(Self {
             dispatch,
             opened,
             record,
-            published_from: parent,
-            publication_slot: slot,
             _permit: permit,
-        };
+        })
+    }
+
+    fn verify_publication(
+        &self,
+        parent: &BudgetedWorld,
+        record: &ProcessingReadyRecord,
+        slot: CandidateSlot<'_>,
+    ) -> Result<(), String> {
+        if self.opened.ready_record(parent)? != *record {
+            return Err(
+                "protected READY publication differs from the authenticated opening".into(),
+            );
+        }
         // Refuse invalid decrypted content before publishing readiness. These
         // tentative ledger and receipt writes are never a publication effect.
         let mut trial =
             BudgetedWorld::try_clone_world(parent.as_ref(), parent.budget()).map_err(debug)?;
-        action.execute(&mut trial, slot)?;
-        Ok(action)
+        self.execute(&mut trial, slot).map(drop)
+    }
+
+    fn verify_selection(
+        &self,
+        parent: &BudgetedWorld,
+        record: &ProcessingReadyRecord,
+    ) -> Result<(), String> {
+        let mut original = self.opened.ready_record(parent)?;
+        // The authenticated parent registry removes dependencies as their
+        // exact envelopes are consumed. All other READY fields stay immutable.
+        original
+            .item
+            .remaining_dependencies
+            .retain(|id| record.item.remaining_dependencies.contains(id));
+        if original != *record {
+            return Err("selected protected READY lost its original reveal permission".into());
+        }
+        Ok(())
     }
 
     fn execute(
@@ -441,28 +568,15 @@ impl<'a> PreparedProtectedAction<'a> {
     }
 }
 
-struct ProtectedReadiness<'a> {
+struct ProtectedReadiness<'a, F> {
     namespace: &'a EtdagDigest,
-    slot: CandidateSlot<'a>,
-    actions: BTreeMap<&'a EtdagDigest, &'a PreparedProtectedAction<'a>>,
-}
-impl ProtectedReadiness<'_> {
-    fn action(
-        &self,
-        record: &ProcessingReadyRecord,
-    ) -> Result<&PreparedProtectedAction<'_>, String> {
-        let action = self
-            .actions
-            .get(&record.item.envelope_id)
-            .ok_or("protected READY is missing its authenticated opening")?;
-        if action.record != *record {
-            return Err("protected READY differs from the authenticated opening".into());
-        }
-        Ok(action)
-    }
+    verify_publication: F,
 }
 
-impl ProcessingReadinessVerifier for ProtectedReadiness<'_> {
+impl<F> ProcessingReadinessVerifier for ProtectedReadiness<'_, F>
+where
+    F: Fn(&ProcessingReadyRecord) -> Result<(), String>,
+{
     fn first_unconsumed_position(
         &self,
         record: &ProcessingReadyRecord,
@@ -476,19 +590,9 @@ impl ProcessingReadinessVerifier for ProtectedReadiness<'_> {
     fn verify_publication(
         &self,
         record: &ProcessingReadyRecord,
-        parent: &WorldState,
+        _: &WorldState,
     ) -> Result<(), String> {
-        let action = self.action(record)?;
-        if !std::ptr::eq(action.published_from.as_ref(), parent)
-            || action.publication_slot.inclusion != self.slot.inclusion
-            || !std::ptr::eq(
-                action.publication_slot.finalized_parent,
-                self.slot.finalized_parent,
-            )
-        {
-            return Err("protected READY publication lost its validated parent or slot".into());
-        }
-        Ok(())
+        (self.verify_publication)(record)
     }
 
     fn identity_is_current(
@@ -496,7 +600,6 @@ impl ProcessingReadinessVerifier for ProtectedReadiness<'_> {
         record: &ProcessingReadyRecord,
         parent: &WorldState,
     ) -> Result<bool, String> {
-        self.action(record)?;
         Ok(parent
             .accounts
             .get(&record.sender_wallet)
@@ -550,13 +653,74 @@ impl ProtectedCandidateContext<'_> {
 /// Apply the selection and lifecycle from the single canonical parent. The
 /// returned World contains both the protected settlement and READY consumption.
 /// If anything fails, the private candidate is dropped along with all effects.
+#[cfg(test)]
 pub(super) fn execute_protected_candidate<'a>(
     parent: &BudgetedWorld,
     context: ProtectedCandidateContext<'a>,
     prepared: &[&'a PreparedProtectedAction<'a>],
     publications: &[&'a PreparedProtectedAction<'a>],
 ) -> Result<(BudgetedExecutionCandidate, Vec<CandidateActionOutcome>), String> {
-    const MAX_ACTIONS: usize = 4096;
+    if prepared.len() > MAX_ACTIONS || publications.len() > MAX_ACTIONS {
+        return Err("protected candidate exceeds action capacity".into());
+    }
+    let budget = parent.budget();
+    let _index = budget
+        .reserve((prepared.len() + publications.len()) * 256 + 16 * 1024)
+        .map_err(debug)?;
+    let mut actions = BTreeMap::new();
+    for action in prepared {
+        if action.dispatch.admission.parameters != *context.parameters {
+            return Err(
+                "protected processing limits differ from the authenticated admission".into(),
+            );
+        }
+        if actions
+            .insert(&action.record.item.envelope_id, *action)
+            .is_some()
+        {
+            return Err("protected candidate has duplicate openings".into());
+        }
+    }
+    let find = |record: &ProcessingReadyRecord| {
+        actions
+            .get(&record.item.envelope_id)
+            .copied()
+            .ok_or_else(|| "protected READY is missing its authenticated opening".to_owned())
+    };
+    // Every prepared action holds a bounded ready-record permit. Reserve the
+    // same maximum for each temporary clone before allocating those clones.
+    let _clones = budget
+        .reserve(publications.len() * READY_RECORD_RESERVATION)
+        .map_err(debug)?;
+    let publication_records = publications
+        .iter()
+        .map(|item| item.record.clone())
+        .collect::<Vec<_>>();
+    assemble_protected_candidate(
+        parent,
+        context,
+        &publication_records,
+        |record| find(record)?.verify_publication(parent, record, context.slot),
+        |record, candidate| {
+            let action = find(record)?;
+            action.verify_selection(parent, record)?;
+            action.execute(candidate, context.slot)
+        },
+    )
+}
+
+const MAX_ACTIONS: usize = 4096;
+
+fn assemble_protected_candidate(
+    parent: &BudgetedWorld,
+    context: ProtectedCandidateContext<'_>,
+    publications: &[ProcessingReadyRecord],
+    verify_publication: impl Fn(&ProcessingReadyRecord) -> Result<(), String>,
+    execute: impl Fn(
+        &ProcessingReadyRecord,
+        &mut BudgetedWorld,
+    ) -> Result<CandidateActionOutcome, String>,
+) -> Result<(BudgetedExecutionCandidate, Vec<CandidateActionOutcome>), String> {
     let ProtectedCandidateContext {
         namespace,
         parameters,
@@ -564,47 +728,15 @@ pub(super) fn execute_protected_candidate<'a>(
         ..
     } = context;
     parameters.validate().map_err(debug)?;
-    if prepared.len() > MAX_ACTIONS || publications.len() > MAX_ACTIONS {
+    if publications.len() > MAX_ACTIONS {
         return Err("protected candidate exceeds action capacity".into());
     }
     let scope = context.scope(parent)?;
     let budget = parent.budget();
-    let _index = budget
-        .reserve((prepared.len() + publications.len()) * 256 + 16 * 1024)
-        .map_err(debug)?;
-    let mut readiness = ProtectedReadiness {
+    let readiness = ProtectedReadiness {
         namespace,
-        slot,
-        actions: BTreeMap::new(),
+        verify_publication,
     };
-    for action in prepared {
-        if action.dispatch.admission.parameters != *parameters {
-            return Err(
-                "protected processing limits differ from the authenticated admission".into(),
-            );
-        }
-        if readiness
-            .actions
-            .insert(&action.record.item.envelope_id, *action)
-            .is_some()
-        {
-            return Err("protected candidate has duplicate openings".into());
-        }
-    }
-    let publication_records = publications
-        .iter()
-        .map(|action| {
-            readiness
-                .action(&action.record)
-                .map(|action| &action.record)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    // Every prepared action holds a bounded ready-record permit. Reserve the
-    // same maximum for each temporary clone before allocating those clones.
-    let _clones = budget
-        .reserve(publication_records.len() * READY_RECORD_RESERVATION)
-        .map_err(debug)?;
-    let publication_records = publication_records.into_iter().cloned().collect::<Vec<_>>();
     let registry =
         ParentProcessingRegistry::read(parent.as_ref(), namespace, budget).map_err(debug)?;
     let selected = registry
@@ -615,16 +747,12 @@ pub(super) fn execute_protected_candidate<'a>(
         )
         .map_err(debug)?;
     let lifecycle = selected
-        .prepare_lifecycle(&publication_records, None, &readiness)
+        .prepare_lifecycle(publications, None, &readiness)
         .map_err(debug)?;
     let mut candidate = BudgetedWorld::try_clone_world(parent.as_ref(), budget).map_err(debug)?;
     let mut outcomes = Vec::with_capacity(selected.selection().item_indices.len());
     for record in selected.records() {
-        let action = readiness.action(record)?;
-        if action.opened.ready_record(parent)? != *record {
-            return Err("selected protected READY lost its original reveal permission".into());
-        }
-        outcomes.push(action.execute(&mut candidate, slot)?);
+        outcomes.push(execute(record, &mut candidate)?);
     }
     let candidate = lifecycle
         .assemble_pw13_engineering(
@@ -638,8 +766,52 @@ pub(super) fn execute_protected_candidate<'a>(
     Ok((candidate, outcomes))
 }
 
+/// The proposal supplies publication records. Selection comes only from the
+/// parent, and all openings come from the exact immutable journal entries.
+/// This dispatcher only assembles the isolated PW13 engineering profile.
+pub(super) fn execute_protected_journal_candidate(
+    parent: &BudgetedWorld,
+    context: ProtectedCandidateContext<'_>,
+    publications: &[ProcessingReadyRecord],
+    pending: &PendingProcessingStore<CandidateAdmission>,
+    recovery: &ProtectedJournalRecovery<'_>,
+) -> Result<(BudgetedExecutionCandidate, Vec<CandidateActionOutcome>), String> {
+    assemble_protected_candidate(
+        parent,
+        context,
+        publications,
+        |record| {
+            recovery.with_action(pending, record, parent, context.parameters, |action| {
+                action.verify_publication(parent, record, context.slot)
+            })
+        },
+        |record, candidate| {
+            recovery.with_action(pending, record, parent, context.parameters, |action| {
+                action.verify_selection(parent, record)?;
+                action.execute(candidate, context.slot)
+            })
+        },
+    )
+}
+
+pub(super) fn replay_protected_journal_candidate(
+    received_bytes: &[u8],
+    parent: &BudgetedWorld,
+    context: ProtectedCandidateContext<'_>,
+    publications: &[ProcessingReadyRecord],
+    pending: &PendingProcessingStore<CandidateAdmission>,
+    recovery: &ProtectedJournalRecovery<'_>,
+) -> Result<BudgetedExecutionCandidate, String> {
+    let received = decode_budgeted_pw13_engineering_candidate(received_bytes, parent.budget())
+        .map_err(debug)?;
+    let (regenerated, _) =
+        execute_protected_journal_candidate(parent, context, publications, pending, recovery)?;
+    verify_replayed_candidate(received, regenerated)
+}
+
 /// Replay using original authorization/opening evidence and the selected
 /// parent. A well-formed claimed World or block identifier is insufficient.
+#[cfg(test)]
 pub(super) fn replay_protected_candidate<'a>(
     received_bytes: &[u8],
     parent: &BudgetedWorld,
@@ -650,6 +822,13 @@ pub(super) fn replay_protected_candidate<'a>(
     let received = decode_budgeted_pw13_engineering_candidate(received_bytes, parent.budget())
         .map_err(debug)?;
     let (regenerated, _) = execute_protected_candidate(parent, context, prepared, publications)?;
+    verify_replayed_candidate(received, regenerated)
+}
+
+fn verify_replayed_candidate(
+    received: BudgetedExecutionCandidate,
+    regenerated: BudgetedExecutionCandidate,
+) -> Result<BudgetedExecutionCandidate, String> {
     if regenerated != received {
         return Err("protected execution candidate disagrees with canonical parent replay".into());
     }

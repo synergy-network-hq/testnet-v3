@@ -546,6 +546,19 @@ fn verify_completion<A: ProcessingAdmissionRecord>(
     verifier: &impl ProcessingAdmissionAuthenticator<A>,
     budget: &Arc<WorldResourceBudget>,
 ) -> Result<StoredCompletion, ProcessingStoreError> {
+    let record = decode_completion(bytes, namespace, original_root, admission)?;
+    verifier
+        .verify_completion(context, admission, &record.evidence, budget)
+        .map_err(ProcessingStoreError::Verification)?;
+    Ok(record)
+}
+
+fn decode_completion<A: ProcessingAdmissionRecord>(
+    bytes: &[u8],
+    namespace: &EtdagDigest,
+    original_root: &EtdagDigest,
+    admission: &A,
+) -> Result<StoredCompletion, ProcessingStoreError> {
     let record: StoredCompletion = serde_json::from_slice(bytes)
         .map_err(|e| invalid(format!("processing completion: {e}")))?;
     if record.version != 1
@@ -557,9 +570,6 @@ fn verify_completion<A: ProcessingAdmissionRecord>(
             "completion differs from original immutable admission",
         ));
     }
-    verifier
-        .verify_completion(context, admission, &record.evidence, budget)
-        .map_err(ProcessingStoreError::Verification)?;
     Ok(record)
 }
 
@@ -1480,10 +1490,37 @@ impl<A: ProcessingAdmissionRecord> PendingProcessingStore<A> {
     /// Reconstruct/verify from original authority and existing PoSy evidence
     /// before exposing a completion, including after interruption or restart.
     pub(crate) fn with_completion<T>(
-        &mut self,
+        &self,
         envelope: &EtdagDigest,
         verifier: &impl ProcessingAdmissionAuthenticator<A>,
         action: impl FnOnce(
+            &A,
+            &ProcessingCompletionEvidence,
+            &Arc<WorldResourceBudget>,
+        ) -> Result<T, ProcessingStoreError>,
+    ) -> Result<T, ProcessingStoreError> {
+        self.reconstruct_completion(
+            envelope,
+            verifier,
+            |context, admission, evidence, workspace| {
+                verifier
+                    .verify_completion(context, admission, evidence, workspace)
+                    .map_err(ProcessingStoreError::Verification)?;
+                action(admission, evidence, workspace)
+            },
+        )
+    }
+
+    /// The native owner reconstructs and authenticates the completion in the
+    /// prepaid item workspace. This avoids a second decrypt when the caller
+    /// needs the verified opening itself. A matching journal hash alone is
+    /// insufficient: the reconstruction callback must verify the evidence.
+    pub(super) fn reconstruct_completion<T>(
+        &self,
+        envelope: &EtdagDigest,
+        verifier: &impl ProcessingAdmissionAuthenticator<A>,
+        reconstruct: impl FnOnce(
+            &ProcessingContext,
             &A,
             &ProcessingCompletionEvidence,
             &Arc<WorldResourceBudget>,
@@ -1517,16 +1554,18 @@ impl<A: ProcessingAdmissionRecord> PendingProcessingStore<A> {
             .map_err(|e| invalid(format!("pending completion source: {e}")))?;
         let admission = verify_retained_stored(&pending, &self.header.namespace_root, verifier)?;
         let bytes = self.read_completion(slot, index)?;
-        let completion = verify_completion(
+        let completion = decode_completion(
             &bytes,
             &self.header.namespace_root,
             &entry.encoded_root,
+            &admission,
+        )?;
+        reconstruct(
             &pending.context,
             &admission,
-            verifier,
+            &completion.evidence,
             &entry.workspace,
-        )?;
-        action(&admission, &completion.evidence, &entry.workspace)
+        )
     }
 
     fn read_completion(
