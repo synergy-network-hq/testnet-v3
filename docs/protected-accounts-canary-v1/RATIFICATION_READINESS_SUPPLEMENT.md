@@ -177,6 +177,14 @@ envelope's opening in the resulting settlement. Protected records require
 the corrected ML-KEM link. Qualification of live dispatch still requires the
 approved activation, fee reservation and certified processing transitions.
 
+The offline settlement verifier checks the exact encrypted transfer and
+sponsored enrollment receipts against adjacent three-QC-certified blocks
+and their Worlds. It checks first appearance, the certified inclusion time,
+the original opening and per-action nonce effects, and projects actual
+account state at each block boundary. The engineering tests cover applied
+and reverted transfers and a sponsored reveal after reopening the state
+store. The public disclosure and live activation decisions remain pending.
+
 For ACT-12 and TX-04, the ordered transfer candidate now distinguishes an
 included transfer failure from pre-inclusion refusal. It proposes paid reverts
 when a signed transfer could debit and credit at its finalized source, the

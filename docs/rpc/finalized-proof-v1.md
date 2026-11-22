@@ -284,6 +284,29 @@ policy, and commitment are untouched. An already-consumed commitment in the
 finalized parent, a stale payer nonce, insufficient funds, expiry, and other
 failed checks carry no charge.
 
+### Verify an encrypted settlement at inclusion
+
+```sh
+synergy-node finality-proof verify-candidate-settlement CONFIG FINALITY_JSON BLOCK_COMMITMENT_JSON WORLD_JSON QUERY_JSON PREVIOUS_FINALITY_JSON PREVIOUS_BLOCK_JSON PREVIOUS_WORLD_JSON
+```
+
+Pin the inclusion height, block ID, World root, ownership chain and provider
+manifests through the existing candidate query. Select up to eight entries
+across `settlements` and `sponsorships`, each with the exact original
+`engineering_etdag_opening` and signed intent digest. Supply the certified
+direct predecessor of the inclusion block as the second evidence set.
+
+The command verifies both finality witnesses against the pinned authority,
+links the two block preimages, and authenticates both complete Worlds. It
+requires the receipt key to first appear at the inclusion block and its
+recorded height and consensus timestamp to match that block. The
+`candidate_settlement` result includes the exact outcome, fee, gas and nonce
+effects, the predecessor's certified coordinates, and the payer and
+recipient's observed balances and next nonces at both block boundaries.
+Those ledger observations reflect every action included in the block.
+Missing receipts, substituted openings and later snapshots are refused.
+The result carries the `unactivated_candidate` label.
+
 ### Candidate transition execution effects
 
 The isolated ordinary/recovery executors return a typed

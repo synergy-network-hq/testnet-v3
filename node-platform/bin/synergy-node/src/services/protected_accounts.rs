@@ -2605,6 +2605,37 @@ mod tests {
         .unwrap();
         assert_eq!(after["sponsorships"][0]["engineering_etdag_opening"], serde_json::json!(first_evidence));
         assert_eq!(after["sponsorships"][2]["engineering_etdag_opening"], serde_json::json!(reveal_evidence));
+        let (before_tip, before_finality) = finalized(3, &committed);
+        let (_, after_finality) = finalized(4, &reopened);
+        let boundary_query = serde_json::json!({
+            "height": 4,
+            "block_id": after_finality.block_id,
+            "state_root": tip.state_root,
+            "ownership_chain_id": inspection::hex_bytes(&registry.network.ownership_chain),
+            "provider_manifests": [inspection::hex_bytes(&enrollment.policy().provider_manifest_hash)],
+            "sponsorships": [reveal_selector],
+        });
+        let prove_reveal = |consensus_time| inspection::inspect_settlement_inclusion(
+            inspection::CandidateWorld {
+                world: &committed, finality: &before_finality, state_root: &before_tip.state_root,
+                consensus_time: 1002,
+            },
+            inspection::CandidateWorld {
+                world: &reopened, finality: &after_finality, state_root: &tip.state_root,
+                consensus_time,
+            },
+            99999,
+            &inspection::hex_bytes(genesis.as_bytes()),
+            serde_json::from_value(boundary_query.clone()).unwrap(),
+        );
+        let boundary = prove_reveal(1003).unwrap();
+        assert_eq!(boundary["sponsorships"][0], after["sponsorships"][2]);
+        assert_eq!(boundary["ledger"][0]["predecessor"], serde_json::json!({"balance_nwei":"80", "next_nonce":2}));
+        assert_eq!(boundary["ledger"][0]["inclusion"], serde_json::json!({"balance_nwei":"60", "next_nonce":4}));
+        assert_eq!(
+            prove_reveal(1004).unwrap_err(),
+            "settlement was not introduced at the verified inclusion height and time",
+        );
         reveal_selector["engineering_etdag_opening"] = serde_json::json!(first_evidence);
         assert!(query_receipt(&reopened, 4, 1003, vec![reveal_selector]).is_err());
         assert_eq!(after["commitments"][0]["status"], "consumed");
@@ -3697,6 +3728,40 @@ mod tests {
         assert_eq!(revert_receipt["fee_nwei"], "840000");
         assert_eq!(revert_receipt["nonce_before"], 1);
         assert_eq!(revert_receipt["nonce_after"], 2);
+        let prove_transfer = |prior: inspection::CandidateWorld<'_>,
+                              included: inspection::CandidateWorld<'_>,
+                              id: &[u8; 32], digest: &str, opening: &serde_json::Value| {
+            let query = serde_json::from_value(serde_json::json!({
+                "height": included.finality.height,
+                "block_id": included.finality.block_id,
+                "state_root": included.state_root,
+                "ownership_chain_id": as_hex(ChainId::from_u64(1).as_be_bytes()),
+                "provider_manifests": [as_hex(&enrollment.policy().provider_manifest_hash)],
+                "settlements": [{
+                    "sender": address,
+                    "intent_id": as_hex(id),
+                    "signed_intent_digest": digest,
+                    "engineering_etdag_opening": opening,
+                }],
+            })).unwrap();
+            inspection::inspect_settlement_inclusion(
+                prior, included, 99999, &as_hex(enrollment.genesis().as_bytes()), query,
+            )
+        };
+        let reverted_boundary = prove_transfer(
+            inspection::CandidateWorld {
+                world: &funded, finality: &funded_proof, state_root: &funded_tip.state_root,
+                consensus_time: 1002,
+            },
+            inspection::CandidateWorld {
+                world: &restored_revert, finality: &reverted_proof, state_root: &reverted_tip.state_root,
+                consensus_time: 1003,
+            },
+            &second_body.intent_id,
+            &as_hex(second_digest.as_bytes()),
+            &revert_receipt["engineering_etdag_opening"],
+        ).unwrap();
+        assert_eq!(reverted_boundary["settlements"][0], revert_receipt);
 
         // A recipient credit that became infeasible during ordering can
         // revert with a fee only. The certified base here still permits it.
@@ -3813,6 +3878,39 @@ mod tests {
         );
         assert_eq!(result["included_height"], 4);
         assert_eq!(result["inclusion_consensus_timestamp_unix"], 1003);
+        let at_inclusion = prove_transfer(
+            inspection::CandidateWorld {
+                world: &spend_base, finality: &snapshot_proof, state_root: &snapshot_pointer.state_root,
+                consensus_time: 1002,
+            },
+            inspection::CandidateWorld {
+                world: &reopened, finality: &after_proof, state_root: &after_pointer.state_root,
+                consensus_time: 1003,
+            },
+            &original_id,
+            &original_digest,
+            &result["engineering_etdag_opening"],
+        ).unwrap();
+        assert_eq!(at_inclusion["settlements"][0], *result);
+        assert_eq!(at_inclusion["predecessor"]["state_root"], snapshot_pointer.state_root);
+        let sender_observation = at_inclusion["ledger"].as_array().unwrap().iter()
+            .find(|entry| entry["address"] == address).unwrap();
+        assert_eq!(sender_observation["inclusion"]["balance_nwei"], "59993");
+        assert_eq!(sender_observation["inclusion"]["next_nonce"], 1);
+        let (later_tip, later_finality) = finalized(5, &reopened);
+        assert!(prove_transfer(
+            inspection::CandidateWorld {
+                world: &reopened, finality: &after_proof, state_root: &after_pointer.state_root,
+                consensus_time: 1003,
+            },
+            inspection::CandidateWorld {
+                world: &reopened, finality: &later_finality, state_root: &later_tip.state_root,
+                consensus_time: 1004,
+            },
+            &original_id,
+            &original_digest,
+            &result["engineering_etdag_opening"],
+        ).is_err());
 
         let same_id = NativeIntentBody {
             transaction_nonce: 1,

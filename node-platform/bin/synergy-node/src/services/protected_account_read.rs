@@ -11,7 +11,7 @@ use synergy_address_engine::apqe::{
 const MAX_SELECTORS: usize = 8;
 const MAX_PROVIDER_PINS: usize = 4;
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CandidateReadQuery {
     pub(crate) height: u64,
@@ -31,7 +31,7 @@ pub(crate) struct CandidateReadQuery {
     transition_settlements: Vec<TransitionSettlementQuery>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SettlementQuery {
     sender: String,
@@ -41,7 +41,7 @@ struct SettlementQuery {
     engineering_etdag_opening: Option<settlement::EngineeringEtdagOpening>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SponsorshipQuery {
     payer: String,
@@ -51,7 +51,7 @@ struct SponsorshipQuery {
     engineering_etdag_opening: Option<settlement::EngineeringEtdagOpening>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TransitionSettlementQuery {
     address: String,
@@ -256,6 +256,143 @@ pub(crate) fn inspect(
         result["transition_settlements"] = json!(transition_settlements);
     }
     Ok(result)
+}
+
+/// The proof caller authenticates both headers and their direct relationship.
+/// The reader checks each World against its certified root.
+pub(crate) struct CandidateWorld<'a> {
+    pub(crate) world: &'a WorldState,
+    pub(crate) finality: &'a FinalizedBlockRecord,
+    pub(crate) state_root: &'a str,
+    pub(crate) consensus_time: u64,
+}
+
+impl CandidateWorld<'_> {
+    fn project(
+        &self,
+        chain_id: u64,
+        genesis: &str,
+        query: CandidateReadQuery,
+    ) -> Result<Value, String> {
+        inspect(
+            self.world,
+            self.finality,
+            self.state_root,
+            self.consensus_time,
+            chain_id,
+            genesis,
+            query,
+        )
+    }
+}
+
+/// Prove introduction of the exact encrypted settlement at its included height.
+/// Ledger observations are at block boundaries and may reflect other actions.
+pub(crate) fn inspect_settlement_inclusion(
+    predecessor: CandidateWorld<'_>,
+    inclusion: CandidateWorld<'_>,
+    chain_id: u64,
+    genesis: &str,
+    query: CandidateReadQuery,
+) -> Result<Value, String> {
+    if !query.addresses.is_empty()
+        || !query.commitments.is_empty()
+        || !query.transition_settlements.is_empty()
+        || query
+            .settlements
+            .iter()
+            .any(|record| record.engineering_etdag_opening.is_none())
+        || query
+            .sponsorships
+            .iter()
+            .any(|record| record.engineering_etdag_opening.is_none())
+    {
+        return Err("inclusion proof requires exact encrypted settlement selectors".into());
+    }
+    if predecessor.finality.height.checked_add(1) != Some(inclusion.finality.height)
+        || predecessor.consensus_time > inclusion.consensus_time
+    {
+        return Err("inclusion requires adjacent, ordered finalized Worlds".into());
+    }
+    let previous = predecessor.project(
+        chain_id,
+        genesis,
+        CandidateReadQuery {
+            height: predecessor.finality.height,
+            block_id: predecessor.finality.block_id.clone(),
+            state_root: predecessor.state_root.into(),
+            ..query.clone()
+        },
+    )?;
+    let mut applied = inclusion.project(chain_id, genesis, query)?;
+    let mut touched = BTreeSet::new();
+    for (section, payer) in [("settlements", "sender"), ("sponsorships", "payer")] {
+        let previous_receipts = previous[section]
+            .as_array()
+            .ok_or("predecessor receipts missing")?;
+        let receipts = applied[section]
+            .as_array()
+            .ok_or("inclusion receipts missing")?;
+        if previous_receipts.len() != receipts.len() {
+            return Err("settlement projection count differs at inclusion".into());
+        }
+        for (earlier, receipt) in previous_receipts.iter().zip(receipts) {
+            if earlier["status"] != "no_settlement_in_snapshot"
+                || receipt["included_height"].as_u64() != Some(inclusion.finality.height)
+                || receipt["inclusion_consensus_timestamp_unix"].as_u64()
+                    != Some(inclusion.consensus_time)
+            {
+                return Err(
+                    "settlement was not introduced at the verified inclusion height and time"
+                        .into(),
+                );
+            }
+            let payer = receipt[payer].as_str().ok_or("settlement payer missing")?;
+            let before = settlement_ledger(predecessor.world, payer)?;
+            let after = settlement_ledger(inclusion.world, payer)?;
+            let nonce_before = receipt["nonce_before"]
+                .as_u64()
+                .ok_or("settlement nonce missing")?;
+            let nonce_after = receipt["nonce_after"]
+                .as_u64()
+                .ok_or("settlement nonce missing")?;
+            if before.nonce > nonce_before || after.nonce < nonce_after {
+                return Err("certified ledger nonce does not cover the settlement charge".into());
+            }
+            touched.insert(payer.to_owned());
+            if let Some(recipient) = receipt["recipient"].as_str() {
+                touched.insert(recipient.to_owned());
+            }
+        }
+    }
+    applied["ledger"] = json!(touched.into_iter().map(|address| {
+        let before = settlement_ledger(predecessor.world, &address)?;
+        let after = settlement_ledger(inclusion.world, &address)?;
+        Ok(json!({
+            "address": address,
+            "predecessor": {"balance_nwei": before.balance_nwei.to_string(), "next_nonce": before.nonce},
+            "inclusion": {"balance_nwei": after.balance_nwei.to_string(), "next_nonce": after.nonce},
+        }))
+    }).collect::<Result<Vec<_>, String>>()?);
+    applied["predecessor"] = json!({
+        "height": predecessor.finality.height,
+        "block_id": predecessor.finality.block_id,
+        "state_root": predecessor.state_root,
+        "consensus_timestamp_unix": predecessor.consensus_time,
+        "finality_certificate_id": predecessor.finality.finality_certificate_id,
+    });
+    Ok(applied)
+}
+
+fn settlement_ledger<'a>(
+    world: &'a WorldState,
+    address: &str,
+) -> Result<&'a synergy_state::AccountState, String> {
+    world
+        .accounts
+        .get(address)
+        .filter(|account| account.code_hash.is_none())
+        .ok_or_else(|| "settlement ledger account missing or inconsistent".into())
 }
 
 fn inspect_account(

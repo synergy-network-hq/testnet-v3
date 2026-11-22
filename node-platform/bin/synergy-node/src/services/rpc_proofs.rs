@@ -404,6 +404,18 @@ struct ActivationBoundaryEvidence<'a> {
     world: &'a synergy_state::WorldState,
 }
 
+fn links_finalized_predecessor(
+    before: &VerifiedFinalityProof,
+    after: &VerifiedFinalityProof,
+    after_block: &VerifiedBlockCommitment<'_>,
+) -> bool {
+    before.record.height != 0
+        && before.record.height.checked_add(1) == Some(after.record.height)
+        && after_block.parent_block_id == before.record.block_id
+        && after.parent_block_id == before.record.block_id
+        && before.following_block_id == after.record.block_id
+}
+
 fn inspect_activation_transition(
     before: ActivationBoundaryEvidence<'_>,
     after: ActivationBoundaryEvidence<'_>,
@@ -412,12 +424,7 @@ fn inspect_activation_transition(
     genesis_hash: &str,
     expected: &ActivationRecordExpectation,
 ) -> Result<Value, String> {
-    if before.finality.record.height == 0
-        || before.finality.record.height.checked_add(1) != Some(after.finality.record.height)
-        || after.block.parent_block_id != before.finality.record.block_id
-        || after.finality.parent_block_id != before.finality.record.block_id
-        || before.finality.following_block_id != after.finality.record.block_id
-    {
+    if !links_finalized_predecessor(before.finality, after.finality, after.block) {
         return Err("activation proofs do not link adjacent certified blocks".into());
     }
     if synergy_state::state_root(before.world).map_err(|error| format!("{error:?}"))?
@@ -470,12 +477,12 @@ pub(crate) fn verify_finality_proof_cli(args: impl Iterator<Item = String>) -> R
             (config, proof, Some(block), Some((action, world, query)), None)
         }
         [action, config, proof, block, world, query, previous_proof, previous_block, previous_world]
-            if action == "verify-activation-transition" => {
+            if matches!(action.as_str(), "verify-activation-transition" | "verify-candidate-settlement") => {
             (config, proof, Some(block), Some((action, world, query)),
                 Some((previous_proof, previous_block, previous_world)))
         }
         _ => return Err(
-            "usage: finality-proof verify CONFIG FINALITY_JSON [BLOCK_COMMITMENT_JSON], finality-proof {verify-candidate-state|verify-activation-record} CONFIG FINALITY_JSON BLOCK_COMMITMENT_JSON WORLD_JSON QUERY_JSON, or finality-proof verify-activation-transition CONFIG FINALITY_JSON BLOCK_COMMITMENT_JSON WORLD_JSON EXPECTATION_JSON PREVIOUS_FINALITY_JSON PREVIOUS_BLOCK_JSON PREVIOUS_WORLD_JSON".into(),
+            "usage: finality-proof verify CONFIG FINALITY_JSON [BLOCK_COMMITMENT_JSON], finality-proof {verify-candidate-state|verify-activation-record} CONFIG FINALITY_JSON BLOCK_COMMITMENT_JSON WORLD_JSON QUERY_JSON, or finality-proof {verify-activation-transition|verify-candidate-settlement} CONFIG FINALITY_JSON BLOCK_COMMITMENT_JSON WORLD_JSON QUERY_JSON PREVIOUS_FINALITY_JSON PREVIOUS_BLOCK_JSON PREVIOUS_WORLD_JSON".into(),
         ),
     };
     let configuration =
@@ -507,13 +514,13 @@ pub(crate) fn verify_finality_proof_cli(args: impl Iterator<Item = String>) -> R
         result["epoch_context_root"] = json!(epoch_context_root);
         result["consensus_timestamp_unix"] = json!(timestamp_unix);
         if let Some((action, world, query)) = inspection {
-            use super::super::protected_accounts::inspection::{inspect, CandidateReadQuery};
+            use super::super::protected_accounts::inspection::{
+                inspect, inspect_settlement_inclusion, CandidateReadQuery, CandidateWorld,
+            };
             let query =
                 super::super::apqe_transport::read(std::path::Path::new(query), 8 * 1024, false)?;
             let world = read_canonical_world(world)?;
             if let Some((previous_proof, previous_block, previous_world)) = predecessor {
-                let expectation: ActivationRecordExpectation =
-                    serde_json::from_slice(&query).map_err(|error| error.to_string())?;
                 let read = |path: &str| {
                     super::super::apqe_transport::read(
                         std::path::Path::new(path),
@@ -525,22 +532,51 @@ pub(crate) fn verify_finality_proof_cli(args: impl Iterator<Item = String>) -> R
                 let prior_block_bytes = read(previous_block)?;
                 let prior_header = verify_block_commitment(&prior_block_bytes, &prior.record)?;
                 let prior_world = read_canonical_world(previous_world)?;
-                result["activation_transition"] = inspect_activation_transition(
-                    ActivationBoundaryEvidence {
-                        finality: &prior,
-                        block: &prior_header,
-                        world: &prior_world,
-                    },
-                    ActivationBoundaryEvidence {
-                        finality: &finality,
-                        block: &header,
-                        world: &world,
-                    },
-                    configuration.chain_id,
-                    &configuration.network_id,
-                    &genesis_hash,
-                    &expectation,
-                )?;
+                if action == "verify-activation-transition" {
+                    let expectation: ActivationRecordExpectation =
+                        serde_json::from_slice(&query).map_err(|error| error.to_string())?;
+                    result["activation_transition"] = inspect_activation_transition(
+                        ActivationBoundaryEvidence {
+                            finality: &prior,
+                            block: &prior_header,
+                            world: &prior_world,
+                        },
+                        ActivationBoundaryEvidence {
+                            finality: &finality,
+                            block: &header,
+                            world: &world,
+                        },
+                        configuration.chain_id,
+                        &configuration.network_id,
+                        &genesis_hash,
+                        &expectation,
+                    )?;
+                } else {
+                    if !links_finalized_predecessor(&prior, &finality, &header) {
+                        return Err("settlement proofs do not link adjacent certified blocks".into());
+                    }
+                    let (_, _, previous_timestamp) =
+                        verified_consensus_position(&prior.record, &authority)?;
+                    let query: CandidateReadQuery =
+                        serde_json::from_slice(&query).map_err(|error| error.to_string())?;
+                    result["candidate_settlement"] = inspect_settlement_inclusion(
+                        CandidateWorld {
+                            world: &prior_world,
+                            finality: &prior.record,
+                            state_root: prior_header.state_root,
+                            consensus_time: previous_timestamp,
+                        },
+                        CandidateWorld {
+                            world: &world,
+                            finality: verified,
+                            state_root,
+                            consensus_time: timestamp_unix,
+                        },
+                        configuration.chain_id,
+                        &genesis_hash,
+                        query,
+                    )?;
+                }
             } else if action == "verify-activation-record" {
                 let expectation: ActivationRecordExpectation =
                     serde_json::from_slice(&query).map_err(|error| error.to_string())?;
