@@ -2,15 +2,23 @@
 //! local encrypt and reveal without starting any validator or network.
 #![cfg(test)]
 use super::super::processing_pipeline::{
-    qualify_processing_vertex, AuthenticatedProcessingOpening, RevealedProcessingPayload,
+    processing_namespace, qualify_processing_vertex, AuthenticatedProcessingOpening,
+    NativeProcessingContext, NativeProcessingRecovery, ProcessingCompletionEvidence,
+    ProcessingSource, RevealedProcessingPayload,
 };
 use super::{
     processing_admission::CandidateAdmission,
     processing_execution::{
         execute_protected_candidate, replay_protected_candidate, CandidateActionOutcome,
-        CandidateDispatch, CandidateSlot, PreparedProtectedAction, ProtectedCandidateContext,
+        CandidateDispatch, CandidateSlot, PreparedProtectedAction, ProtectedAdmissionRecovery,
+        ProtectedCandidateContext, ProtectedRecoveryTerms,
     },
+    tests::Scratch,
     FinalizedSnapshot, Position, WorldState,
+};
+use crate::services::processing_store::{
+    PendingProcessingStore, ProcessingStoreError, ProcessingStoreLimits,
+    PROCESSING_INTAKE_HEADROOM_BYTES,
 };
 use std::{
     path::Path,
@@ -33,7 +41,8 @@ use synergy_etdag::{
     },
     execution::{
         processing_genesis_group_root, ProcessingDecryptShare, ProcessingOrderGroup,
-        ProcessingRevealPermission, ProcessingVertex,
+        ProcessingProposalMaterial, ProcessingReadyView, ProcessingRevealPermission,
+        ProcessingSelection, ProcessingVertex,
     },
     AvailabilityCertificate, AvailabilityVote, CertifiedEnvelopeRef, EtdagDigest, EtdagParameters,
     ProcessingContext, ProcessingEnvelope, ProcessingEnvelopeAad, TargetAdmissionContextV3,
@@ -43,16 +52,42 @@ use synergy_execution::{
     processing_member_claim, processing_member_claim_optional, BudgetedExecutionCandidate,
     ParentProcessingRegistry, ProcessingReadinessVerifier, ProcessingReadyRecord,
 };
-use synergy_posy::{FinalizedBlockRecord, ValidatorRecord, ValidatorStatus};
+use synergy_posy::{
+    block_vote_signing_bytes, BlockVote, CertifiedCandidateSubject, ConsensusObjectContext,
+    FinalizedBlockRecord, ProposalDeliveryPhase, ProposalDeliveryStatement,
+    ProposalValidationCertificate, SimplifiedFinalityParent, SimplifiedQuorumCertificate,
+    ThreeQcFinality, ValidatorRecord, ValidatorStatus,
+};
 use synergy_state::{
     state_root,
     world_resources::{BudgetedWorld, WorldResourceBudget},
     ProtocolChange, StateDiff,
 };
 
+struct RetainedNativeFixture {
+    vertex: ProcessingVertex<CandidateAdmission>,
+    availability: AvailabilityCertificate,
+    parent: BudgetedExecutionCandidate,
+    validation: ProposalValidationCertificate,
+    latest: NativeSourceFixture,
+}
+
+struct NativeSourceFixture {
+    candidate: BudgetedExecutionCandidate,
+    witness: [SimplifiedQuorumCertificate; 3],
+    finalized: FinalizedBlockRecord,
+}
+
 pub(super) struct ClosedCandidateOrder {
     permission: ProcessingRevealPermission,
     world: BudgetedWorld,
+    native: Option<RetainedNativeFixture>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct NativeSourceTerms<'a> {
+    pub(super) source: &'a FinalizedSnapshot<'a>,
+    pub(super) recovery: ProtectedRecoveryTerms<'a>,
 }
 
 pub(super) struct OpenedCandidateEnvelope {
@@ -60,6 +95,7 @@ pub(super) struct OpenedCandidateEnvelope {
     envelope: ProcessingEnvelope,
     context: ProcessingContext,
     order: Option<ClosedCandidateOrder>,
+    pub(super) native_result: Option<(Arc<BudgetedWorld>, CandidateActionOutcome)>,
 }
 
 pub(super) enum CandidateEnvelopeProfile {
@@ -282,27 +318,282 @@ fn err(error: impl std::fmt::Debug) -> String {
     format!("isolated ETDAG crypto fixture refused: {error:?}")
 }
 
+
+fn fixture_sign(
+    engine: &Arc<Mutex<CryptoEngine>>,
+    signers: &[SecretBytes],
+    index: usize,
+    message: &[u8],
+) -> Result<Vec<u8>, String> {
+    engine
+        .lock()
+        .map_err(|_| "isolated APQE lock poisoned")?
+        .sign(
+            Algorithm::MlDsa65,
+            signers[index].as_bytes(),
+            message,
+            SignOptions::default(),
+        )
+        .map_err(err)
+}
+
+fn proof_candidate(
+    world: &BudgetedWorld,
+    namespace: &EtdagDigest,
+    height: u64,
+    parent: &SimplifiedFinalityParent,
+) -> Result<BudgetedExecutionCandidate, String> {
+    let state = BudgetedWorld::try_clone_world(world.as_ref(), world.budget()).map_err(err)?;
+    let parameters = EtdagParameters::default();
+    let ready = ProcessingReadyView {
+        namespace_root: namespace.clone(),
+        items: Vec::new(),
+    };
+    let material = ProcessingProposalMaterial {
+        material_version: 1,
+        profile_id: synergy_etdag::PROCESSING_PROFILE_ID.into(),
+        height,
+        namespace_root: namespace.clone(),
+        selection: ProcessingSelection {
+            parent_ready_root: ready.root().map_err(err)?,
+            maximum_gas: parameters.max_protected_gas,
+            maximum_bytes: parameters.max_protected_bytes,
+            item_indices: Vec::new(),
+            protected_gas: 0,
+            protected_bytes: 0,
+        },
+        transition_root: EtdagDigest::from_canonical("PW13_SIGNED_QUALIFICATION_PARENT", &height)
+            .map_err(err)?,
+        ordered_group: None,
+        epoch_transition_subject_root: None,
+    };
+    let mut candidate = BudgetedExecutionCandidate {
+        resource_permit: None,
+        height,
+        block_id: String::new(),
+        parent_block_id: parent.block_id().into(),
+        protected_execution_root: synergy_block::hash_block_bytes(
+            &material.commitment_bytes().map_err(err)?,
+        ),
+        protected_material: material.into(),
+        state_root: state_root(state.as_ref()).map_err(err)?,
+        transactions: Vec::new(),
+        receipts: Vec::new(),
+        state: Arc::new(state),
+    };
+    candidate.block_id = candidate.commitment_id()?;
+    Ok(candidate)
+}
+
+fn next_fixture_parent(
+    qc: &SimplifiedQuorumCertificate,
+) -> Result<SimplifiedFinalityParent, String> {
+    Ok(SimplifiedFinalityParent::QuorumCertificate {
+        height: qc.context.height,
+        block_id: qc.block_id.clone(),
+        qc_id: qc.id().map_err(err)?,
+    })
+}
+
+fn certify_fixture_qc(
+    candidate: &BudgetedExecutionCandidate,
+    parent: &SimplifiedFinalityParent,
+    authority: &super::super::authority::VerifiedAuthority,
+    engine: &Arc<Mutex<CryptoEngine>>,
+    signers: &[SecretBytes],
+) -> Result<SimplifiedQuorumCertificate, String> {
+    let context =
+        ConsensusObjectContext::for_height(&authority.epoch, candidate.height, 0).map_err(err)?;
+    let votes = authority
+        .registry
+        .active()
+        .enumerate()
+        .take(signers.len() - 1)
+        .map(|(index, signer)| {
+            let mut vote = BlockVote {
+                context: context.clone(),
+                block_id: candidate.block_id.clone(),
+                parent_block_id: candidate.parent_block_id.clone(),
+                parent: parent.clone(),
+                takeover_tc_id: None,
+                protected_execution_root: candidate.protected_execution_root.clone(),
+                validator_id: signer.validator_id.clone(),
+                key_id: signer.consensus_key_id.clone(),
+                signature: Vec::new(),
+            };
+            vote.signature = fixture_sign(
+                engine,
+                signers,
+                index,
+                &block_vote_signing_bytes(&vote).map_err(err)?,
+            )?;
+            Ok(vote)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    SimplifiedQuorumCertificate::from_votes(votes).map_err(err)
+}
+
+fn certify_fixture_source(
+    snapshot: &FinalizedSnapshot<'_>,
+    authority: &super::super::authority::VerifiedAuthority,
+    engine: &Arc<Mutex<CryptoEngine>>,
+    signers: &[SecretBytes],
+    budget: &Arc<WorldResourceBudget>,
+) -> Result<NativeSourceFixture, String> {
+    let source_height = snapshot.position.height;
+    let witness_tip = source_height
+        .checked_add(2)
+        .ok_or("fixture height overflow")?;
+    let world = BudgetedWorld::try_clone_world(snapshot.world, budget).map_err(err)?;
+    let namespace = processing_namespace(authority, budget)?;
+    let mut parent = authority.anchor_parent.clone();
+    let mut source_candidate = None;
+    let mut witness = Vec::new();
+    let mut finality = ThreeQcFinality::default();
+    for height in 1..=witness_tip {
+        let candidate = proof_candidate(&world, &namespace, height, &parent)?;
+        let qc = certify_fixture_qc(&candidate, &parent, authority, engine, signers)?;
+        parent = next_fixture_parent(&qc)?;
+        if height >= source_height {
+            finality.accept(qc.clone()).map_err(err)?;
+            witness.push(qc);
+        }
+        if height == source_height {
+            source_candidate = Some(candidate);
+        }
+    }
+    Ok(NativeSourceFixture {
+        candidate: source_candidate.expect("signed source candidate"),
+        witness: witness.try_into().expect("exact three QCs"),
+        finalized: finality
+            .last_finalized()
+            .expect("signed fixture finality")
+            .clone(),
+    })
+}
+
 pub(super) struct CandidateOrderFixture<'a> {
     authority: &'a super::super::authority::VerifiedAuthority,
     registry: &'a IngressKemKeyRegistry,
     engine: &'a Arc<Mutex<CryptoEngine>>,
     signers: &'a [SecretBytes],
     source: &'a FinalizedBlockRecord,
+    native_source: Option<&'a NativeSourceFixture>,
     budget: &'a Arc<WorldResourceBudget>,
 }
 
 impl CandidateOrderFixture<'_> {
     fn sign(&self, index: usize, message: &[u8]) -> Result<Vec<u8>, String> {
-        self.engine
-            .lock()
-            .map_err(|_| "isolated APQE lock poisoned")?
-            .sign(
-                Algorithm::MlDsa65,
-                self.signers[index].as_bytes(),
-                message,
-                SignOptions::default(),
-            )
-            .map_err(err)
+        fixture_sign(self.engine, self.signers, index, message)
+    }
+
+    fn certify_reveal_parent(
+        &self,
+        world: &BudgetedWorld,
+        open_world: &BudgetedWorld,
+        namespace: &EtdagDigest,
+        context: &ProcessingContext,
+        retained_source: &NativeSourceFixture,
+    ) -> Result<
+        (
+            BudgetedExecutionCandidate,
+            ProposalValidationCertificate,
+            NativeSourceFixture,
+        ),
+        String,
+    > {
+        let height = context.authority.target_height + 1;
+        let tail = &retained_source.witness[2];
+        let mut parent = next_fixture_parent(tail)?;
+        let mut witness = Vec::new();
+        let mut finalized_candidate = None;
+        let mut finality = ThreeQcFinality::default();
+        for preceding in tail.context.height + 1..height {
+            let state = if preceding + 1 == height {
+                open_world
+            } else {
+                retained_source.candidate.state.as_ref()
+            };
+            let candidate = proof_candidate(state, namespace, preceding, &parent)?;
+            let qc = certify_fixture_qc(
+                &candidate,
+                &parent,
+                self.authority,
+                self.engine,
+                self.signers,
+            )?;
+            parent = next_fixture_parent(&qc)?;
+            finality.accept(qc.clone()).map_err(err)?;
+            if finalized_candidate.is_none() {
+                finalized_candidate = Some(candidate);
+            }
+            witness.push(qc);
+        }
+        let latest = NativeSourceFixture {
+            candidate: finalized_candidate.ok_or("no certified predecessor candidate")?,
+            witness: witness
+                .try_into()
+                .map_err(|_| "expected three predecessor QCs")?,
+            finalized: finality
+                .last_finalized()
+                .ok_or("no finalized predecessor")?
+                .clone(),
+        };
+        let candidate = proof_candidate(world, namespace, height, &parent)?;
+        let context =
+            ConsensusObjectContext::for_height(&self.authority.epoch, height, 0).map_err(err)?;
+        let subject = CertifiedCandidateSubject::new(
+            context.clone(),
+            candidate.block_id.clone(),
+            candidate.parent_block_id.clone(),
+            parent,
+            candidate.protected_execution_root.clone(),
+        )
+        .map_err(err)?;
+        let echoes = self
+            .authority
+            .registry
+            .active()
+            .enumerate()
+            .take(self.signers.len() - 1)
+            .map(|(index, signer)| {
+                let mut echo = ProposalDeliveryStatement {
+                    context: context.clone(),
+                    phase: ProposalDeliveryPhase::Echo,
+                    candidate: subject.clone(),
+                    validator_id: signer.validator_id.clone(),
+                    key_id: signer.consensus_key_id.clone(),
+                    signature: Vec::new(),
+                };
+                echo.signature = self.sign(index, &echo.signing_bytes().map_err(err)?)?;
+                Ok(echo)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let validation = ProposalValidationCertificate {
+            context,
+            candidate: subject,
+            echoes,
+        };
+        Ok((candidate, validation, latest))
+    }
+
+    pub(super) fn native_snapshot<'a>(
+        &'a self,
+        registry: &'a super::CandidateProtectedAccounts<'a>,
+    ) -> Result<FinalizedSnapshot<'a>, String> {
+        let source = self.native_source.ok_or("missing signed source fixture")?;
+        let durable = synergy_state::FinalizedState {
+            finalized_height: source.candidate.height,
+            finalized_block_id: source.candidate.block_id.clone(),
+            state_root: source.candidate.state_root.clone(),
+        };
+        registry.finalized_snapshot(
+            source.candidate.state.as_ref().as_ref(),
+            &durable,
+            &source.finalized,
+            self.authority
+                .consensus_timestamp_unix(source.candidate.height)?,
+        )
     }
 
     pub(super) fn certify<T>(
@@ -390,7 +681,11 @@ impl CandidateOrderFixture<'_> {
             self.budget,
             authenticate,
         )?;
-        let namespace = context_root.clone();
+        let namespace = if self.native_source.is_some() {
+            processing_namespace(self.authority, self.budget)?
+        } else {
+            context_root.clone()
+        };
         let ordered = ProcessingOrderGroup {
             group_version: 1,
             namespace_root: namespace.clone(),
@@ -424,6 +719,10 @@ impl CandidateOrderFixture<'_> {
             .map_err(err)?
             .closed_by_successor
             .is_none());
+        let before_close = self
+            .native_source
+            .map(|_| BudgetedWorld::try_clone_world(world.as_ref(), self.budget).map_err(err))
+            .transpose()?;
         let close = processing_group_transition(
             world.as_ref(),
             &namespace,
@@ -444,6 +743,25 @@ impl CandidateOrderFixture<'_> {
         assert_eq!(&claim.member, item);
         let group =
             processing_group_state(world.as_ref(), &namespace, claim.group_number).map_err(err)?;
+        let native = self
+            .native_source
+            .map(|proof| {
+                let (parent, validation, latest) = self.certify_reveal_parent(
+                    &world,
+                    before_close.as_ref().expect("native ordering parent"),
+                    &namespace,
+                    context,
+                    proof,
+                )?;
+                Ok::<_, String>(RetainedNativeFixture {
+                    vertex,
+                    availability: certificate,
+                    parent,
+                    validation,
+                    latest,
+                })
+            })
+            .transpose()?;
         let permission = ProcessingRevealPermission {
             namespace_root: namespace,
             group_number: claim.group_number,
@@ -453,10 +771,23 @@ impl CandidateOrderFixture<'_> {
                 .ok_or("fixture predecessor is still open")?,
             processing_context_root: claim.member.processing_context_root,
             envelope_id: claim.member.envelope.tx_commitment,
-            parent_block_id: self.source.block_id.clone(),
-            validation_id: self.source.finality_certificate_id.clone(),
+            parent_block_id: native.as_ref().map_or_else(
+                || self.source.block_id.clone(),
+                |proof| proof.parent.block_id.clone(),
+            ),
+            validation_id: match &native {
+                Some(proof) => proof.validation.id().map_err(err)?,
+                None => self.source.finality_certificate_id.clone(),
+            },
         };
-        Ok((authorized, ClosedCandidateOrder { permission, world }))
+        Ok((
+            authorized,
+            ClosedCandidateOrder {
+                permission,
+                world,
+                native,
+            },
+        ))
     }
 }
 
@@ -490,6 +821,188 @@ impl ProcessingReadinessVerifier for FixtureOrder<'_> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn qualify_retained_replay(
+    authority: &super::super::authority::VerifiedAuthority,
+    source: &NativeSourceFixture,
+    context: &ProcessingContext,
+    order: &ClosedCandidateOrder,
+    opened: RevealedProcessingPayload<'_>,
+    shares: &[ProcessingDecryptShare],
+    terms: NativeSourceTerms<'_>,
+) -> Result<(Arc<BudgetedWorld>, CandidateActionOutcome), String> {
+    let retained = order
+        .native
+        .as_ref()
+        .ok_or("missing native reveal fixture")?;
+    let native = NativeProcessingContext::verify_pw13(
+        authority,
+        context,
+        &source.candidate,
+        &source.witness,
+    )?;
+    assert!(NativeProcessingContext::verify(
+        authority,
+        context,
+        ProcessingSource::Finalized {
+            candidate: &source.candidate,
+            witness: &source.witness
+        },
+    )
+    .is_err());
+
+    let mut altered_witness = source.witness.clone();
+    altered_witness[0].participants[0].signature[0] ^= 1;
+    assert!(NativeProcessingContext::verify_pw13(
+        authority,
+        context,
+        &source.candidate,
+        &altered_witness,
+    )
+    .is_err());
+
+    let recovery = ProtectedAdmissionRecovery::new(
+        terms.source.registry,
+        NativeProcessingRecovery {
+            source: &native,
+            reveal_parent: &retained.parent,
+            dag_parents: &[],
+        },
+        terms.recovery,
+    )?;
+    let snapshot = recovery.snapshot();
+    let parameters = authority.protected_parameters()?;
+    let latest_authorization_height = parameters
+        .protected_target_height(retained.latest.finalized.height)
+        .map_err(err)?;
+    let latest_context = ProcessingContext {
+        authority: authority
+            .protected_target(
+                Some(&retained.latest.finalized),
+                latest_authorization_height,
+            )?
+            .0,
+        ..context.clone()
+    };
+    let latest_native = NativeProcessingContext::verify_pw13(
+        authority,
+        &latest_context,
+        &retained.latest.candidate,
+        &retained.latest.witness,
+    )?;
+    let latest = terms
+        .source
+        .registry
+        .native_finalized_snapshot(&latest_native.pw13_finalized_source()?)?;
+    assert!(latest.position.height > snapshot.position.height);
+    let namespace = &order.permission.namespace_root;
+    let evidence = ProcessingCompletionEvidence::from_inputs(
+        &retained.vertex,
+        &retained.availability,
+        &retained.validation,
+        shares,
+        &opened.ready_record(&retained.parent.state)?,
+    );
+    let scratch = Scratch::new();
+    let budget = WorldResourceBudget::new(PROCESSING_INTAKE_HEADROOM_BYTES + 128 * 1024 * 1024);
+    // Use the existing native pending owner's completion workspace.
+    let limits = ProcessingStoreLimits {
+        slots: 2,
+        completion_bytes_per_item: 64 * 1024 * 1024,
+    };
+    let open = || {
+        PendingProcessingStore::open(&scratch.0, namespace.clone(), limits, &budget, &recovery)
+            .map_err(err)
+    };
+    let request_bytes = serde_json::to_vec(&retained.vertex.admission).map_err(err)?;
+    let mut pending = open()?;
+    let identity = pending
+        .admit(
+            context,
+            snapshot.position.consensus_time,
+            &request_bytes,
+            &recovery,
+        )
+        .map_err(err)?;
+    let mut changed = evidence.clone();
+    changed.reveal_validation.echoes[0].signature[0] ^= 1;
+    assert!(matches!(
+        pending.complete(&identity.envelope_id, &changed, &recovery),
+        Err(ProcessingStoreError::Verification(_))
+    ));
+    for share in &mut changed.shares {
+        share.share_bytes.fill(0);
+    }
+    assert!(!pending.has_completion(&identity.envelope_id));
+    pending
+        .complete(&identity.envelope_id, &evidence, &recovery)
+        .map_err(|error| format!("persist verified PW13 completion: {error:?}"))?;
+    drop(pending);
+    let mut pending = open().map_err(|error| format!("reopen PW13 pending journal: {error}"))?;
+    pending
+        .with_completion(
+            &identity.envelope_id,
+            &recovery,
+            |admission, proof, workspace| {
+                let execute = || -> Result<_, String> {
+                    assert_eq!(serde_json::to_vec(admission).map_err(err)?, request_bytes);
+                    assert_eq!(proof, &evidence);
+                    let recovered = recovery.recover(admission, proof, workspace)?;
+                    let publication_height = retained.parent.height + 1;
+                    let execution_height = publication_height + 1;
+                    let publication_slot = CandidateSlot {
+                        inclusion: Position {
+                            height: publication_height,
+                            consensus_time: authority
+                                .consensus_timestamp_unix(publication_height)?,
+                        },
+                        finalized_parent: &latest,
+                    };
+                    let parent = retained.parent.state.as_ref();
+                    let action = recovered.prepare(parent, publication_slot)?;
+                    let publication = ProtectedCandidateContext {
+                        parent_block_id: &retained.parent.block_id,
+                        namespace,
+                        parameters: &parameters,
+                        slot: publication_slot,
+                    };
+                    let (published, outcomes) =
+                        execute_protected_candidate(parent, publication, &[&action], &[&action])?;
+                    assert!(outcomes.is_empty());
+                    assert_eq!(published.state.accounts, parent.accounts);
+                    let execution = ProtectedCandidateContext {
+                        parent_block_id: &published.block_id,
+                        slot: CandidateSlot {
+                            inclusion: Position {
+                                height: execution_height,
+                                consensus_time: authority
+                                    .consensus_timestamp_unix(execution_height)?,
+                            },
+                            finalized_parent: &latest,
+                        },
+                        ..publication
+                    };
+                    let (settled, outcomes) =
+                        execute_protected_candidate(&published.state, execution, &[&action], &[])?;
+                    let [outcome] = <[_; 1]>::try_from(outcomes)
+                        .map_err(|_| "expected one native proof settlement")?;
+                    let original = serde_json::to_vec(&settled).map_err(err)?;
+                    let replayed = replay_protected_candidate(
+                        &original,
+                        &published.state,
+                        execution,
+                        &[&action],
+                        &[],
+                    )?;
+                    assert_eq!(replayed, settled);
+                    Ok((replayed.state, outcome))
+                };
+                execute().map_err(ProcessingStoreError::Verification)
+            },
+        )
+        .map_err(err)
+}
+
 /// Opens exactly the original supplied bytes. Report authentication and every
 /// KEM operation use the native APQE owner; no embedded crypto fallback exists.
 /// Passed chain/source/sender/nonce values are fixture coordinates only. This
@@ -504,6 +1017,7 @@ pub(super) fn open_candidate_envelope<T>(
     sender_id: &str,
     nonce: u64,
     profile: CandidateEnvelopeProfile,
+    native: Option<NativeSourceTerms<'_>>,
     before_open: impl FnOnce(
         &ProcessingEnvelope,
         &ProcessingContext,
@@ -594,36 +1108,54 @@ pub(super) fn open_candidate_envelope<T>(
         chain_id,
         network,
     );
+    let authority = match native {
+        Some(terms) => Arc::new(authority.qualification_with_processing_ingress(
+            registry.clone(),
+            super::inspection::hex_bytes(&terms.source.registry.network.genesis),
+        )),
+        None => authority,
+    };
+    let budget = WorldResourceBudget::new(128 * 1024 * 1024);
+    let native_source = native
+        .map(|terms| certify_fixture_source(terms.source, &authority, &engine, &signers, &budget))
+        .transpose()?;
+    let source = native_source
+        .as_ref()
+        .map_or(source, |proof| &proof.finalized);
     let context = ProcessingContext {
         context_version: 1,
         profile_id: profile.into(),
-        authority: TargetAdmissionContextV3 {
-            context_version: 1,
-            chain_id,
-            network_id: network.into(),
-            protocol_version: "v3".into(),
-            epoch: 1,
-            target_height,
-            target_height_offset: parameters.target_height_offset,
-            source_finalized_height: source_height,
-            source_finality_context_root: super::super::authority::processing_finality_root(
-                source,
-            )?
-            .0,
-            active_validator_set_root: authority.epoch.active_validator_set_root.clone(),
-            validator_consensus_key_root: authority.epoch.validator_consensus_key_root.clone(),
-            frozen_voting_weight_root: authority.epoch.frozen_voting_weight_root.clone(),
-            cluster_schedule_version: "1".into(),
-            finalized_epoch_seed_root: roots.clone(),
-            assigned_height_schedule_root: roots.clone(),
-            cluster_map_root: roots.clone(),
-            assigned_cluster_id: 1,
-            assigned_cluster_membership_root: roots.clone(),
-            assigned_cluster_validator_count: MEMBERS as u64,
-            assigned_cluster_total_voting_weight: MEMBERS as u64,
-            consensus_parameter_root: roots.clone(),
-            cryptographic_profile_root: roots,
-            ingress_kem_registry_root: registry.root().map_err(err)?,
+        authority: if native_source.is_some() {
+            authority.protected_target(Some(source), target_height)?.0
+        } else {
+            TargetAdmissionContextV3 {
+                context_version: 1,
+                chain_id,
+                network_id: network.into(),
+                protocol_version: "v3".into(),
+                epoch: 1,
+                target_height,
+                target_height_offset: parameters.target_height_offset,
+                source_finalized_height: source_height,
+                source_finality_context_root: super::super::authority::processing_finality_root(
+                    source,
+                )?
+                .0,
+                active_validator_set_root: authority.epoch.active_validator_set_root.clone(),
+                validator_consensus_key_root: authority.epoch.validator_consensus_key_root.clone(),
+                frozen_voting_weight_root: authority.epoch.frozen_voting_weight_root.clone(),
+                cluster_schedule_version: "1".into(),
+                finalized_epoch_seed_root: roots.clone(),
+                assigned_height_schedule_root: roots.clone(),
+                cluster_map_root: roots.clone(),
+                assigned_cluster_id: 1,
+                assigned_cluster_membership_root: roots.clone(),
+                assigned_cluster_validator_count: MEMBERS as u64,
+                assigned_cluster_total_voting_weight: MEMBERS as u64,
+                consensus_parameter_root: roots.clone(),
+                cryptographic_profile_root: roots,
+                ingress_kem_registry_root: registry.root().map_err(err)?,
+            }
         },
     };
     context.validate().map_err(err)?;
@@ -664,13 +1196,13 @@ pub(super) fn open_candidate_envelope<T>(
     envelope.refresh_capsule_roots().map_err(err)?;
     envelope.envelope_id = envelope.commitment().map_err(err)?;
     envelope.validate_context(&context).map_err(err)?;
-    let budget = WorldResourceBudget::new(128 * 1024 * 1024);
     let ordering = CandidateOrderFixture {
         authority: &authority,
         registry: &registry,
         engine: &engine,
         signers: &signers,
         source,
+        native_source: native_source.as_ref(),
         budget: &budget,
     };
     let (admission, order) = before_open(&envelope, &context, &ordering)?;
@@ -778,12 +1310,26 @@ pub(super) fn open_candidate_envelope<T>(
     {
         return Err("isolated ETDAG accepted substituted AAD".into());
     }
+    let native_result = match (native, native_source.as_ref(), order.as_ref()) {
+        (Some(terms), Some(source), Some(order)) => Some(qualify_retained_replay(
+            &authority,
+            source,
+            &context,
+            order,
+            opening.payload(&envelope, &context)?,
+            &shares.0[..threshold],
+            terms,
+        )?),
+        (Some(_), _, _) => return Err("native test did not retain its complete proof".into()),
+        (None, _, _) => None,
+    };
     Ok((
         OpenedCandidateEnvelope {
             opening,
             envelope,
             context,
             order,
+            native_result,
         },
         admission,
     ))
@@ -809,6 +1355,7 @@ fn isolated_etdag_candidate_missing_provider_cannot_fall_back() {
         "fixture-sender",
         0,
         CandidateEnvelopeProfile::Transfer,
+        None,
         |_, _, _| Ok(((), None)),
     )
     .is_err());
@@ -828,6 +1375,7 @@ fn isolated_etdag_candidate_real_native_mlkem_roundtrip_and_rejection_checks() {
         "fixture-sender",
         9,
         CandidateEnvelopeProfile::Transfer,
+        None,
         |_, _, _| Ok(((), None)),
     )
     .unwrap();

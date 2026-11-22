@@ -6,16 +6,20 @@ use super::{
     sponsor_settlement::SponsoredOutcome,
     sponsored_admission::VerifiedSponsoredAdmission,
     transfer_admission::VerifiedTransferAdmission,
-    CandidateProtectedAccounts, CandidateTransferExecution, FinalizedSnapshot, Position,
+    CandidateProtectedAccounts, CandidateTransferExecution, ChainId, FinalizedSnapshot, Position,
     TransferCandidateContent,
 };
-use crate::services::processing_pipeline::RevealedProcessingPayload;
-use std::collections::BTreeMap;
+use crate::services::processing_pipeline::{
+    AuthenticatedProcessingOpening, NativeProcessingRecovery, ProcessingCompletionEvidence,
+    Pw13FinalizedSource, RevealedProcessingPayload,
+};
+use crate::services::processing_store::ProcessingAdmissionAuthenticator;
+use std::{collections::BTreeMap, sync::Arc};
 use synergy_address_engine::apqe::provider::{variants::Mldsa87, PqProvider};
 use synergy_aegis::ApqeIdentityVerifier;
 use synergy_etdag::{
     execution::processing_admission_authorization_root, EtdagDigest, EtdagParameters,
-    ProcessingContext,
+    ProcessingContext, ProcessingEnvelope,
 };
 use synergy_execution::{
     decode_budgeted_pw13_engineering_candidate, processing_group_state, verify_processing_payload,
@@ -24,7 +28,7 @@ use synergy_execution::{
 };
 use synergy_state::{
     state_root,
-    world_resources::{BudgetedWorld, WorldResourcePermit},
+    world_resources::{BudgetedWorld, WorldResourceBudget, WorldResourcePermit},
     WorldState,
 };
 
@@ -102,6 +106,180 @@ impl CandidateProtectedAccounts<'_> {
             valid_until_finalized_height,
             action,
         })
+    }
+}
+
+/// Metering and provider inputs come from the selected engineering rule set,
+/// never from the pending journal or the proposal under review.
+#[derive(Clone, Copy)]
+pub(super) struct ProtectedRecoveryTerms<'a> {
+    pub(super) provider: &'a PqProvider<Mldsa87>,
+    pub(super) sponsor_verifier: Option<&'a ApqeIdentityVerifier>,
+    pub(super) fee_schedule: &'a FeeSchedule,
+    pub(super) metered_gas: u64,
+}
+
+pub(super) struct RecoveredProtectedAction<'a> {
+    opening: AuthenticatedProcessingOpening,
+    admission: AuthorizedCandidateAdmission,
+    source: FinalizedSnapshot<'a>,
+    context: &'a ProcessingContext,
+    envelope: &'a ProcessingEnvelope,
+    terms: ProtectedRecoveryTerms<'a>,
+}
+
+impl RecoveredProtectedAction<'_> {
+    pub(super) fn prepare<'a>(
+        &'a self,
+        parent: &'a BudgetedWorld,
+        slot: CandidateSlot<'a>,
+    ) -> Result<PreparedProtectedAction<'a>, String> {
+        PreparedProtectedAction::prepare(
+            CandidateDispatch {
+                source: &self.source,
+                provider: self.terms.provider,
+                sponsor_verifier: self.terms.sponsor_verifier,
+                fee_schedule: self.terms.fee_schedule,
+                admission: &self.admission,
+            },
+            self.opening.payload(self.envelope, self.context)?,
+            parent,
+            slot,
+        )
+    }
+}
+
+impl CandidateProtectedAccounts<'_> {
+    pub(super) fn native_finalized_snapshot<'a>(
+        &'a self,
+        verified: &Pw13FinalizedSource<'a>,
+    ) -> Result<FinalizedSnapshot<'a>, String> {
+        if ChainId::from_u64(verified.context.authority.chain_id).as_be_bytes()
+            != &self.network.native_chain
+            || super::inspection::hex_bytes(&self.network.genesis) != verified.genesis_hash
+            || verified.consensus_time == 0
+        {
+            return Err(
+                "protected recovery differs from the authenticated chain or Genesis".into(),
+            );
+        }
+        Ok(FinalizedSnapshot {
+            registry: self,
+            world: verified.world,
+            position: Position {
+                height: verified.record.height,
+                consensus_time: verified.consensus_time,
+            },
+            processing_finality_root: crate::services::authority::processing_finality_root(
+                verified.record,
+            )?,
+        })
+    }
+}
+
+/// Authenticates the unchanged pending journal against the certified source.
+pub(super) struct ProtectedAdmissionRecovery<'a> {
+    registry: &'a CandidateProtectedAccounts<'a>,
+    recovery: NativeProcessingRecovery<'a>,
+    snapshot: FinalizedSnapshot<'a>,
+    context: &'a ProcessingContext,
+    parameters: EtdagParameters,
+    terms: ProtectedRecoveryTerms<'a>,
+}
+
+impl<'a> ProtectedAdmissionRecovery<'a> {
+    pub(super) fn new(
+        registry: &'a CandidateProtectedAccounts<'a>,
+        recovery: NativeProcessingRecovery<'a>,
+        terms: ProtectedRecoveryTerms<'a>,
+    ) -> Result<Self, String> {
+        let verified = recovery.source.pw13_finalized_source()?;
+        let snapshot = registry.native_finalized_snapshot(&verified)?;
+        Ok(Self {
+            registry,
+            recovery,
+            snapshot,
+            context: verified.context,
+            parameters: verified.authority.protected_parameters()?,
+            terms,
+        })
+    }
+
+    pub(super) fn snapshot(&self) -> &FinalizedSnapshot<'a> {
+        &self.snapshot
+    }
+
+    fn authorize(
+        &self,
+        admission: &CandidateAdmission,
+    ) -> Result<AuthorizedCandidateAdmission, String> {
+        self.registry.authorize_processing_candidate(
+            self.context,
+            admission,
+            CandidateAuthorizationContext {
+                source: &self.snapshot,
+                provider: self.terms.provider,
+                sponsor_verifier: self.terms.sponsor_verifier,
+                parameters: &self.parameters,
+                fee_schedule: self.terms.fee_schedule,
+                metered_gas: self.terms.metered_gas,
+            },
+        )
+    }
+
+    pub(super) fn recover<'b>(
+        &'b self,
+        admission: &'b CandidateAdmission,
+        evidence: &ProcessingCompletionEvidence,
+        budget: &Arc<WorldResourceBudget>,
+    ) -> Result<RecoveredProtectedAction<'b>, String> {
+        let (opening, authorized) =
+            self.recovery
+                .recover_pw13(admission, evidence, budget, |original| {
+                    self.authorize(original)
+                })?;
+        Ok(RecoveredProtectedAction {
+            opening,
+            admission: authorized,
+            source: FinalizedSnapshot {
+                registry: self.registry,
+                world: self.snapshot.world,
+                position: self.snapshot.position,
+                processing_finality_root: self.snapshot.processing_finality_root.clone(),
+            },
+            context: self.context,
+            envelope: &admission.envelope,
+            terms: self.terms,
+        })
+    }
+}
+
+impl ProcessingAdmissionAuthenticator<CandidateAdmission> for ProtectedAdmissionRecovery<'_> {
+    fn verify(
+        &self,
+        context: &ProcessingContext,
+        timestamp: u64,
+        admission: &CandidateAdmission,
+    ) -> Result<(), String> {
+        if context != self.context || timestamp != self.snapshot.position.consensus_time {
+            return Err(
+                "protected journal changed the authenticated context or source time".into(),
+            );
+        }
+        self.authorize(admission).map(drop)
+    }
+
+    fn verify_completion(
+        &self,
+        context: &ProcessingContext,
+        admission: &CandidateAdmission,
+        evidence: &ProcessingCompletionEvidence,
+        budget: &Arc<WorldResourceBudget>,
+    ) -> Result<(), String> {
+        if context != self.context {
+            return Err("protected completion changed the authenticated context".into());
+        }
+        self.recover(admission, evidence, budget).map(drop)
     }
 }
 

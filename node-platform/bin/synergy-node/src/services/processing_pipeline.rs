@@ -167,11 +167,31 @@ impl std::ops::Deref for ProcessingSourceWorld<'_> {
         }
     }
 }
+fn is_pw13_context(context: &ProcessingContext) -> bool {
+    use synergy_etdag::admission::{
+        PW13_SPONSOR_CANDIDATE_PROFILE_ID, PW13_TRANSFER_CANDIDATE_PROFILE_ID,
+    };
+    matches!(
+        context.profile_id.as_str(),
+        PW13_SPONSOR_CANDIDATE_PROFILE_ID | PW13_TRANSFER_CANDIDATE_PROFILE_ID
+    )
+}
+
+pub(super) struct Pw13FinalizedSource<'a> {
+    pub(super) context: &'a ProcessingContext,
+    pub(super) authority: &'a VerifiedAuthority,
+    pub(super) world: &'a WorldState,
+    pub(super) record: &'a synergy_posy::FinalizedBlockRecord,
+    pub(super) genesis_hash: &'a str,
+    pub(super) consensus_time: u64,
+}
+
 pub(super) struct NativeProcessingContext<'a> {
     context: &'a ProcessingContext,
     authority: &'a VerifiedAuthority,
     lineage: &'a VerifiedAuthority,
     world: ProcessingSourceWorld<'a>,
+    finalized: Option<synergy_posy::FinalizedBlockRecord>,
     timestamp: u64,
     _permit: WorldResourcePermit,
 }
@@ -225,7 +245,7 @@ impl<'a> NativeProcessingContext<'a> {
         budget: &Arc<WorldResourceBudget>,
         transition: Option<&super::authority::VerifiedTransitionContext>,
     ) -> Result<Self, String> {
-        let (timestamp, permit) = {
+        let (timestamp, finalized, permit) = {
             let verified = NativeProcessingContext::verify_in_with_transition(
                 authority,
                 context,
@@ -236,13 +256,14 @@ impl<'a> NativeProcessingContext<'a> {
                 budget,
                 transition,
             )?;
-            (verified.timestamp, verified._permit)
+            (verified.timestamp, verified.finalized, verified._permit)
         };
         Ok(Self {
             context,
             authority,
             lineage: authority,
             timestamp,
+            finalized,
             world: ProcessingSourceWorld::Shared(Arc::clone(&candidate.state)),
             _permit: permit,
         })
@@ -276,6 +297,65 @@ impl<'a> NativeProcessingContext<'a> {
         if context.profile_id != synergy_etdag::PROCESSING_PROFILE_ID {
             return Err("unsupported live processing profile".into());
         }
+        Self::verify_bound_source(authority, context, source, budget, transition)
+    }
+
+    /// Protected replay starts from a genuine three-QC source in the existing
+    /// signed processing lineage. This constructor grants no activation.
+    pub(super) fn verify_pw13(
+        authority: &'a VerifiedAuthority,
+        context: &'a ProcessingContext,
+        candidate: &'a BudgetedExecutionCandidate,
+        witness: &'a [SimplifiedQuorumCertificate; 3],
+    ) -> Result<Self, String> {
+        if !is_pw13_context(context) || !authority.processing_profile_enabled() {
+            return Err(
+                "PW13 replay requires a signed processing policy and protected context".into(),
+            );
+        }
+        Self::verify_bound_source(
+            authority,
+            context,
+            ProcessingSource::Finalized { candidate, witness },
+            candidate.state.budget(),
+            None,
+        )
+    }
+
+    pub(super) fn pw13_finalized_source(&self) -> Result<Pw13FinalizedSource<'_>, String> {
+        if !is_pw13_context(self.context) {
+            return Err("protected replay requires its original PW13 context".into());
+        }
+        let record = self
+            .finalized
+            .as_ref()
+            .ok_or("PW13 replay requires a finalized source")?;
+        let synergy_posy::SimplifiedFinalityParent::Genesis { genesis_hash, .. } =
+            &self.lineage.autonomous_processing_origin().anchor_parent
+        else {
+            return Err("protected replay lacks its authenticated Genesis anchor".into());
+        };
+        let owner = self
+            .lineage
+            .authenticated_history_ref_at(record.height)
+            .ok_or("protected replay lacks original finalized time authority")?;
+        Ok(Pw13FinalizedSource {
+            context: self.context,
+            authority: self.authority,
+            world: &self.world,
+            record,
+            genesis_hash,
+            consensus_time: owner.consensus_timestamp_unix(record.height)?,
+        })
+    }
+
+    fn verify_bound_source(
+        authority: &'a VerifiedAuthority,
+        context: &'a ProcessingContext,
+        source: ProcessingSource<'a>,
+        budget: &Arc<WorldResourceBudget>,
+        transition: Option<&super::authority::VerifiedTransitionContext>,
+    ) -> Result<Self, String> {
         context.validate().map_err(err)?;
         if let Some(transition) = transition {
             transition.verify_current(authority)?;
@@ -365,6 +445,7 @@ impl<'a> NativeProcessingContext<'a> {
             authority,
             lineage: authority,
             world: ProcessingSourceWorld::Borrowed(world),
+            finalized: record,
             timestamp,
             _permit: permit,
         })
@@ -814,26 +895,35 @@ impl<'a> NativeProcessingParent<'a> {
         vertex: &NativeProcessingVertex<'_>,
         budget: &Arc<WorldResourceBudget>,
     ) -> Result<ProcessingRevealPermission, String> {
+        self.reveal_member_permission(vertex.source.authority, &vertex.member, budget)
+    }
+
+    fn reveal_member_permission(
+        &self,
+        original_authority: &VerifiedAuthority,
+        member: &ProcessingGroupMember,
+        budget: &Arc<WorldResourceBudget>,
+    ) -> Result<ProcessingRevealPermission, String> {
         let validation_id = self
             .validation_id
             .as_ref()
             .ok_or("Genesis does not authorize processing reveal")?;
         let world = self.world().as_ref();
         let _scratch = budget.reserve(128 * 1024).map_err(err)?;
-        if processing_namespace(vertex.source.authority, budget)? != self.namespace {
+        if processing_namespace(original_authority, budget)? != self.namespace {
             return Err("processing reveal has foreign frozen authority".into());
         }
-        let request = &vertex.vertex.admission.request;
+        let envelope = &member.envelope;
         let claim = synergy_execution::processing_member_claim(
             world,
-            &request.sender_wallet,
-            request.sender_nonce,
+            &envelope.sender_id,
+            envelope.nonce_slot,
         )
         .map_err(err)?;
         let group =
             synergy_execution::processing_group_state(world, &self.namespace, claim.group_number)
                 .map_err(err)?;
-        if claim.member != vertex.member || group.group_root != claim.group_root {
+        if claim.member != *member || group.group_root != claim.group_root {
             return Err("processing reveal differs from original assignment".into());
         }
         let permission = ProcessingRevealPermission {
@@ -843,8 +933,8 @@ impl<'a> NativeProcessingParent<'a> {
             successor_root: group
                 .closed_by_successor
                 .ok_or("processing reveal precedes successor closure")?,
-            processing_context_root: request.context_root.clone(),
-            envelope_id: request.envelope.envelope_id.clone(),
+            processing_context_root: member.processing_context_root.clone(),
+            envelope_id: envelope.tx_commitment.clone(),
             parent_block_id: self.block_id.to_owned(),
             validation_id: validation_id.clone(),
         };
@@ -1678,8 +1768,8 @@ pub(crate) struct ProcessingCompletionEvidence {
 }
 
 impl ProcessingCompletionEvidence {
-    pub(super) fn from_inputs(
-        vertex: &ProcessingVertex,
+    pub(super) fn from_inputs<A: ProcessingVertexAdmission>(
+        vertex: &ProcessingVertex<A>,
         availability: &AvailabilityCertificate,
         reveal_validation: &ProposalValidationCertificate,
         shares: &[ProcessingDecryptShare],
@@ -1699,6 +1789,36 @@ impl ProcessingCompletionEvidence {
             record: record.clone(),
         }
     }
+
+    fn reconstruct_vertex<A: ProcessingVertexAdmission + Clone>(
+        &self,
+        admission: &A,
+        budget: &Arc<WorldResourceBudget>,
+    ) -> Result<(ProcessingVertex<A>, WorldResourcePermit), String> {
+        // Charge the transient copy before borrowing it for native verification.
+        let permit = reserve(
+            &(
+                admission,
+                &self.envelope_ref,
+                &self.parents,
+                &self.author_id,
+                &self.key_id,
+                &self.author_signature,
+            ),
+            budget,
+        )?;
+        let vertex = ProcessingVertex {
+            vertex_version: self.vertex_version,
+            admission: admission.clone(),
+            envelope_ref: self.envelope_ref.clone(),
+            parents: self.parents.clone(),
+            author_id: self.author_id.clone(),
+            key_id: self.key_id.clone(),
+            author_signature: self.author_signature.clone(),
+        };
+        Ok((vertex, permit))
+    }
+
 }
 
 /// Resolution is supplied by the existing owner from its retained candidate and
@@ -1720,6 +1840,76 @@ impl NativeProcessingRecovery<'_> {
         let completion = self.recover(admission, evidence, budget)?;
         action(&completion)
     }
+    /// The protected carrier shares the native author, weighted availability,
+    /// closed-parent and threshold checks. Authorization is still verified by
+    /// the protected account owner against the independently selected source.
+    pub(super) fn recover_pw13<A: ProcessingVertexAdmission + Clone, T>(
+        &self,
+        admission: &A,
+        evidence: &ProcessingCompletionEvidence,
+        budget: &Arc<WorldResourceBudget>,
+        authenticate: impl FnOnce(&A) -> Result<T, String>,
+    ) -> Result<(AuthenticatedProcessingOpening, T), String> {
+        if evidence.version != 1 || !is_pw13_context(self.source.context) {
+            return Err("unsupported durable PW13 completion".into());
+        }
+        // Charge the retained assignment separately. Vertex reconstruction
+        // and VC verification need disjoint scratch, which can be released
+        // before charging threshold reveal.
+        let _assignment = budget.reserve(128 * 1024).map_err(err)?;
+        let (member, authorized) = {
+            let (vertex, _vertex_copy) = evidence.reconstruct_vertex(admission, budget)?;
+            let (member, _, _proof, authorized) = verify_processing_vertex(
+                ProcessingVertexSource {
+                    authority: self.source.authority,
+                    context: self.source.context,
+                    registry: self.source.authority.protected_ingress_registry()?,
+                },
+                &vertex,
+                Some(&evidence.availability),
+                self.dag_parents,
+                budget,
+                authenticate,
+            )?;
+            (member, authorized)
+        };
+        let authority = self
+            .source
+            .reveal_authority(evidence.reveal_validation.context.height)?;
+        let permission = {
+            let parent = NativeProcessingParent::verify_in(
+                self.reveal_parent,
+                &evidence.reveal_validation,
+                authority,
+                budget,
+            )?;
+            parent.reveal_member_permission(self.source.authority, &member, budget)?
+        };
+        let envelope = admission.envelope();
+        let mut opening = AuthenticatedProcessingOpening::open_signed_shares(
+            authority,
+            envelope,
+            &permission,
+            &evidence.shares,
+            budget,
+        )?;
+        let record = ready_record_for_opening(
+            self.reveal_parent.state.as_ref().as_ref(),
+            &permission,
+            &envelope.aad.sender_id,
+            envelope.aad.nonce_slot,
+            opening.plaintext.as_bytes(),
+        )?;
+        if record != evidence.record {
+            return Err("durable PW13 READY differs from native reconstruction".into());
+        }
+        opening
+            .permit
+            .shrink(opening.plaintext_capacity + 128 * 1024)
+            .map_err(err)?;
+        Ok((opening, authorized))
+    }
+
     pub(super) fn recover(
         &self,
         admission: &synergy_etdag::WalletProcessingAdmission,
@@ -1729,17 +1919,7 @@ impl NativeProcessingRecovery<'_> {
         if evidence.version != 1 {
             return Err("unsupported durable processing completion".into());
         }
-        // Charge the owned reconstruction before cloning original wallet bytes.
-        let _vertex_copy = reserve(admission, budget)?;
-        let vertex = ProcessingVertex {
-            vertex_version: evidence.vertex_version,
-            admission: admission.clone(),
-            envelope_ref: evidence.envelope_ref.clone(),
-            parents: evidence.parents.clone(),
-            author_id: evidence.author_id.clone(),
-            key_id: evidence.key_id.clone(),
-            author_signature: evidence.author_signature.clone(),
-        };
+        let (vertex, _vertex_copy) = evidence.reconstruct_vertex(admission, budget)?;
         let verified = NativeProcessingVertex::verify(
             self.source,
             &vertex,

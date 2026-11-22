@@ -231,6 +231,20 @@ refuse the engineering profile. A future live route needs an approved
 profile, the native lineage and activation checks, and retained proof
 assembly through the validator lifecycle.
 
+Native retained-proof recovery now uses the existing pending journal,
+three-QC source verification, weighted availability and closed-order reveal
+checks for protected carriers. It derives the original source time and Genesis
+from authenticated authority, reconstructs the signed vertex, verifies the
+parent's original ECHOs and threshold shares, and recomputes the READY record.
+The candidate then replays from the original retained inputs at a separately
+verified finalized predecessor. Isolated signed fixtures persist and reopen
+sponsored commit, enrollment reveal and D/P transfer completions. They reject
+altered quorum and reveal signatures and verify the resulting commit, enrolled
+policy, fees, nonces and transfer balances. The fixtures use the established
+native completion workspace. The ordinary admission gate continues to require
+its own processing profile. Public activation, live acceptance and governance
+dispositions remain open.
+
 The offline settlement verifier checks the exact encrypted transfer and
 sponsored enrollment receipts against adjacent three-QC-certified blocks
 and their Worlds. It checks first appearance, the certified inclusion time,

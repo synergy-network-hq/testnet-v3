@@ -2090,13 +2090,29 @@ mod tests {
         };
         let limits = EtdagParameters::default();
         let pin = std::env::var("APQE_AUTHENTICATED_REPORT_SHA256").unwrap();
-        let open = |content: &[u8], authorized_intent: &[u8], snapshot: &FinalizedSnapshot<'_>,
-                    source: &FinalizedBlockRecord| {
+        let open = |content: &[u8],
+                    authorized_intent: &[u8],
+                    snapshot: &FinalizedSnapshot<'_>,
+                    source: &FinalizedBlockRecord,
+                    use_native: bool| {
             let sponsor = decode_sponsor(authorized_intent)?;
             etdag_candidate::open_candidate_envelope(
                 content, &report, &pin, 99999, source, &address, sponsor.nonce,
                 etdag_candidate::CandidateEnvelopeProfile::SponsoredEnrollment,
+                use_native.then_some(etdag_candidate::NativeSourceTerms {
+                    source: snapshot,
+                    recovery: super::processing_execution::ProtectedRecoveryTerms {
+                        provider: &provider,
+                        sponsor_verifier: Some(&verifier),
+                        fee_schedule: &schedule,
+                        metered_gas: 5,
+                    },
+                }),
                 |envelope, context, ordering| {
+                    let verified_snapshot = use_native
+                        .then(|| ordering.native_snapshot(&registry))
+                        .transpose()?;
+                    let snapshot = verified_snapshot.as_ref().unwrap_or(snapshot);
                     let resources = Pw13SponsoredResources {
                         genesis: sponsor.genesis,
                         action: sponsor.action,
@@ -2218,7 +2234,45 @@ mod tests {
             &first, &payload, [canonical_carrier.as_slice(), key.as_bytes(), first_signature.as_bytes()],
             None,
         );
-        let (first_opening, first_admission) = open(&first_content, &first, &snapshot, &certificate).unwrap();
+        let (first_opening, first_admission) =
+            open(&first_content, &first, &snapshot, &certificate, false).unwrap();
+        let retained_intent = commit_intent(0, 10, 6);
+        let retained_signature = verifier_test_signer(
+            &report,
+            report_pin,
+            signer.private_key.as_bytes(),
+            &retained_intent,
+        );
+        let retained_content = encode_sponsored_fixture(
+            &retained_intent,
+            &payload,
+            [
+                canonical_carrier.as_slice(),
+                key.as_bytes(),
+                retained_signature.as_bytes(),
+            ],
+            None,
+        );
+        let (native_opening, _) = open(
+            &retained_content,
+            &retained_intent,
+            &snapshot,
+            &certificate,
+            true,
+        )
+        .unwrap();
+        let (native_world, native_outcome) = native_opening.native_result.unwrap();
+        assert_eq!(
+            native_outcome,
+            CandidateActionOutcome::SponsoredEnrollment(CommitApplied, 10)
+        );
+        assert_eq!(native_world.accounts[&address].balance_nwei, 90);
+        assert_eq!(native_world.accounts[&address].nonce, 1);
+        assert_eq!(native_world.accounts[&schedule.collector].balance_nwei, 10);
+        assert!(registry
+            .pending_commit(native_world.as_ref().as_ref(), commitment)
+            .is_ok());
+
         let mut alternate_payload = payload.clone();
         alternate_payload[6] ^= 1;
         let alternate = intent_for(0, 10, 1, ENROLL_COMMIT, &alternate_payload);
@@ -2230,7 +2284,7 @@ mod tests {
             None,
         );
         let (altered_opening, altered_admission) =
-            open(&altered_content, &first, &snapshot, &certificate).unwrap();
+            open(&altered_content, &first, &snapshot, &certificate, false).unwrap();
         assert_eq!(
             registry
                 .execute_opened_sponsored_enrollment(
@@ -2480,8 +2534,62 @@ mod tests {
             [canonical_carrier.as_slice(), key.as_bytes(), signature.as_bytes()],
             Some(EnrollmentProofs { ordinary: &ordinary, recovery: &recovery, ownership: &ownership, salt: &salt }),
         );
-        let (reveal_opening, reveal_admission) =
-            open(&reveal_content, &reveal_intent, &snapshot, &certificate).unwrap();
+        let (reveal_opening, reveal_admission) = open(
+            &reveal_content,
+            &reveal_intent,
+            &snapshot,
+            &certificate,
+            false,
+        )
+        .unwrap();
+        let retained_reveal_intent = intent_for(2, 10, 8, ENROLL_REVEAL, &reveal);
+        let retained_reveal_signature = verifier_test_signer(
+            &report,
+            report_pin,
+            signer.private_key.as_bytes(),
+            &retained_reveal_intent,
+        );
+        let retained_reveal_content = encode_sponsored_fixture(
+            &retained_reveal_intent,
+            &reveal,
+            [
+                canonical_carrier.as_slice(),
+                key.as_bytes(),
+                retained_reveal_signature.as_bytes(),
+            ],
+            Some(EnrollmentProofs {
+                ordinary: &ordinary,
+                recovery: &recovery,
+                ownership: &ownership,
+                salt: &salt,
+            }),
+        );
+        let (native_reveal, _) = open(
+            &retained_reveal_content,
+            &retained_reveal_intent,
+            &snapshot,
+            &certificate,
+            true,
+        )
+        .unwrap();
+        let (native_world, native_outcome) = native_reveal.native_result.unwrap();
+        assert_eq!(
+            native_outcome,
+            CandidateActionOutcome::SponsoredEnrollment(RevealApplied, 10)
+        );
+        assert_eq!(native_world.accounts[&address].nonce, 3);
+        assert_eq!(native_world.accounts[&address].balance_nwei, 70);
+        assert_eq!(native_world.accounts[&target], AccountState::default());
+        let native_state = native_world.as_ref().as_ref();
+        assert!(registry.pending_commit(native_state, commitment).is_err());
+        assert_eq!(
+            registry
+                .read_policy(native_state, enrollment.account())
+                .unwrap()
+                .enrollment,
+            encoded
+        );
+
         let ordered_inclusion = Position {
             height: reveal_opening.envelope().aad.authorization_height + 3,
             ..position
@@ -3498,8 +3606,12 @@ mod tests {
                 &provider, snapshot, context, envelope, request, &limits, &schedule, 21_000,
             )
         };
-        let open = |bytes: &[u8], signed_intent: &[u8], nonce,
-                    snapshot: &FinalizedSnapshot<'_>, source: &FinalizedBlockRecord| {
+        let open_case = |bytes: &[u8],
+                         signed_intent: &[u8],
+                         nonce,
+                         snapshot: &FinalizedSnapshot<'_>,
+                         source: &FinalizedBlockRecord,
+                         use_native: bool| {
             let signed = CanonicalNativeIntent::decode(signed_intent, 128).unwrap();
             etdag_candidate::open_candidate_envelope(
                 bytes,
@@ -3510,7 +3622,20 @@ mod tests {
                 &address,
                 nonce,
                 etdag_candidate::CandidateEnvelopeProfile::Transfer,
+                use_native.then_some(etdag_candidate::NativeSourceTerms {
+                    source: snapshot,
+                    recovery: super::processing_execution::ProtectedRecoveryTerms {
+                        provider: &provider,
+                        sponsor_verifier: None,
+                        fee_schedule: &schedule,
+                        metered_gas: 21_000,
+                    },
+                }),
                 |envelope, context, ordering| {
+                    let verified_snapshot = use_native
+                        .then(|| ordering.native_snapshot(&registry))
+                        .transpose()?;
+                    let snapshot = verified_snapshot.as_ref().unwrap_or(snapshot);
                     recover_before_reveal(
                         snapshot,
                         context,
@@ -3537,8 +3662,71 @@ mod tests {
                 },
             )
         };
-        let (opened, admission) =
-            open(&content, &intent, body.transaction_nonce, &snapshot, &snapshot_proof).unwrap();
+        let open = |bytes: &[u8],
+                    signed_intent: &[u8],
+                    nonce,
+                    snapshot: &FinalizedSnapshot<'_>,
+                    source: &FinalizedBlockRecord| {
+            open_case(bytes, signed_intent, nonce, snapshot, source, false)
+        };
+        let retained_body = NativeIntentBody {
+            valid_until_finalized_height: 8,
+            ..body
+        };
+        let retained_intent = retained_body.encode(128).unwrap();
+        let retained_digest = CanonicalNativeIntent::decode(&retained_intent, 128)
+            .unwrap()
+            .digest()
+            .unwrap();
+        let retained_proofs = [(Role::D, 0), (Role::P, 1)].map(|(role, i)| RoleSignature {
+            role,
+            signature: provider
+                .sign(
+                    retained_digest.as_bytes(),
+                    &keys[i].1,
+                    SignOptions::Pure {
+                        context: NATIVE_TX_CONTEXT,
+                    },
+                )
+                .unwrap(),
+        });
+        let (retained_content, _) = transfer_frame(
+            &retained_intent,
+            retained_digest.as_bytes(),
+            &retained_proofs,
+        );
+        let (native_transfer, _) = open_case(
+            &retained_content,
+            &retained_intent,
+            body.transaction_nonce,
+            &snapshot,
+            &snapshot_proof,
+            true,
+        )
+        .unwrap();
+        let (native_world, native_outcome) = native_transfer.native_result.unwrap();
+        assert_eq!(
+            native_outcome,
+            CandidateActionOutcome::Transfer(CandidateTransferExecution {
+                fee_nwei: 840_000,
+                revert_reason: None,
+            })
+        );
+        assert_eq!(native_world.accounts[&address].nonce, 1);
+        assert_eq!(native_world.accounts[&address].balance_nwei, 59_993);
+        assert_eq!(native_world.accounts[&recipient_address].balance_nwei, 7);
+        assert_eq!(
+            native_world.accounts[&schedule.collector].balance_nwei,
+            840_000
+        );
+        let (opened, admission) = open(
+            &content,
+            &intent,
+            body.transaction_nonce,
+            &snapshot,
+            &snapshot_proof,
+        )
+        .unwrap();
         assert_eq!(opened.plaintext(), content);
         let original_request = make_admission(
             opened.envelope(),

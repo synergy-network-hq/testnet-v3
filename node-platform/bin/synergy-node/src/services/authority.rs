@@ -463,6 +463,27 @@ impl VerifiedAuthority {
         authority
     }
 
+    #[cfg(test)]
+    pub(super) fn qualification_with_processing_ingress(
+        &self,
+        registry: synergy_etdag::IngressKemKeyRegistry,
+        genesis_hash: String,
+    ) -> Self {
+        let mut authority = self.qualification_with_ingress(registry);
+        let policy = Arc::make_mut(authority.protected.as_mut().expect("fixture policy"));
+        policy.version = 2;
+        policy.cutoff_relationship =
+            synergy_genesis::authority::ProtectedCutoffRelationship::ProcessingGroupsV1;
+        let SimplifiedFinalityParent::Genesis {
+            genesis_hash: hash, ..
+        } = &mut authority.anchor_parent
+        else {
+            panic!("qualification authority lacks Genesis");
+        };
+        *hash = genesis_hash;
+        authority
+    }
+
     /// Exact deterministic time bound by signed policy, never a transaction or wall clock.
     pub fn consensus_timestamp_unix(&self, height: u64) -> Result<u64, String> {
         self.protected
