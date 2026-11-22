@@ -21,13 +21,13 @@ pub(super) fn path(slot: usize) -> String {
     format!("progress/{slot:04}.json")
 }
 #[allow(clippy::too_many_arguments)]
-fn verify(
+fn verify<A: ProcessingAdmissionRecord>(
     bytes: &[u8],
     namespace: &EtdagDigest,
     original: &EtdagDigest,
     context: &ProcessingContext,
-    admission: &WalletProcessingAdmission,
-    verifier: &impl ProcessingAdmissionAuthenticator,
+    admission: &A,
+    verifier: &impl ProcessingAdmissionAuthenticator<A>,
     budget: &Arc<WorldResourceBudget>,
     retained: bool,
 ) -> Result<StoredProgress, ProcessingStoreError> {
@@ -35,7 +35,7 @@ fn verify(
         serde_json::from_slice(bytes).map_err(|e| invalid(format!("processing progress: {e}")))?;
     if record.version != 1
         || &record.namespace_root != namespace
-        || record.identity != identity(admission)
+        || record.identity != admission.identity()
         || &record.admission_record_root != original
     {
         return Err(invalid(
@@ -51,14 +51,14 @@ fn verify(
     Ok(record)
 }
 #[allow(clippy::too_many_arguments)]
-pub(super) fn recover(
+pub(super) fn recover<A: ProcessingAdmissionRecord>(
     reader: &synergy_storage::AtomicStoreReader<'_>,
     slot: usize,
     namespace: &EtdagDigest,
     original: &EtdagDigest,
     context: &ProcessingContext,
-    admission: &WalletProcessingAdmission,
-    verifier: &impl ProcessingAdmissionAuthenticator,
+    admission: &A,
+    verifier: &impl ProcessingAdmissionAuthenticator<A>,
     budget: &Arc<WorldResourceBudget>,
 ) -> Result<Option<ProgressIndex>, ProcessingStoreError> {
     let Some(size) = reader.optional_record_bytes(path(slot))? else {
@@ -83,7 +83,7 @@ pub(super) fn recover(
         bytes: size,
     }))
 }
-impl PendingProcessingStore {
+impl<A: ProcessingAdmissionRecord> PendingProcessingStore<A> {
     /// Read already authenticated public reveal evidence without reopening a
     /// finalized worker. Reserve temporary decoding capacity from the shared
     /// pool; the quiescent item's released workspace is never grown again.
@@ -165,9 +165,9 @@ impl PendingProcessingStore {
     pub(crate) fn with_progress<T>(
         &mut self,
         envelope: &EtdagDigest,
-        verifier: &impl ProcessingAdmissionAuthenticator,
+        verifier: &impl ProcessingAdmissionAuthenticator<A>,
         action: impl FnOnce(
-            &WalletProcessingAdmission,
+            &A,
             Option<&ProcessingProgressEvidence>,
             &Arc<WorldResourceBudget>,
         ) -> Result<T, ProcessingStoreError>,
@@ -215,7 +215,7 @@ impl PendingProcessingStore {
         &mut self,
         envelope: &EtdagDigest,
         evidence: &ProcessingProgressEvidence,
-        verifier: &impl ProcessingAdmissionAuthenticator,
+        verifier: &impl ProcessingAdmissionAuthenticator<A>,
     ) -> Result<(), ProcessingStoreError> {
         let slot = self.progress_slot(envelope)?;
         let entry = self.slots[slot].as_ref().expect("located progress slot");

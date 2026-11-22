@@ -13,6 +13,9 @@ mod sponsor_settlement;
 #[path = "protected_etdag_candidate_tests.rs"]
 mod etdag_candidate;
 #[cfg(test)]
+#[path = "protected_processing_admission.rs"]
+mod processing_admission;
+#[cfg(test)]
 #[path = "protected_transfer_admission.rs"]
 mod transfer_admission;
 #[cfg(test)]
@@ -1853,6 +1856,7 @@ fn debug(error: impl std::fmt::Debug) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::processing_admission::{recover_before_reveal, CandidateAdmission, CandidateAuthorization};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use synergy_address_engine::apqe::{
@@ -2086,11 +2090,26 @@ mod tests {
                         &provider, &verifier, snapshot, context, envelope, request, &limits,
                         &schedule, 5,
                     );
-                    let admitted = authorize(&request)?;
                     let mut tampered = request.clone();
                     tampered.resources.maximum_total_fee[0] ^= 1;
                     assert!(authorize(&tampered).is_err());
-                    Ok(admitted)
+                    recover_before_reveal(
+                        snapshot,
+                        context,
+                        CandidateAdmission {
+                            envelope: envelope.clone(),
+                            authorization: CandidateAuthorization::SponsoredEnrollment(request),
+                        },
+                        |recovered_context, recovered| {
+                            let CandidateAuthorization::SponsoredEnrollment(proof) = &recovered.authorization else {
+                                return Err("recovered wrong PW13 admission type".into());
+                            };
+                            registry.verify_sponsored_admission(
+                                &provider, &verifier, snapshot, recovered_context,
+                                &recovered.envelope, proof, &limits, &schedule, 5,
+                            )
+                        },
+                    )
                 },
             )
         };
@@ -2653,9 +2672,9 @@ mod tests {
         .unwrap()
     }
 
-    struct Scratch(PathBuf);
+    pub(super) struct Scratch(pub(super) PathBuf);
     impl Scratch {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let path = std::env::temp_dir().join(format!(
                 "core-protected-accounts-{}-{}",
@@ -3340,7 +3359,20 @@ mod tests {
                 nonce,
                 etdag_candidate::CandidateEnvelopeProfile::Transfer,
                 |envelope, context| {
-                    authenticate(snapshot, envelope, context, &make_admission(envelope, &signed))
+                    recover_before_reveal(
+                        snapshot,
+                        context,
+                        CandidateAdmission {
+                            envelope: envelope.clone(),
+                            authorization: CandidateAuthorization::Transfer(make_admission(envelope, &signed)),
+                        },
+                        |recovered_context, recovered| {
+                            let CandidateAuthorization::Transfer(proof) = &recovered.authorization else {
+                                return Err("recovered wrong PW13 admission type".into());
+                            };
+                            authenticate(snapshot, &recovered.envelope, recovered_context, proof)
+                        },
+                    )
                 },
             )
         };

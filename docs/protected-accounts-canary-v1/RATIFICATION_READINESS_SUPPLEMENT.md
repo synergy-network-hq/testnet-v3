@@ -167,6 +167,16 @@ that owner and verifies the exact admission carrier and signature before
 publishing a ready transaction. The shared opening is the boundary for
 integrating the separately governed PW13 content decoder.
 
+The canonical pending processing store now accepts typed admission records.
+The protected fixtures persist each original encrypted enrollment or transfer
+request, reopen the store, and verify the recovered APQE proofs against the
+original authorized context and consensus timestamp before reveal. An exact
+retry returns the existing envelope identity. Changed request bytes and an
+incorrect source timestamp are rejected. The fixture then checks the same
+envelope's opening in the resulting settlement. Protected records require
+the corrected ML-KEM link. Qualification of live dispatch still requires the
+approved activation, fee reservation and certified processing transitions.
+
 For ACT-12 and TX-04, the ordered transfer candidate now distinguishes an
 included transfer failure from pre-inclusion refusal. It proposes paid reverts
 when a signed transfer could debit and credit at its finalized source, the

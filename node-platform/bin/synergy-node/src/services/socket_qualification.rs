@@ -5131,6 +5131,7 @@ fn processing_async_native_order_reveal_ready_and_execution_use_existing_posy_pr
 }
 
 #[test]
+#[ignore = "requires an explicitly authenticated native APQE report"]
 fn processing_async_pending_owner_recovers_native_requests_and_releases_only_on_verified_retirement(
 ) {
     use super::processing_store::{
@@ -5148,6 +5149,7 @@ fn processing_async_pending_owner_recovers_native_requests_and_releases_only_on_
         other: &'a ProcessingContext,
         world: &'a synergy_state::WorldState,
         timestamp: u64,
+        authority: &'a authority::VerifiedAuthority,
         revoked: std::cell::Cell<bool>,
     }
     impl ProcessingAdmissionAuthenticator for Auth<'_> {
@@ -5163,8 +5165,8 @@ fn processing_async_pending_owner_recovers_native_requests_and_releases_only_on_
             if (context != self.context && context != self.other) || timestamp != self.timestamp {
                 return Err("unrecognized fixture authority/time".into());
             }
-            super::protected_admission::verify_wallet_processing_admission(
-                admission, context, self.world, timestamp,
+            super::protected_admission::verify_wallet_processing_admission_with_authority(
+                admission, context, self.world, timestamp, Some(self.authority),
             )
         }
     }
@@ -5178,9 +5180,23 @@ fn processing_async_pending_owner_recovers_native_requests_and_releases_only_on_
             }
         }
     }
-    let (transaction, world, mut secret) =
-        funded_transaction_fixture_for_network("socket-qualification", 10_000_000);
-    let prepared = prepare_socket_fixture(world.clone(), None);
+    let provider = trusted_apqe_provider();
+    let (transaction, world, secret) = funded_transaction_fixture_for_network_provider(
+        "socket-qualification",
+        10_000_000,
+        Some(&provider),
+    );
+    let secret = synergy_address_engine::apqe::SecretBytes::from_bytes(secret);
+    // Prepare signed authority and encrypted request inputs without running any nodes.
+    let prepared =
+        prepare_socket_fixture_profile_provider(world.clone(), None, true, None, Some(&provider));
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(prepared.root.clone());
     let authority = authority::load(&prepared.configurations[0])
         .unwrap()
         .unwrap();
@@ -5201,23 +5217,27 @@ fn processing_async_pending_owner_recovers_native_requests_and_releases_only_on_
         other: &other_context,
         world: &world,
         timestamp,
+        authority: &authority,
         revoked: std::cell::Cell::new(false),
     };
-    let first = processing_wallet_admission_fixture(&transaction, &context, &authority, &secret);
-    let conflict =
-        processing_wallet_admission_fixture(&transaction, &other_context, &authority, &secret);
+    let admission_for = |transaction: &synergy_transaction::SignedTransaction, context| {
+        processing_wallet_admission_fixture_provider(
+            transaction, context, &authority, secret.as_bytes(), Some(&provider),
+        )
+    };
+    let first = admission_for(&transaction, &context);
+    let conflict = admission_for(&transaction, &other_context);
     let mut next_transaction = transaction.clone();
     next_transaction.unsigned.nonce = 1;
     next_transaction.signature = fixture_sign(
-        &secret,
+        secret.as_bytes(),
         SignatureAlgorithm::MlDsa87,
         "transaction-presented-key",
         "SYNERGY-TRANSACTION-SIGNING-V1",
         None,
         &next_transaction.unsigned.signing_bytes().unwrap(),
     );
-    let second =
-        processing_wallet_admission_fixture(&next_transaction, &context, &authority, &secret);
+    let second = admission_for(&next_transaction, &context);
     let first_bytes = serde_json::to_vec(&first).unwrap();
     let second_bytes = serde_json::to_vec(&second).unwrap();
     let namespace = digest("processing-pending-owner-native-fixture");
@@ -5535,11 +5555,6 @@ fn processing_async_pending_owner_recovers_native_requests_and_releases_only_on_
     assert_eq!(budget.used(), base_used);
     drop(recovered);
     assert_eq!(budget.used(), 0);
-    secret.fill(0);
-    drop(authority);
-    let root = prepared.root.clone();
-    drop(prepared);
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

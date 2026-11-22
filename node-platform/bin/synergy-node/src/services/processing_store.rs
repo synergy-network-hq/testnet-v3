@@ -9,6 +9,7 @@
 #[path = "processing_progress.rs"]
 mod progress;
 
+use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -87,12 +88,12 @@ pub(crate) struct ProcessingStoreLimits {
 /// Must resolve the frozen context and authorization timestamp from verified
 /// authority/finality, then verify the original native wallet signature against
 /// that snapshot. Disk contents are inputs to verification, never authority.
-pub(crate) trait ProcessingAdmissionAuthenticator {
+pub(crate) trait ProcessingAdmissionAuthenticator<A = WalletProcessingAdmission> {
     fn verify(
         &self,
         context: &ProcessingContext,
         authorization_timestamp_unix: u64,
-        admission: &WalletProcessingAdmission,
+        admission: &A,
     ) -> Result<(), String>;
     /// Only used after an exact length/hash match against an original accepted
     /// by this open store. Mutable authenticators keep full verification. A
@@ -101,7 +102,7 @@ pub(crate) trait ProcessingAdmissionAuthenticator {
         &self,
         context: &ProcessingContext,
         timestamp: u64,
-        admission: &WalletProcessingAdmission,
+        admission: &A,
     ) -> Result<(), String> {
         self.verify(context, timestamp, admission)
     }
@@ -110,7 +111,7 @@ pub(crate) trait ProcessingAdmissionAuthenticator {
     fn verify_retained_progress(
         &self,
         context: &ProcessingContext,
-        admission: &WalletProcessingAdmission,
+        admission: &A,
         evidence: &ProcessingProgressEvidence,
         budget: &Arc<WorldResourceBudget>,
     ) -> Result<(), String> {
@@ -129,7 +130,7 @@ pub(crate) trait ProcessingAdmissionAuthenticator {
     fn verify_progress(
         &self,
         _: &ProcessingContext,
-        _: &WalletProcessingAdmission,
+        _: &A,
         _: &ProcessingProgressEvidence,
         _: &Arc<WorldResourceBudget>,
     ) -> Result<(), String> {
@@ -138,7 +139,7 @@ pub(crate) trait ProcessingAdmissionAuthenticator {
     fn verify_completion(
         &self,
         _: &ProcessingContext,
-        _: &WalletProcessingAdmission,
+        _: &A,
         _: &ProcessingCompletionEvidence,
         _: &Arc<WorldResourceBudget>,
     ) -> Result<(), String> {
@@ -279,13 +280,16 @@ struct PendingEntry {
     workspace: Arc<WorldResourceBudget>,
 }
 
-pub(crate) struct PendingProcessingStore {
+/// The durable owner retains original bytes for its selected admission format.
+/// Format-specific authentication remains with the processing verifier.
+pub(crate) struct PendingProcessingStore<A = WalletProcessingAdmission> {
     store: AtomicStore,
     header: Header,
     slots: Vec<Option<PendingEntry>>,
     limits: ProcessingStoreLimits,
     budget: Arc<WorldResourceBudget>,
     _index_permit: WorldResourcePermit,
+    admission_type: PhantomData<fn() -> A>,
 }
 
 fn invalid(message: impl Into<String>) -> ProcessingStoreError {
@@ -454,20 +458,37 @@ fn read_reservation(bytes: usize) -> Result<usize, ProcessingStoreError> {
         .ok_or_else(|| WorldResourceError::ArithmeticOverflow.into())
 }
 
-fn identity(admission: &WalletProcessingAdmission) -> PendingProcessingIdentity {
-    PendingProcessingIdentity {
-        envelope_id: admission.request.envelope.envelope_id.clone(),
-        context_root: admission.request.context_root.clone(),
-        sender_wallet: admission.request.sender_wallet.clone(),
-        sender_nonce: admission.request.sender_nonce,
+pub(crate) trait ProcessingAdmissionRecord: serde::de::DeserializeOwned {
+    // Version one predates the corrected ML-KEM link. New formats start at
+    // version two and must never acquire legacy decapsulation on recovery.
+    const ALLOW_LEGACY_KEM_RECOVERY: bool = false;
+
+    fn validate_context(&self, context: &ProcessingContext) -> Result<(), synergy_etdag::EtdagError>;
+    fn identity(&self) -> PendingProcessingIdentity;
+}
+
+impl ProcessingAdmissionRecord for WalletProcessingAdmission {
+    const ALLOW_LEGACY_KEM_RECOVERY: bool = true;
+
+    fn validate_context(&self, context: &ProcessingContext) -> Result<(), synergy_etdag::EtdagError> {
+        self.request.validate_context(context)
+    }
+
+    fn identity(&self) -> PendingProcessingIdentity {
+        PendingProcessingIdentity {
+            envelope_id: self.request.envelope.envelope_id.clone(),
+            context_root: self.request.context_root.clone(),
+            sender_wallet: self.request.sender_wallet.clone(),
+            sender_nonce: self.request.sender_nonce,
+        }
     }
 }
 
-fn verify_stored(
+fn verify_stored<A: ProcessingAdmissionRecord>(
     record: &StoredPending,
     namespace: &EtdagDigest,
-    verifier: &impl ProcessingAdmissionAuthenticator,
-) -> Result<WalletProcessingAdmission, ProcessingStoreError> {
+    verifier: &impl ProcessingAdmissionAuthenticator<A>,
+) -> Result<A, ProcessingStoreError> {
     let admission = decode_stored(record, namespace)?;
     verifier
         .verify(
@@ -479,11 +500,11 @@ fn verify_stored(
     Ok(admission)
 }
 
-fn verify_retained_stored(
+fn verify_retained_stored<A: ProcessingAdmissionRecord>(
     record: &StoredPending,
     namespace: &EtdagDigest,
-    verifier: &impl ProcessingAdmissionAuthenticator,
-) -> Result<WalletProcessingAdmission, ProcessingStoreError> {
+    verifier: &impl ProcessingAdmissionAuthenticator<A>,
+) -> Result<A, ProcessingStoreError> {
     let admission = decode_stored(record, namespace)?;
     verifier
         .verify_retained(
@@ -495,11 +516,11 @@ fn verify_retained_stored(
     Ok(admission)
 }
 
-fn decode_stored(
+fn decode_stored<A: ProcessingAdmissionRecord>(
     record: &StoredPending,
     namespace: &EtdagDigest,
-) -> Result<WalletProcessingAdmission, ProcessingStoreError> {
-    if !matches!(record.version, 1 | 2)
+) -> Result<A, ProcessingStoreError> {
+    if !(record.version == 2 || (record.version == 1 && A::ALLOW_LEGACY_KEM_RECOVERY))
         || &record.namespace_root != namespace
         || record.authorization_timestamp_unix == 0
     {
@@ -508,29 +529,28 @@ fn decode_stored(
     if record.admission_json.is_empty() || record.admission_json.len() > MAX_REQUEST_BYTES {
         return Err(invalid("invalid stored processing request length"));
     }
-    let admission: WalletProcessingAdmission = serde_json::from_str(&record.admission_json)
+    let admission: A = serde_json::from_str(&record.admission_json)
         .map_err(|e| invalid(format!("stored processing request: {e}")))?;
     admission
-        .request
         .validate_context(&record.context)
         .map_err(|e| invalid(format!("pending processing context: {e:?}")))?;
     Ok(admission)
 }
 
-fn verify_completion(
+fn verify_completion<A: ProcessingAdmissionRecord>(
     bytes: &[u8],
     namespace: &EtdagDigest,
     original_root: &EtdagDigest,
     context: &ProcessingContext,
-    admission: &WalletProcessingAdmission,
-    verifier: &impl ProcessingAdmissionAuthenticator,
+    admission: &A,
+    verifier: &impl ProcessingAdmissionAuthenticator<A>,
     budget: &Arc<WorldResourceBudget>,
 ) -> Result<StoredCompletion, ProcessingStoreError> {
     let record: StoredCompletion = serde_json::from_slice(bytes)
         .map_err(|e| invalid(format!("processing completion: {e}")))?;
     if record.version != 1
         || &record.namespace_root != namespace
-        || record.identity != identity(admission)
+        || record.identity != admission.identity()
         || &record.admission_record_root != original_root
     {
         return Err(invalid(
@@ -543,7 +563,7 @@ fn verify_completion(
     Ok(record)
 }
 
-impl PendingProcessingStore {
+impl<A: ProcessingAdmissionRecord> PendingProcessingStore<A> {
     /// Install the exact original request and authenticated ordering evidence
     /// together. A donor's slot number, reveal progress and finalized bit do
     /// not cross this boundary. The owner must bind the member to a local QC.
@@ -551,8 +571,8 @@ impl PendingProcessingStore {
         &mut self,
         original: &[u8],
         donor_progress: &[u8],
-        verifier: &impl ProcessingAdmissionAuthenticator,
-        verify_ordered: impl FnOnce(&ProcessingContext, &WalletProcessingAdmission, &ProcessingProgressEvidence, &Arc<WorldResourceBudget>) -> Result<(), String>,
+        verifier: &impl ProcessingAdmissionAuthenticator<A>,
+        verify_ordered: impl FnOnce(&ProcessingContext, &A, &ProcessingProgressEvidence, &Arc<WorldResourceBudget>) -> Result<(), String>,
     ) -> Result<PendingProcessingIdentity, ProcessingStoreError> {
         if original.is_empty() || original.len() > MAX_SLOT_BYTES || donor_progress.is_empty() || donor_progress.len() > MAX_SLOT_BYTES {
             return Err(invalid("historical processing record exceeds bound"));
@@ -567,7 +587,7 @@ impl PendingProcessingStore {
             return Err(invalid("historical import cannot grant legacy KEM recovery"));
         }
         let admission = verify_stored(&pending, &self.header.namespace_root, verifier)?;
-        let identity = identity(&admission);
+        let identity = admission.identity();
         let original_root = encoded_root(original);
         let mut progress: progress::StoredProgress = serde_json::from_slice(donor_progress).map_err(|e| invalid(e.to_string()))?;
         if progress.version != 1 || progress.namespace_root != self.header.namespace_root || progress.identity != identity
@@ -630,7 +650,7 @@ impl PendingProcessingStore {
         namespace: EtdagDigest,
         limits: ProcessingStoreLimits,
         budget: &Arc<WorldResourceBudget>,
-        verifier: &impl ProcessingAdmissionAuthenticator,
+        verifier: &impl ProcessingAdmissionAuthenticator<A>,
     ) -> Result<Self, ProcessingStoreError> {
         namespace
             .validate()
@@ -768,7 +788,7 @@ impl PendingProcessingStore {
                     let record: StoredPending = serde_json::from_slice(&bytes)
                         .map_err(|e| invalid(format!("pending slot: {e}")))?;
                     let admission = verify_stored(&record, &namespace, verifier)?;
-                    let identity = identity(&admission);
+                    let identity = admission.identity();
                     for other in slots.iter().flatten() {
                         if other.identity.envelope_id == identity.envelope_id
                             || (other.identity.sender_wallet == identity.sender_wallet
@@ -919,6 +939,7 @@ impl PendingProcessingStore {
             limits,
             budget: Arc::clone(budget),
             _index_permit: index_permit,
+            admission_type: PhantomData,
         })
     }
 
@@ -1144,7 +1165,7 @@ impl PendingProcessingStore {
         context: &ProcessingContext,
         authorization_timestamp_unix: u64,
         admission_bytes: &[u8],
-        verifier: &impl ProcessingAdmissionAuthenticator,
+        verifier: &impl ProcessingAdmissionAuthenticator<A>,
     ) -> Result<PendingProcessingIdentity, ProcessingStoreError> {
         if admission_bytes.is_empty()
             || admission_bytes.len() > MAX_REQUEST_BYTES
@@ -1186,16 +1207,15 @@ impl PendingProcessingStore {
         let mut permit = self
             .budget
             .reserve_with_headroom(reservation(measured_length, self.limits)?, headroom)?;
-        let admission: WalletProcessingAdmission = serde_json::from_slice(admission_bytes)
+        let admission: A = serde_json::from_slice(admission_bytes)
             .map_err(|e| invalid(format!("processing request: {e}")))?;
         admission
-            .request
             .validate_context(context)
             .map_err(|e| invalid(format!("processing request binding: {e:?}")))?;
         verifier
             .verify(context, authorization_timestamp_unix, &admission)
             .map_err(ProcessingStoreError::Verification)?;
-        let identity = identity(&admission);
+        let identity = admission.identity();
         let bytes = encode(&pending)?;
         if bytes.len() != measured_length {
             return Err(invalid(
@@ -1270,11 +1290,11 @@ impl PendingProcessingStore {
     pub(crate) fn with_admission<T>(
         &mut self,
         envelope: &EtdagDigest,
-        verifier: &impl ProcessingAdmissionAuthenticator,
+        verifier: &impl ProcessingAdmissionAuthenticator<A>,
         action: impl FnOnce(
             &ProcessingContext,
             u64,
-            &WalletProcessingAdmission,
+            &A,
         ) -> Result<T, ProcessingStoreError>,
     ) -> Result<T, ProcessingStoreError> {
         self.with_worker(envelope, verifier, |context, timestamp, admission, _| {
@@ -1288,11 +1308,11 @@ impl PendingProcessingStore {
     pub(crate) fn with_worker<T>(
         &mut self,
         envelope: &EtdagDigest,
-        verifier: &impl ProcessingAdmissionAuthenticator,
+        verifier: &impl ProcessingAdmissionAuthenticator<A>,
         action: impl FnOnce(
             &ProcessingContext,
             u64,
-            &WalletProcessingAdmission,
+            &A,
             &Arc<WorldResourceBudget>,
         ) -> Result<T, ProcessingStoreError>,
     ) -> Result<T, ProcessingStoreError> {
@@ -1372,7 +1392,7 @@ impl PendingProcessingStore {
         &mut self,
         envelope: &EtdagDigest,
         evidence: &ProcessingCompletionEvidence,
-        verifier: &impl ProcessingAdmissionAuthenticator,
+        verifier: &impl ProcessingAdmissionAuthenticator<A>,
     ) -> Result<(), ProcessingStoreError> {
         let slot = self
             .slots
@@ -1462,9 +1482,9 @@ impl PendingProcessingStore {
     pub(crate) fn with_completion<T>(
         &mut self,
         envelope: &EtdagDigest,
-        verifier: &impl ProcessingAdmissionAuthenticator,
+        verifier: &impl ProcessingAdmissionAuthenticator<A>,
         action: impl FnOnce(
-            &WalletProcessingAdmission,
+            &A,
             &ProcessingCompletionEvidence,
             &Arc<WorldResourceBudget>,
         ) -> Result<T, ProcessingStoreError>,
