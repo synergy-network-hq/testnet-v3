@@ -143,21 +143,6 @@ fn verify_wallet_admission_binding(
     Ok(())
 }
 
-#[cfg(test)]
-fn verify_native_admission_signature(
-    chain_id: u64,
-    signer_public_key: &[u8],
-    signature: &[u8],
-    signing_bytes: &[u8],
-) -> Result<(), String> {
-    verify_native_admission_signature_using(
-        None,
-        chain_id,
-        signer_public_key,
-        signature,
-        signing_bytes,
-    )
-}
 fn verify_native_admission_signature_using(
     injected: Option<&PqvmVerifier>,
     chain_id: u64,
@@ -1302,13 +1287,11 @@ fn observe_admission(phase: super::qualification_timing::Phase, target: u64, env
 #[cfg(test)]
 mod native_processing_signature_tests {
     use super::*;
-    use aegis_pqvm::pqc::signatures::mldsa::mldsa87;
-    use pqrust_traits::sign::{DetachedSignature as _, PublicKey as _};
+    use synergy_address_engine::{apqe::provider::SignOptions, types::Algorithm};
 
     #[test]
+    #[ignore = "requires explicitly authenticated native APQE provider artifacts"]
     fn native_verifier_preserves_transcript_domain_and_rejects_wrong_key_or_bytes() {
-        let (public, secret) = mldsa87::keypair();
-        let (other_public, _) = mldsa87::keypair();
         let payload = json!({"fixture":"native-transcript-boundary"});
         let processing = synergy_etdag::crypto::canonical_signing_bytes(
             "SYNERGY_ETDAG_PROCESSING_ADMISSION_V1",
@@ -1320,68 +1303,99 @@ mod native_processing_signature_tests {
             &payload,
         )
         .unwrap();
-        let signature = mldsa87::detached_sign(&processing, &secret);
-        verify_native_admission_signature(
-            1266,
-            public.as_bytes(),
-            signature.as_bytes(),
-            &processing,
+        let engine = crate::services::apqe_provider::load_selected(
+            &synergy_config::ApqeProviderConfiguration {
+                report_path: std::env::var("APQE_TRUSTED_NATIVE_REPORT").unwrap().into(),
+                authenticated_report_sha256: std::env::var("APQE_AUTHENTICATED_REPORT_SHA256")
+                    .unwrap(),
+            },
         )
         .unwrap();
-        assert!(verify_native_admission_signature(
-            1266,
-            public.as_bytes(),
-            signature.as_bytes(),
-            &legacy,
+        let (public, other_public, mut signature) = {
+            let engine = engine.lock().unwrap();
+            let signer = engine.generate_keypair(Algorithm::MlDsa87).unwrap();
+            let other = engine.generate_keypair(Algorithm::MlDsa87).unwrap();
+            let signature = engine
+                .sign(
+                    Algorithm::MlDsa87,
+                    signer.private_key.as_bytes(),
+                    &processing,
+                    SignOptions::default(),
+                )
+                .unwrap();
+            (signer.public_key, other.public_key, signature)
+        };
+        let verifier = PqvmVerifier::with_apqe(
+            AegisPolicy {
+                allowed_algorithms: vec![SignatureAlgorithm::MlDsa87],
+                maximum_message_bytes: MAX_REQUEST_BYTES,
+                maximum_signature_bytes: 16 * 1024,
+            },
+            engine,
         )
-        .is_err());
-        assert!(verify_native_admission_signature(
-            1266,
-            other_public.as_bytes(),
-            signature.as_bytes(),
-            &processing,
-        )
-        .is_err());
-        let mut corrupted = signature.as_bytes().to_vec();
-        corrupted[0] ^= 1;
-        assert!(verify_native_admission_signature(
-            1266,
-            public.as_bytes(),
-            &corrupted,
-            &processing
-        )
-        .is_err());
+        .unwrap();
+        let verify = |key: &[u8], signature: &[u8], bytes: &[u8]| {
+            verify_native_admission_signature_using(Some(&verifier), 1266, key, signature, bytes)
+        };
+        verify(&public, &signature, &processing).unwrap();
+        assert!(verify(&public, &signature, &legacy).is_err());
+        assert!(verify(&other_public, &signature, &processing).is_err());
+        signature[0] ^= 1;
+        assert!(verify(&public, &signature, &processing).is_err());
     }
 }
 
 #[cfg(test)]
 mod live_cutoff_tests {
     use super::*;
+    use synergy_posy::{
+        CertifiedCandidateSubject, ConsensusObjectContext, ProposalValidationCertificate,
+        SimplifiedFinalityParent,
+    };
 
     #[test]
-    fn cached_admission_context_observes_new_verified_cutoff_without_republication() {
-        let mut fleet = crate::services::posy::qualification::Fleet::new();
-        let ingress = fleet.qualification_ingress();
+    fn cached_admission_context_observes_new_local_cutoff_without_republication() {
+        let ingress = crate::services::ingress::AuthenticatedIngress::default();
         let handle = AdmissionHandle::default();
         handle.bind_ingress(ingress.clone()).unwrap();
-        let context = json!({"context":{"target_height":3}});
+        let context = json!({"context":{"target_height":21}});
         handle.publish_context(Some(context.clone())).unwrap();
         assert_eq!(handle.context().unwrap(), context);
-        assert!(handle.check_live_cutoff(3).is_ok());
-        let digest =
-            |s: &str| EtdagDigest::from_domain_bytes("admission-live-cutoff-test", s.as_bytes());
-        let certificate =
-            fleet.validate_protected_parent(&synergy_etdag::execution::ProtectedProposalMaterial {
-                material_version: 2,
-                height: 1,
-                execution_root: digest("H1"),
-                next_batch_root: digest("H2"),
-                cutoff_boundary_root: digest("H3"),
-            });
-        // Fleet uses real validator signatures and native durable VC verification.
+        assert!(handle.check_live_cutoff(21).is_ok());
+        let slot = ConsensusObjectContext {
+            schema_version: 1,
+            chain_id: 1,
+            network_id: "local-cutoff-test".into(),
+            protocol_version: "test".into(),
+            epoch: 1,
+            height: 19,
+            round: 0,
+            epoch_context_root: "a".repeat(64),
+            consensus_parameter_root: "b".repeat(64),
+            active_validator_set_root: "c".repeat(64),
+            validator_consensus_key_root: "d".repeat(64),
+            frozen_voting_weight_root: "e".repeat(64),
+        };
+        // Exercise the cache after delivery. Certificate authentication occurs
+        // before this handoff and is outside this local test.
+        let certificate = ProposalValidationCertificate {
+            context: slot.clone(),
+            candidate: CertifiedCandidateSubject {
+                context: slot,
+                block_id: "1".repeat(64),
+                parent_block_id: "2".repeat(64),
+                parent: SimplifiedFinalityParent::QuorumCertificate {
+                    height: 18,
+                    block_id: "2".repeat(64),
+                    qc_id: "7".repeat(64),
+                },
+                protected_execution_root: "3".repeat(64),
+            },
+            echoes: vec![],
+        };
         ingress.submit_proposal_validation(certificate).unwrap();
         assert!(handle.context().unwrap_err().contains("closed"));
-        assert!(handle.check_live_cutoff(3).unwrap_err().contains("closed"));
+        assert!(handle.check_live_cutoff(21).unwrap_err().contains("closed"));
         let state = handle.0.lock().unwrap();
         assert_eq!(state.context.as_ref(), Some(&context));
         assert!(state.pending.is_empty());
