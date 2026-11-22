@@ -20,7 +20,8 @@ mod transition;
 mod validation;
 
 pub use candidate::{
-    decode_budgeted_candidate, decode_budgeted_epoch_close_candidate, reserve_execution_metadata,
+    decode_budgeted_candidate, decode_budgeted_epoch_close_candidate,
+    decode_budgeted_pw13_engineering_candidate, reserve_execution_metadata,
     BudgetedExecutionCandidate, CandidateResourceError, ExecutionCandidate,
 };
 pub use candidate_store::{

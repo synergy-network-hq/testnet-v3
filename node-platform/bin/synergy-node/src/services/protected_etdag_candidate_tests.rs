@@ -7,8 +7,8 @@ use super::super::processing_pipeline::{
 use super::{
     processing_admission::CandidateAdmission,
     processing_execution::{
-        execute_protected_candidate, CandidateActionOutcome, CandidateDispatch, CandidateSlot,
-        PreparedProtectedAction,
+        execute_protected_candidate, replay_protected_candidate, CandidateActionOutcome,
+        CandidateDispatch, CandidateSlot, PreparedProtectedAction, ProtectedCandidateContext,
     },
     FinalizedSnapshot, Position, WorldState,
 };
@@ -39,12 +39,16 @@ use synergy_etdag::{
     ProcessingContext, ProcessingEnvelope, ProcessingEnvelopeAad, TargetAdmissionContextV3,
 };
 use synergy_execution::{
-    processing_group_state, processing_group_transition, processing_member_claim,
-    processing_member_claim_optional, ParentProcessingRegistry, ProcessingReadinessVerifier,
-    ProcessingReadyRecord,
+    decode_budgeted_candidate, processing_group_state, processing_group_transition,
+    processing_member_claim, processing_member_claim_optional, BudgetedExecutionCandidate,
+    ParentProcessingRegistry, ProcessingReadinessVerifier, ProcessingReadyRecord,
 };
 use synergy_posy::{FinalizedBlockRecord, ValidatorRecord, ValidatorStatus};
-use synergy_state::world_resources::{BudgetedWorld, WorldResourceBudget};
+use synergy_state::{
+    state_root,
+    world_resources::{BudgetedWorld, WorldResourceBudget},
+    ProtocolChange, StateDiff,
+};
 
 pub(super) struct ClosedCandidateOrder {
     permission: ProcessingRevealPermission,
@@ -92,70 +96,179 @@ impl OpenedCandidateEnvelope {
         let namespace = &order.permission.namespace_root;
         let publication = CandidateSlot {
             inclusion: Position {
-                height: inclusion.height - 1,
+                height: inclusion
+                    .height
+                    .checked_sub(1)
+                    .ok_or("invalid fixture inclusion")?,
                 ..inclusion
             },
             finalized_parent: dispatch.source,
         };
-        let action =
-            PreparedProtectedAction::prepare(dispatch, self.payload(), &order.world, publication)?;
-        let (published, results) = execute_protected_candidate(
-            &order.world,
+        let publication_context = ProtectedCandidateContext {
+            parent_block_id: &order.permission.parent_block_id,
             namespace,
             parameters,
-            publication,
-            &[&action],
-            &[&action],
-        )?;
+            slot: publication,
+        };
+        let action =
+            PreparedProtectedAction::prepare(dispatch, self.payload(), &order.world, publication)?;
+        let (published, results) =
+            execute_protected_candidate(&order.world, publication_context, &[&action], &[&action])?;
         assert!(results.is_empty());
-        assert_eq!(published.accounts, order.world.accounts);
+        assert_eq!(published.state.accounts, order.world.accounts);
+        assert!(published.validate().is_err());
+        assert!(published.validate_archived().is_err());
+        let published_bytes = serde_json::to_vec(&published).map_err(err)?;
+        assert!(decode_budgeted_candidate(&published_bytes, order.world.budget()).is_err());
 
-        let execution = CandidateSlot {
-            inclusion,
-            finalized_parent: execution_finalized_parent,
+        let restored_order =
+            BudgetedWorld::try_clone_world(order.world.as_ref(), order.world.budget())
+                .map_err(err)?;
+        let restored_action = PreparedProtectedAction::prepare(
+            dispatch,
+            self.payload(),
+            &restored_order,
+            publication,
+        )?;
+        let replayed_publication = replay_protected_candidate(
+            &published_bytes,
+            &restored_order,
+            publication_context,
+            &[&restored_action],
+            &[&restored_action],
+        )?;
+        assert_eq!(replayed_publication, published);
+
+        let execution = ProtectedCandidateContext {
+            parent_block_id: &published.block_id,
+            slot: CandidateSlot {
+                inclusion,
+                finalized_parent: execution_finalized_parent,
+            },
+            ..publication_context
         };
         let mut changed_limits = parameters.clone();
         changed_limits.max_protected_gas += 1;
+        let altered = ProtectedCandidateContext {
+            parameters: &changed_limits,
+            ..execution
+        };
         assert!(matches!(
-            execute_protected_candidate(
-                &published, namespace, &changed_limits, execution, &[&action], &[],
-            ),
+            execute_protected_candidate(&published.state, altered, &[&action], &[]),
             Err(error) if error == "protected processing limits differ from the authenticated admission"
         ));
-        let (settled, outcomes) = execute_protected_candidate(
-            &published,
-            namespace,
-            parameters,
-            execution,
-            &[&action],
-            &[],
-        )?;
+        let (settled, outcomes) =
+            execute_protected_candidate(&published.state, execution, &[&action], &[])?;
         let [outcome] =
             <[_; 1]>::try_from(outcomes).map_err(|_| "expected one protected action settlement")?;
+
+        let settled_bytes = serde_json::to_vec(&settled).map_err(err)?;
+        let replayed = replay_protected_candidate(
+            &settled_bytes,
+            &replayed_publication.state,
+            execution,
+            &[&restored_action],
+            &[],
+        )?;
+        assert_eq!(replayed, settled);
+        assert!(
+            replay_protected_candidate(&settled_bytes, &published.state, execution, &[], &[])
+                .is_err()
+        );
+        let other_time = ProtectedCandidateContext {
+            slot: CandidateSlot {
+                inclusion: Position {
+                    consensus_time: inclusion.consensus_time + 1,
+                    ..inclusion
+                },
+                ..execution.slot
+            },
+            ..execution
+        };
+        assert!(replay_protected_candidate(
+            &settled_bytes,
+            &published.state,
+            other_time,
+            &[&action],
+            &[],
+        )
+        .is_err());
+        assert_replay_refuses_changed_world(&settled, &published.state, execution, &action)?;
+
         assert!(processing_member_claim_optional(
-            settled.as_ref(),
+            settled.state.as_ref().as_ref(),
             &self.envelope.aad.sender_id,
             self.envelope.aad.nonce_slot,
         )
         .map_err(err)?
         .is_none());
-        let consumed =
-            ParentProcessingRegistry::read(settled.as_ref(), namespace, settled.budget())
-                .map_err(err)?;
-        assert!(consumed.records().is_empty());
-        let (replayed, duplicate) = execute_protected_candidate(
-            &settled,
+        let consumed = ParentProcessingRegistry::read(
+            settled.state.as_ref().as_ref(),
             namespace,
-            parameters,
-            execution,
-            &[&action],
-            &[],
-        )?;
+            settled.state.budget(),
+        )
+        .map_err(err)?;
+        assert!(consumed.records().is_empty());
+        drop(consumed);
+        let next = ProtectedCandidateContext {
+            parent_block_id: &settled.block_id,
+            slot: CandidateSlot {
+                inclusion: Position {
+                    height: inclusion.height + 1,
+                    ..inclusion
+                },
+                ..execution.slot
+            },
+            ..execution
+        };
+        let (empty, duplicate) = execute_protected_candidate(&settled.state, next, &[], &[])?;
         assert!(duplicate.is_empty());
-        assert_eq!(replayed.as_ref(), settled.as_ref());
-        Ok((settled, outcome))
+        assert_eq!(empty.state, settled.state);
+        let world =
+            Arc::try_unwrap(settled.state).map_err(|_| "unexpected shared fixture World")?;
+        Ok((world, outcome))
     }
+}
 
+fn assert_replay_refuses_changed_world(
+    settled: &BudgetedExecutionCandidate,
+    parent: &BudgetedWorld,
+    context: ProtectedCandidateContext<'_>,
+    action: &PreparedProtectedAction<'_>,
+) -> Result<(), String> {
+    let mut substituted =
+        BudgetedWorld::try_clone_world(settled.state.as_ref().as_ref(), parent.budget())
+            .map_err(err)?;
+    substituted
+        .try_apply(&StateDiff {
+            protocol_changes: vec![ProtocolChange {
+                key: "pw13-fixture-replay".into(),
+                expected_value: None,
+                value: Some(vec![1]),
+            }],
+            ..StateDiff::default()
+        })
+        .map_err(err)?;
+    let mut changed = BudgetedExecutionCandidate {
+        height: settled.height,
+        block_id: String::new(),
+        parent_block_id: settled.parent_block_id.clone(),
+        protected_execution_root: settled.protected_execution_root.clone(),
+        protected_material: settled.protected_material.clone(),
+        state_root: state_root(substituted.as_ref()).map_err(err)?,
+        transactions: Vec::new(),
+        receipts: Vec::new(),
+        state: Arc::new(substituted),
+        resource_permit: None,
+    };
+    changed.block_id = changed.commitment_id()?;
+    changed.validate_pw13_engineering()?;
+    let changed_bytes = serde_json::to_vec(&changed).map_err(err)?;
+    assert!(matches!(
+        replay_protected_candidate(&changed_bytes, parent, context, &[action], &[]),
+        Err(error) if error == "protected execution candidate disagrees with canonical parent replay"
+    ));
+    Ok(())
 }
 struct SignedShares(Vec<ProcessingDecryptShare>);
 impl Drop for SignedShares {

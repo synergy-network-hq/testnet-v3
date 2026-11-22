@@ -73,19 +73,22 @@ fn decode_epoch_transition_subject<'de, D: serde::Deserializer<'de>>(
     String::deserialize(deserializer).map(Some)
 }
 
+/// Identifies replay qualification material. No active profile admits it.
+pub const PW13_ENGINEERING_PROPOSAL_PROFILE_ID: &str = "synergy-pw13-processing-engineering-v1";
+
 impl ProcessingProposalMaterial {
     pub fn validate(&self) -> Result<(), EtdagError> {
         if self.material_version != 1 || self.epoch_transition_subject_root.is_some() {
             return Err(EtdagError::InvalidExecutionInput);
         }
-        self.validate_common()
+        self.validate_common(crate::PROCESSING_PROFILE_ID)
     }
 
-    fn validate_common(&self) -> Result<(), EtdagError> {
+    fn validate_common(&self, profile_id: &str) -> Result<(), EtdagError> {
         if let Some(group) = &self.ordered_group {
             group.validate()?;
         }
-        if self.profile_id != crate::PROCESSING_PROFILE_ID
+        if self.profile_id != profile_id
             || self.height == 0
             || self.selection.maximum_gas == 0
             || self.selection.maximum_bytes == 0
@@ -128,6 +131,20 @@ impl ProcessingProposalMaterial {
             .map_err(|error| EtdagError::Corrupt(error.to_string()))
     }
 
+    /// Structural integrity for isolated protected-account replay. Ordinary
+    /// and archived candidate validation still admit only their own profiles.
+    pub fn pw13_engineering_commitment_bytes(&self) -> Result<Vec<u8>, EtdagError> {
+        if self.material_version != 1
+            || self.epoch_transition_subject_root.is_some()
+            || self.ordered_group.is_some()
+        {
+            return Err(EtdagError::InvalidExecutionInput);
+        }
+        self.validate_common(PW13_ENGINEERING_PROPOSAL_PROFILE_ID)?;
+        serde_json::to_vec(&("SYNERGY_POSY_PW13_ENGINEERING_MATERIAL_V1", self))
+            .map_err(|error| EtdagError::Corrupt(error.to_string()))
+    }
+
     /// Produce the explicit engineering epoch-close commitment from ordinary
     /// executed processing material. The caller supplies the independently
     /// derived subject, never a claim copied from an incoming candidate.
@@ -158,7 +175,7 @@ impl ProcessingProposalMaterial {
         {
             return Err(EtdagError::InvalidExecutionInput);
         }
-        self.validate_common()?;
+        self.validate_common(crate::PROCESSING_PROFILE_ID)?;
         serde_json::to_vec(&("SYNERGY_POSY_PROCESSING_MATERIAL_V2", self))
             .map_err(|error| EtdagError::Corrupt(error.to_string()))
     }

@@ -218,6 +218,19 @@ The ordinary node scheduler cannot select this dispatcher. Live qualification
 still requires governed candidate replay, terminal disposition, activation and
 the approved public wire contract.
 
+Protected proposal replay now uses the existing budgeted candidate body and
+ETDAG lifecycle commitments. Its isolated PW13 material commits the exact
+parent block and World, selected finalized predecessor, consensus time,
+network and processing limits. Replay decodes the original candidate bytes
+under the World budget and independently rebuilds the proposal from the
+parent and authenticated openings. Fixtures reproduce both READY publication
+and settlement from independently reconstructed parents. They reject changed
+time, missing openings and a substituted World even when its structural
+commitments are internally consistent. The ordinary and historical decoders
+refuse the engineering profile. A future live route needs an approved
+profile, the native lineage and activation checks, and retained proof
+assembly through the validator lifecycle.
+
 The offline settlement verifier checks the exact encrypted transfer and
 sponsored enrollment receipts against adjacent three-QC-certified blocks
 and their Worlds. It checks first appearance, the certified inclusion time,

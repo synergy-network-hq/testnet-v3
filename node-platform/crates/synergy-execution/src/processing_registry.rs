@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use synergy_etdag::execution::{
-    ProcessingOrderGroup, ProcessingProposalMaterial, ProcessingReadyItem, ProcessingReadyView,
-    ProcessingSelection, ProcessingSelectionPolicy,
+    ProcessingGroupCommitment, ProcessingOrderGroup, ProcessingProposalMaterial,
+    ProcessingReadyItem, ProcessingReadyView, ProcessingSelection, ProcessingSelectionPolicy,
 };
 use synergy_etdag::{EtdagDigest, EtdagError};
 use synergy_state::world_resources::{
@@ -241,6 +241,7 @@ pub struct ParentProcessingSelection<'a, 'world> {
 pub struct ProcessingLifecycleTransition {
     pub(crate) ready: ProcessingRegistryTransition,
     pub(crate) groups: crate::ProcessingGroupTransition,
+    pub(crate) ordered_group: Option<ProcessingGroupCommitment>,
 }
 
 impl ProcessingLifecycleTransition {
@@ -279,7 +280,14 @@ impl ParentProcessingSelection<'_, '_> {
         for record in publications {
             crate::verify_processing_record_assignment(self.registry.parent, namespace, record)?;
         }
-        Ok(ProcessingLifecycleTransition { ready, groups })
+        let ordered_group = new_group
+            .map(ProcessingOrderGroup::commitment)
+            .transpose()?;
+        Ok(ProcessingLifecycleTransition {
+            ready,
+            groups,
+            ordered_group,
+        })
     }
 
     pub fn selection(&self) -> &ProcessingSelection {

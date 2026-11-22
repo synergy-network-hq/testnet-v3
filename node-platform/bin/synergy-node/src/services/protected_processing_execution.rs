@@ -18,10 +18,12 @@ use synergy_etdag::{
     ProcessingContext,
 };
 use synergy_execution::{
-    processing_group_state, verify_processing_payload, FeeSchedule, ParentProcessingRegistry,
-    ProcessingReadinessVerifier, ProcessingReadyRecord,
+    decode_budgeted_pw13_engineering_candidate, processing_group_state, verify_processing_payload,
+    BudgetedExecutionCandidate, FeeSchedule, ParentProcessingRegistry, ProcessingReadinessVerifier,
+    ProcessingReadyRecord,
 };
 use synergy_state::{
+    state_root,
     world_resources::{BudgetedWorld, WorldResourcePermit},
     WorldState,
 };
@@ -120,6 +122,7 @@ impl AuthorizedCandidateAdmission {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct CandidateDispatch<'a> {
     pub(super) source: &'a FinalizedSnapshot<'a>,
     pub(super) provider: &'a PqProvider<Mldsa87>,
@@ -325,22 +328,68 @@ impl ProcessingReadinessVerifier for ProtectedReadiness<'_> {
     }
 }
 
+/// Derived by the replay caller from the independently authenticated lineage
+/// and candidate slot. It is never populated from the proposal being checked.
+#[derive(Clone, Copy)]
+pub(super) struct ProtectedCandidateContext<'a> {
+    pub(super) parent_block_id: &'a str,
+    pub(super) namespace: &'a EtdagDigest,
+    pub(super) parameters: &'a EtdagParameters,
+    pub(super) slot: CandidateSlot<'a>,
+}
+
+impl ProtectedCandidateContext<'_> {
+    fn scope(&self, parent: &BudgetedWorld) -> Result<EtdagDigest, String> {
+        let finalized = self.slot.finalized_parent;
+        let inclusion = self.slot.inclusion;
+        if !synergy_posy::is_hash(self.parent_block_id)
+            || inclusion.height <= finalized.position.height
+            || inclusion.consensus_time < finalized.position.consensus_time
+        {
+            return Err("protected candidate has invalid parent or slot coordinates".into());
+        }
+        let _scratch = parent.budget().reserve(8192).map_err(debug)?;
+        let parent_world_root = state_root(parent.as_ref()).map_err(debug)?;
+        EtdagDigest::from_canonical(
+            "SYNERGY_POSY_PW13_ENGINEERING_SCOPE_V1",
+            &(
+                finalized.registry.network,
+                self.parent_block_id,
+                parent_world_root,
+                self.namespace,
+                self.parameters,
+                inclusion.height,
+                inclusion.consensus_time,
+                finalized.position.height,
+                finalized.position.consensus_time,
+                &finalized.processing_finality_root,
+            ),
+        )
+        .map_err(debug)
+    }
+}
+
 /// Apply the selection and lifecycle from the single canonical parent. The
 /// returned World contains both the protected settlement and READY consumption.
 /// If anything fails, the private candidate is dropped along with all effects.
 pub(super) fn execute_protected_candidate<'a>(
     parent: &BudgetedWorld,
-    namespace: &EtdagDigest,
-    parameters: &EtdagParameters,
-    slot: CandidateSlot<'a>,
+    context: ProtectedCandidateContext<'a>,
     prepared: &[&'a PreparedProtectedAction<'a>],
     publications: &[&'a PreparedProtectedAction<'a>],
-) -> Result<(BudgetedWorld, Vec<CandidateActionOutcome>), String> {
+) -> Result<(BudgetedExecutionCandidate, Vec<CandidateActionOutcome>), String> {
     const MAX_ACTIONS: usize = 4096;
+    let ProtectedCandidateContext {
+        namespace,
+        parameters,
+        slot,
+        ..
+    } = context;
     parameters.validate().map_err(debug)?;
     if prepared.len() > MAX_ACTIONS || publications.len() > MAX_ACTIONS {
         return Err("protected candidate exceeds action capacity".into());
     }
+    let scope = context.scope(parent)?;
     let budget = parent.budget();
     let _index = budget
         .reserve((prepared.len() + publications.len()) * 256 + 16 * 1024)
@@ -399,5 +448,32 @@ pub(super) fn execute_protected_candidate<'a>(
         }
         outcomes.push(action.execute(&mut candidate, slot)?);
     }
-    Ok((lifecycle.apply(candidate).map_err(debug)?, outcomes))
+    let candidate = lifecycle
+        .assemble_pw13_engineering(
+            &selected,
+            slot.inclusion.height,
+            context.parent_block_id,
+            &scope,
+            candidate,
+        )
+        .map_err(debug)?;
+    Ok((candidate, outcomes))
+}
+
+/// Replay using original authorization/opening evidence and the selected
+/// parent. A well-formed claimed World or block identifier is insufficient.
+pub(super) fn replay_protected_candidate<'a>(
+    received_bytes: &[u8],
+    parent: &BudgetedWorld,
+    context: ProtectedCandidateContext<'a>,
+    prepared: &[&'a PreparedProtectedAction<'a>],
+    publications: &[&'a PreparedProtectedAction<'a>],
+) -> Result<BudgetedExecutionCandidate, String> {
+    let received = decode_budgeted_pw13_engineering_candidate(received_bytes, parent.budget())
+        .map_err(debug)?;
+    let (regenerated, _) = execute_protected_candidate(parent, context, prepared, publications)?;
+    if regenerated != received {
+        return Err("protected execution candidate disagrees with canonical parent replay".into());
+    }
+    Ok(regenerated)
 }

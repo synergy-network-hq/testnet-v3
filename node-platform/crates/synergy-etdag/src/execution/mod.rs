@@ -20,7 +20,7 @@ pub use processing_selection::{
 };
 pub use proposal_material::{
     CandidateProtectedMaterial, ParentProposalRevealEvidence, ProcessingProposalMaterial,
-    ProtectedProposalMaterial,
+    ProtectedProposalMaterial, PW13_ENGINEERING_PROPOSAL_PROFILE_ID,
 };
 
 pub use batch_validation::validate_execution_handoff;

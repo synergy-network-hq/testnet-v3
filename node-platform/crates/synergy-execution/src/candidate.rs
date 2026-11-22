@@ -106,14 +106,27 @@ pub fn decode_budgeted_candidate(
     bytes: &[u8],
     budget: &Arc<WorldResourceBudget>,
 ) -> Result<BudgetedExecutionCandidate, CandidateResourceError> {
-    decode_candidate(bytes, budget, false)
+    decode_candidate(bytes, budget, BudgetedExecutionCandidate::validate)
 }
 
 pub(crate) fn decode_archived_candidate(
     bytes: &[u8],
     budget: &Arc<WorldResourceBudget>,
 ) -> Result<BudgetedExecutionCandidate, CandidateResourceError> {
-    decode_candidate(bytes, budget, true)
+    decode_candidate(bytes, budget, BudgetedExecutionCandidate::validate_archived)
+}
+
+/// Explicitly decode isolated PW13 replay evidence in the shared resource pool.
+/// The ordinary and archived decoders keep their existing profile gates.
+pub fn decode_budgeted_pw13_engineering_candidate(
+    bytes: &[u8],
+    budget: &Arc<WorldResourceBudget>,
+) -> Result<BudgetedExecutionCandidate, CandidateResourceError> {
+    decode_candidate(
+        bytes,
+        budget,
+        BudgetedExecutionCandidate::validate_pw13_engineering,
+    )
 }
 
 /// Only an authenticated native epoch context may supply this expected subject.
@@ -133,7 +146,7 @@ pub fn decode_budgeted_epoch_close_candidate(
 fn decode_candidate(
     bytes: &[u8],
     budget: &Arc<WorldResourceBudget>,
-    archive: bool,
+    validate: fn(&BudgetedExecutionCandidate) -> Result<(), String>,
 ) -> Result<BudgetedExecutionCandidate, CandidateResourceError> {
     let scanner = bytes
         .len()
@@ -185,12 +198,7 @@ fn decode_candidate(
         state,
     };
     let _root_scratch = budget.reserve(8192)?;
-    if archive {
-        candidate.validate_archived()
-    } else {
-        candidate.validate()
-    }
-    .map_err(CandidateResourceError::Invalid)?;
+    validate(&candidate).map_err(CandidateResourceError::Invalid)?;
     permit.shrink(metadata)?;
     let mut candidate = candidate;
     candidate.resource_permit = Some(Arc::new(permit));
@@ -352,6 +360,25 @@ impl<W: AsRef<WorldState>> ExecutionCandidate<W> {
     /// Integrity only; no consensus or processing authority is inferred.
     pub fn validate_archived(&self) -> Result<(), String> {
         self.validate_with_world_size().map(|_| ())
+    }
+
+    /// Check the separate engineering material and its exact World. This is
+    /// structural only. The protected dispatcher must recompute the candidate.
+    pub fn validate_pw13_engineering(&self) -> Result<(), String> {
+        let synergy_etdag::execution::CandidateProtectedMaterial::Processing(material) =
+            &self.protected_material
+        else {
+            return Err("protected replay requires PW13 engineering material".into());
+        };
+        if !self.transactions.is_empty() || !self.receipts.is_empty() {
+            return Err("PW13 engineering uses only World-committed settlement records".into());
+        }
+        let root = hash_block_bytes(
+            &material
+                .pw13_engineering_commitment_bytes()
+                .map_err(|error| format!("encode PW13 engineering material: {error:?}"))?,
+        );
+        self.validate_committed_body(&root).map(|_| ())
     }
 
     /// Native epoch-close validation. The subject must come from the

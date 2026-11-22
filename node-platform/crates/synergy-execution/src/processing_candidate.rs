@@ -6,19 +6,25 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use synergy_block::BlockBody;
-use synergy_etdag::execution::ProcessingOrderGroup;
+use synergy_etdag::execution::{
+    ProcessingOrderGroup, ProcessingProposalMaterial, PW13_ENGINEERING_PROPOSAL_PROFILE_ID,
+};
 use synergy_etdag::{EtdagDigest, EtdagError};
-use synergy_state::world_resources::{BudgetedWorld, WorldResourceBudget, WorldResourceError};
+use synergy_state::world_resources::{
+    BudgetedWorld, WorldResourceBudget, WorldResourceError, WorldResourcePermit,
+};
 use synergy_state::{state_root, StateError, WorldState};
 use synergy_transaction::{
     AegisTransactionVerifier, NetworkBinding, SignedTransaction, TransactionClass,
+    TransactionReceipt,
 };
 
+use crate::processing_registry::ProcessingLifecycleTransition;
 use crate::{
     reserve_execution_metadata, BlockExecutionError, BlockExecutionScheduler,
     BudgetedExecutionCandidate, CandidateResourceError, ParentProcessingRegistry,
-    ProcessingReadinessVerifier, ProcessingReadyRecord, ProcessingRegistryError,
-    TransactionExecutor,
+    ParentProcessingSelection, ProcessingReadinessVerifier, ProcessingReadyRecord,
+    ProcessingRegistryError, TransactionExecutor,
 };
 
 const MAX_PROCESSING_PLAINTEXT_BYTES: usize = 4 * 1024 * 1024;
@@ -161,6 +167,111 @@ pub fn verify_processing_payload(
         ));
     }
     Ok(())
+}
+
+
+impl ProcessingLifecycleTransition {
+    fn proposal_material(
+        &self,
+        selected: &ParentProcessingSelection<'_, '_>,
+        height: u64,
+        epoch_transition: Option<&crate::ProcessingEpochTransition>,
+    ) -> Result<ProcessingProposalMaterial, ProcessingCandidateError> {
+        let mut material = selected.proposal_material(height, &self.ready)?;
+        material.ordered_group = self.ordered_group.clone();
+        material.transition_root = match epoch_transition {
+            None => EtdagDigest::from_canonical(
+                "SYNERGY_POSY_PROCESSING_LIFECYCLE_TRANSITION_V1",
+                &(self.ready.diff(), self.groups.diff()),
+            ),
+            Some(epoch) => EtdagDigest::from_canonical(
+                "SYNERGY_POSY_PROCESSING_EPOCH_LIFECYCLE_TRANSITION_V1",
+                &(epoch.diff(), self.ready.diff(), self.groups.diff()),
+            ),
+        }
+        .map_err(|error| {
+            ProcessingCandidateError::Invalid(format!("processing lifecycle commitment: {error:?}"))
+        })?;
+        Ok(material)
+    }
+
+    /// Build replay evidence using the native candidate body and lifecycle
+    /// commitment. This profile is rejected by ordinary and archive validation.
+    pub fn assemble_pw13_engineering(
+        &self,
+        selected: &ParentProcessingSelection<'_, '_>,
+        height: u64,
+        parent_block_id: &str,
+        scope: &EtdagDigest,
+        state: BudgetedWorld,
+    ) -> Result<BudgetedExecutionCandidate, ProcessingCandidateError> {
+        scope.validate().map_err(|error| {
+            ProcessingCandidateError::Invalid(format!("PW13 engineering scope: {error:?}"))
+        })?;
+        if scope.is_zero() || parent_block_id.trim().is_empty() || parent_block_id.len() > 256 {
+            return Err(ProcessingCandidateError::Invalid(
+                "invalid PW13 engineering scope or parent".into(),
+            ));
+        }
+        let metadata = state.budget().reserve(64 * 1024)?;
+        let mut material = self.proposal_material(selected, height, None)?;
+        material.profile_id = PW13_ENGINEERING_PROPOSAL_PROFILE_ID.into();
+        material.transition_root = EtdagDigest::from_canonical(
+            "SYNERGY_POSY_PW13_ENGINEERING_TRANSITION_V1",
+            &(scope, &material.transition_root),
+        )
+        .map_err(|error| {
+            ProcessingCandidateError::Invalid(format!("PW13 engineering transition: {error:?}"))
+        })?;
+        let bytes = material
+            .pw13_engineering_commitment_bytes()
+            .map_err(|error| {
+                ProcessingCandidateError::Invalid(format!("PW13 engineering commitment: {error:?}"))
+            })?;
+        let state = self.apply(state).map_err(ProcessingCandidateError::State)?;
+        let candidate = assemble_processing_candidate(
+            parent_block_id,
+            material,
+            state,
+            Vec::new(),
+            Vec::new(),
+            metadata,
+            bytes,
+        )?;
+        candidate
+            .validate_pw13_engineering()
+            .map_err(ProcessingCandidateError::Invalid)?;
+        Ok(candidate)
+    }
+}
+
+fn assemble_processing_candidate(
+    parent_block_id: &str,
+    material: ProcessingProposalMaterial,
+    state: BudgetedWorld,
+    transactions: Vec<SignedTransaction>,
+    receipts: Vec<TransactionReceipt>,
+    metadata: WorldResourcePermit,
+    material_bytes: Vec<u8>,
+) -> Result<BudgetedExecutionCandidate, ProcessingCandidateError> {
+    let _root_scratch = state.budget().reserve(8192)?;
+    let state_root = state_root(state.as_ref()).map_err(ProcessingCandidateError::State)?;
+    let mut candidate = BudgetedExecutionCandidate {
+        resource_permit: Some(Arc::new(metadata)),
+        height: material.height,
+        block_id: String::new(),
+        parent_block_id: parent_block_id.into(),
+        protected_execution_root: synergy_block::hash_block_bytes(&material_bytes),
+        protected_material: material.into(),
+        state_root,
+        transactions,
+        receipts,
+        state: Arc::new(state),
+    };
+    candidate.block_id = candidate
+        .commitment_id()
+        .map_err(ProcessingCandidateError::Invalid)?;
+    Ok(candidate)
 }
 
 impl<D: TransactionExecutor, V: AegisTransactionVerifier> BlockExecutionScheduler<D, V> {
@@ -438,52 +549,19 @@ impl<D: TransactionExecutor, V: AegisTransactionVerifier> BlockExecutionSchedule
         let state = lifecycle
             .apply(outcome.state)
             .map_err(ProcessingCandidateError::State)?;
-        let mut material = selected.proposal_material(context.height, &lifecycle.ready)?;
-        material.ordered_group = context
-            .ordered_group
-            .map(ProcessingOrderGroup::commitment)
-            .transpose()
-            .map_err(|e| {
-                ProcessingCandidateError::Invalid(format!("processing group commitment: {e:?}"))
-            })?;
-        material.transition_root = match epoch_transition {
-            None => EtdagDigest::from_canonical(
-                "SYNERGY_POSY_PROCESSING_LIFECYCLE_TRANSITION_V1",
-                &(lifecycle.ready.diff(), lifecycle.groups.diff()),
-            ),
-            Some(epoch) => EtdagDigest::from_canonical(
-                "SYNERGY_POSY_PROCESSING_EPOCH_LIFECYCLE_TRANSITION_V1",
-                &(
-                    epoch.diff(),
-                    lifecycle.ready.diff(),
-                    lifecycle.groups.diff(),
-                ),
-            ),
-        }
-        .map_err(|e| {
-            ProcessingCandidateError::Invalid(format!("processing lifecycle commitment: {e:?}"))
+        let material = lifecycle.proposal_material(&selected, context.height, epoch_transition)?;
+        let bytes = material.commitment_bytes().map_err(|error| {
+            ProcessingCandidateError::Invalid(format!("processing material commitment: {error:?}"))
         })?;
-        let _root_scratch = budget.reserve(8192)?;
-        let state_root = state_root(state.as_ref()).map_err(ProcessingCandidateError::State)?;
-        let protected_execution_root =
-            synergy_block::hash_block_bytes(&material.commitment_bytes().map_err(|e| {
-                ProcessingCandidateError::Invalid(format!("processing material commitment: {e:?}"))
-            })?);
-        let mut candidate = BudgetedExecutionCandidate {
-            resource_permit: Some(Arc::new(metadata)),
-            height: context.height,
-            block_id: String::new(),
-            parent_block_id: context.parent_block_id.into(),
-            protected_execution_root,
-            protected_material: material.into(),
-            state_root,
-            transactions: body.transactions,
-            receipts: outcome.receipts,
-            state: Arc::new(state),
-        };
-        candidate.block_id = candidate
-            .commitment_id()
-            .map_err(ProcessingCandidateError::Invalid)?;
+        let candidate = assemble_processing_candidate(
+            context.parent_block_id,
+            material,
+            state,
+            body.transactions,
+            outcome.receipts,
+            metadata,
+            bytes,
+        )?;
         candidate
             .validate()
             .map_err(ProcessingCandidateError::Invalid)?;
