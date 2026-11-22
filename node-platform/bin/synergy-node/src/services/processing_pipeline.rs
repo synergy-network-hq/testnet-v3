@@ -17,13 +17,14 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
+use synergy_address_engine::apqe::SecretBytes;
 use synergy_etdag::{
     crypto::{ShamirShare, SignatureVerifier},
     execution::{
         ProcessingDecryptShare, ProcessingGroupMember, ProcessingOrderGroup, ProcessingReadyItem,
         ProcessingRevealPermission, ProcessingVertex,
     },
-    AvailabilityCertificate, EtdagDigest, ProcessingContext,
+    AvailabilityCertificate, EtdagDigest, ProcessingContext, ProcessingEnvelope,
 };
 use synergy_execution::{
     BudgetedExecutionCandidate, ProcessingPayloadError, ProcessingPayloadProvider,
@@ -784,36 +785,20 @@ impl<'a> NativeProcessingParent<'a> {
     }
 }
 
-/// Owns the charged plaintext only after native signed threshold reconstruction.
-/// Native durable ownership must retain this reservation through publication.
-pub(super) struct NativeProcessingCompletion {
-    // Retain only the authenticated authorization needed at inclusion. Worker
-    // handoff must not pin an entire historical source World or a decode stack.
-    source_binding: synergy_identity::authorization::IdentityAuthorizationBindingCommitment,
-    identity_authorization: synergy_identity::authorization::IdentityAuthorizationCarrier,
-    signer_public_key: Vec<u8>,
-    chain_id: u64,
-    network_id: String,
-    pub(super) record: ProcessingReadyRecord,
-    plaintext: Vec<u8>,
-    _permit: WorldResourcePermit,
+/// An authorized reveal of one exact envelope. Plaintext stays charged and
+/// is wiped even if a subsequent content decoder refuses the payload.
+/// A successful opening grants no permission to execute its contents.
+struct AuthenticatedProcessingOpening<'a> {
+    envelope: &'a ProcessingEnvelope,
+    plaintext: SecretBytes,
+    plaintext_capacity: usize,
+    permit: WorldResourcePermit,
 }
-impl Drop for NativeProcessingCompletion {
-    fn drop(&mut self) {
-        self.plaintext.fill(0);
-    }
-}
-impl NativeProcessingCompletion {
-    pub(super) fn decrypt(
+
+impl<'a> AuthenticatedProcessingOpening<'a> {
+    fn open_in(
         parent: &NativeProcessingParent<'_>,
-        vertex: &NativeProcessingVertex<'_>,
-        shares: &[ProcessingDecryptShare],
-    ) -> Result<Self, String> {
-        Self::decrypt_in(parent, vertex, shares, parent.world().budget())
-    }
-    pub(super) fn decrypt_in(
-        parent: &NativeProcessingParent<'_>,
-        vertex: &NativeProcessingVertex<'_>,
+        vertex: &'a NativeProcessingVertex<'_>,
         shares: &[ProcessingDecryptShare],
         budget: &Arc<WorldResourceBudget>,
     ) -> Result<Self, String> {
@@ -861,12 +846,17 @@ impl NativeProcessingCompletion {
                     &message.signature,
                 )
                 .map_err(err)?;
-            let share = ShamirShare::from_canonical_bytes(&message.share_bytes).map_err(err)?;
             let capsule = envelope
                 .share_capsules
                 .iter()
                 .find(|c| c.validator_id == message.validator_id)
                 .ok_or("processing share lacks original capsule")?;
+            let index = verified.0.len();
+            verified.0.push((
+                message.validator_id.clone(),
+                ShamirShare::from_canonical_bytes(&message.share_bytes).map_err(err)?,
+            ));
+            let share = &verified.0[index].1;
             if capsule.ingress_kem_key_id != message.ingress_kem_key_id
                 || capsule.share_index != message.share_index
                 || share.index != message.share_index
@@ -882,22 +872,62 @@ impl NativeProcessingCompletion {
             {
                 return Err("processing share differs from original encrypted capsule".into());
             }
-            verified.0.push((message.validator_id.clone(), share));
         }
         let count_quorum = authority.registry.active_count() - 1;
-        let mut padded = synergy_etdag::crypto::decrypt_protected_payload(
-            envelope,
-            &verified.0,
-            authority.registry.active_count(),
-            count_quorum,
-        )
-        .map_err(err)?;
+        let padded = SecretBytes::from_bytes(
+            synergy_etdag::crypto::decrypt_protected_payload(
+                envelope,
+                &verified.0,
+                authority.registry.active_count(),
+                count_quorum,
+            )
+            .map_err(err)?,
+        );
         drop(verified);
-        let plaintext = synergy_etdag::crypto::unpad_plaintext(&padded).map_err(err);
-        padded.fill(0);
-        let plaintext = plaintext?;
+        let plaintext = synergy_etdag::crypto::unpad_plaintext(padded.as_bytes()).map_err(err)?;
+        let plaintext_capacity = plaintext.capacity();
+        Ok(Self {
+            envelope,
+            plaintext: SecretBytes::from_bytes(plaintext),
+            plaintext_capacity,
+            permit,
+        })
+    }
+}
+
+/// Owns a budgeted, authorized ordinary transaction after native reveal.
+pub(super) struct NativeProcessingCompletion {
+    // Retain only the authenticated authorization needed at inclusion. Worker
+    // handoff must not pin an entire historical source World or a decode stack.
+    source_binding: synergy_identity::authorization::IdentityAuthorizationBindingCommitment,
+    identity_authorization: synergy_identity::authorization::IdentityAuthorizationCarrier,
+    signer_public_key: Vec<u8>,
+    chain_id: u64,
+    network_id: String,
+    pub(super) record: ProcessingReadyRecord,
+    plaintext: SecretBytes,
+    _permit: WorldResourcePermit,
+}
+
+impl NativeProcessingCompletion {
+    pub(super) fn decrypt(
+        parent: &NativeProcessingParent<'_>,
+        vertex: &NativeProcessingVertex<'_>,
+        shares: &[ProcessingDecryptShare],
+    ) -> Result<Self, String> {
+        Self::decrypt_in(parent, vertex, shares, parent.world().budget())
+    }
+
+    pub(super) fn decrypt_in(
+        parent: &NativeProcessingParent<'_>,
+        vertex: &NativeProcessingVertex<'_>,
+        shares: &[ProcessingDecryptShare],
+        budget: &Arc<WorldResourceBudget>,
+    ) -> Result<Self, String> {
+        let mut opened = AuthenticatedProcessingOpening::open_in(parent, vertex, shares, budget)?;
+        let plaintext = opened.plaintext.as_bytes();
         let transaction: synergy_transaction::SignedTransaction =
-            serde_json::from_slice(&plaintext).map_err(err)?;
+            serde_json::from_slice(plaintext).map_err(err)?;
         transaction.validate_structure().map_err(err)?;
         let request = &vertex.vertex.admission.request;
         if transaction.unsigned.class != synergy_transaction::TransactionClass::User
@@ -944,8 +974,8 @@ impl NativeProcessingCompletion {
         .map_err(err)?;
         let payload_root = synergy_execution::processing_payload_root(
             &request.context_root,
-            &envelope.envelope_id,
-            &plaintext,
+            &opened.envelope.envelope_id,
+            plaintext,
         )
         .map_err(err)?;
         let readiness_root = EtdagDigest::from_canonical(
@@ -962,7 +992,7 @@ impl NativeProcessingCompletion {
                 group_number: claim.group_number,
                 group_root: claim.group_root,
                 order_position: claim.order_position,
-                envelope_id: envelope.envelope_id.clone(),
+                envelope_id: opened.envelope.envelope_id.clone(),
                 payload_root,
                 readiness_root,
                 gas_class_units: request.gas_class_units,
@@ -970,8 +1000,8 @@ impl NativeProcessingCompletion {
                 remaining_dependencies: vertex.member.envelope.protocol_dependencies.clone(),
             },
         };
-        let retained = plaintext
-            .capacity()
+        let retained = opened
+            .plaintext_capacity
             .checked_add(
                 encoded_len(&vertex.vertex.admission.identity_authorization)?
                     .checked_mul(16)
@@ -982,7 +1012,7 @@ impl NativeProcessingCompletion {
         // All decode/signature/crypto scratch must die before its charge can be
         // released. The original transaction and claim are no longer retained.
         drop(transaction);
-        permit.shrink(retained).map_err(err)?;
+        opened.permit.shrink(retained).map_err(err)?;
         Ok(Self {
             source_binding: binding,
             identity_authorization: vertex.vertex.admission.identity_authorization.clone(),
@@ -990,8 +1020,8 @@ impl NativeProcessingCompletion {
             chain_id: vertex.source.context.authority.chain_id,
             network_id: vertex.source.context.authority.network_id.clone(),
             record,
-            plaintext,
-            _permit: permit,
+            plaintext: opened.plaintext,
+            _permit: opened.permit,
         })
     }
 }
@@ -1246,7 +1276,7 @@ impl ProcessingPayloadProvider for NativeProcessingPipeline<'_> {
                 "processing payload lookup differs from native completion".into(),
             ));
         }
-        Ok(&completion.plaintext)
+        Ok(completion.plaintext.as_bytes())
     }
 }
 
