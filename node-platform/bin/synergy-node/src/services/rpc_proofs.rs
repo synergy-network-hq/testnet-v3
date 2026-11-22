@@ -186,13 +186,19 @@ struct ClientFinalityEvidence {
     witness: synergy_posy::FinalitySyncWitness,
 }
 
+struct VerifiedFinalityProof {
+    record: FinalizedBlockRecord,
+    parent_block_id: String,
+    following_block_id: String,
+}
+
 /// Verify against caller-selected authenticated history, never a public key or
 /// authority selected by the proof. The returned record is what clients match
 /// against their independently recomputed block/preimage commitments.
 fn verify_finality_bytes(
     bytes: &[u8],
     authority: &Arc<super::super::authority::VerifiedAuthority>,
-) -> Result<synergy_posy::FinalizedBlockRecord, String> {
+) -> Result<VerifiedFinalityProof, String> {
     if bytes.is_empty() || bytes.len() > MAX_DOCUMENT {
         return Err("bounded finality document required".into());
     }
@@ -251,17 +257,227 @@ fn verify_finality_bytes(
     if used.len() != by_id.len() || finality.last_finalized() != Some(&evidence.finalized) {
         return Err("finality record or exact timeout closure mismatch".into());
     }
-    Ok(evidence.finalized)
+    let [first, second, _] = evidence.witness.quorum_certificates;
+    Ok(VerifiedFinalityProof {
+        record: evidence.finalized,
+        parent_block_id: first.parent_block_id,
+        following_block_id: second.block_id,
+    })
+}
+
+struct VerifiedBlockCommitment<'a> {
+    parent_block_id: &'a str,
+    state_root: &'a str,
+}
+
+fn verify_block_commitment<'a>(
+    bytes: &'a [u8],
+    finalized: &FinalizedBlockRecord,
+) -> Result<VerifiedBlockCommitment<'a>, String> {
+    if bytes.is_empty()
+        || bytes.len() > MAX_DOCUMENT
+        || synergy_block::hash_block_bytes(bytes) != finalized.block_id
+    {
+        return Err("block preimage does not match verified finality".into());
+    }
+    use serde::de::IgnoredAny;
+    // Decode only the committed header, without reconstructing transaction or
+    // receipt values. The hash authenticates their original bytes as well.
+    let (height, parent_block_id, protected_root, state_root, _, _): (
+        u64,
+        &str,
+        &str,
+        &str,
+        IgnoredAny,
+        IgnoredAny,
+    ) = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    if height != finalized.height
+        || protected_root != finalized.protected_execution_root
+        || !canonical_digest(state_root)
+    {
+        return Err("block preimage header differs from verified finality".into());
+    }
+    Ok(VerifiedBlockCommitment {
+        parent_block_id,
+        state_root,
+    })
+}
+
+fn verified_consensus_position(
+    finalized: &FinalizedBlockRecord,
+    authority: &Arc<super::super::authority::VerifiedAuthority>,
+) -> Result<(u64, String, u64), String> {
+    // A tail block may be finalized by QCs from its successor epoch.
+    // Always derive time from the authority that certified this height.
+    let owner = authority
+        .authenticated_history_at(finalized.height)
+        .ok_or("verified height has no authenticated consensus time authority")?;
+    Ok((
+        owner.epoch.epoch,
+        owner.epoch.root().map_err(|error| error.to_string())?,
+        owner.consensus_timestamp_unix(finalized.height)?,
+    ))
+}
+
+/// An independently selected expectation for an exact finalized governance
+/// write. The proof source cannot select these fields or approve this record.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActivationRecordExpectation {
+    chain_id: u64,
+    network_id: String,
+    genesis_hash: String,
+    activation_height: u64,
+    finalized_block_id: String,
+    state_root: String,
+    record_key: String,
+    record_sha256: String,
+}
+
+fn inspect_expected_activation_record(
+    world: &synergy_state::WorldState,
+    finalized: &synergy_posy::FinalizedBlockRecord,
+    state_root: &str,
+    chain_id: u64,
+    network_id: &str,
+    genesis_hash: &str,
+    expected: &ActivationRecordExpectation,
+) -> Result<Value, String> {
+    let valid_hash = |value: &str| canonical_digest(value) && value.bytes().any(|b| b != b'0');
+    let key = expected
+        .record_key
+        .strip_prefix("governance/")
+        .and_then(|key| key.split_once('/'));
+    let valid_segment = |segment: &str, limit| {
+        !segment.is_empty()
+            && segment.len() <= limit
+            && segment != "."
+            && segment != ".."
+            && segment
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    };
+    if !key.is_some_and(|(action, target)| valid_segment(action, 128) && valid_segment(target, 256))
+        || !valid_hash(&expected.record_sha256)
+        || !valid_hash(&expected.genesis_hash)
+        || !valid_hash(&expected.finalized_block_id)
+        || !valid_hash(&expected.state_root)
+        || expected.activation_height == 0
+        || expected.chain_id == 0
+        || expected.network_id.is_empty()
+        || expected.chain_id != chain_id
+        || expected.network_id != network_id
+        || expected.genesis_hash != genesis_hash
+        || expected.activation_height != finalized.height
+        || expected.finalized_block_id != finalized.block_id
+        || expected.state_root != state_root
+        || synergy_state::state_root(world).map_err(|error| format!("{error:?}"))? != state_root
+    {
+        return Err(
+            "expected activation record does not match the verified scope and boundary".into(),
+        );
+    }
+    let Some(bytes) = world.protocol.get(&expected.record_key) else {
+        return Ok(json!({"status":"expected_record_absent", "record_key":expected.record_key}));
+    };
+    if bytes.is_empty() || bytes.len() > MAX_DOCUMENT {
+        return Err("activation record exceeds proof resource bounds".into());
+    }
+    let digest: String = Primitives
+        .hash(HashAlgorithm::Sha256, bytes)
+        .map_err(|error| format!("APQE activation record digest: {error:?}"))?
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    if digest != expected.record_sha256 {
+        return Err("finalized governance record differs from independently expected bytes".into());
+    }
+    Ok(
+        json!({"status":"exact_expected_record_finalized", "record_key":expected.record_key,
+        "record_sha256":expected.record_sha256, "activation_height":expected.activation_height}),
+    )
+}
+
+struct ActivationBoundaryEvidence<'a> {
+    finality: &'a VerifiedFinalityProof,
+    block: &'a VerifiedBlockCommitment<'a>,
+    world: &'a synergy_state::WorldState,
+}
+
+fn inspect_activation_transition(
+    before: ActivationBoundaryEvidence<'_>,
+    after: ActivationBoundaryEvidence<'_>,
+    chain_id: u64,
+    network_id: &str,
+    genesis_hash: &str,
+    expected: &ActivationRecordExpectation,
+) -> Result<Value, String> {
+    if before.finality.record.height == 0
+        || before.finality.record.height.checked_add(1) != Some(after.finality.record.height)
+        || after.block.parent_block_id != before.finality.record.block_id
+        || after.finality.parent_block_id != before.finality.record.block_id
+        || before.finality.following_block_id != after.finality.record.block_id
+    {
+        return Err("activation proofs do not link adjacent certified blocks".into());
+    }
+    if synergy_state::state_root(before.world).map_err(|error| format!("{error:?}"))?
+        != before.block.state_root
+    {
+        return Err("activation predecessor World differs from its verified state root".into());
+    }
+    let record = inspect_expected_activation_record(
+        after.world,
+        &after.finality.record,
+        after.block.state_root,
+        chain_id,
+        network_id,
+        genesis_hash,
+        expected,
+    )?;
+    if before.world.protocol.contains_key(&expected.record_key) {
+        return Err(
+            "expected activation record already existed in the finalized predecessor".into(),
+        );
+    }
+    if !after.world.protocol.contains_key(&expected.record_key) {
+        return Err("expected activation record is absent at the verified boundary".into());
+    }
+    Ok(json!({
+        "status":"expected_record_introduced_at_finalized_boundary",
+        "predecessor":{"height":before.finality.record.height,"block_id":before.finality.record.block_id,
+            "state_root":before.block.state_root, "finality_certificate_id":before.finality.record.finality_certificate_id},
+        "boundary_record":record,
+    }))
+}
+
+fn read_canonical_world(path: &str) -> Result<synergy_state::WorldState, String> {
+    let original =
+        super::super::apqe_transport::read(std::path::Path::new(path), MAX_DOCUMENT as u64, false)?;
+    let world = serde_json::from_slice(&original).map_err(|error| error.to_string())?;
+    if serde_json::to_vec(&world).map_err(|error| error.to_string())? != original {
+        return Err("exact canonical World preimage required".into());
+    }
+    Ok(world)
 }
 
 pub(crate) fn verify_finality_proof_cli(args: impl Iterator<Item = String>) -> Result<(), String> {
     let args: Vec<_> = args.collect();
-    let [action, config, proof] = args.as_slice() else {
-        return Err("usage: finality-proof verify CONFIG REASSEMBLED_PROOF_JSON".into());
+    let (config, proof, block, inspection, predecessor) = match args.as_slice() {
+        [action, config, proof] if action == "verify" => (config, proof, None, None, None),
+        [action, config, proof, block] if action == "verify" => (config, proof, Some(block), None, None),
+        [action, config, proof, block, world, query]
+            if matches!(action.as_str(), "verify-candidate-state" | "verify-activation-record") => {
+            (config, proof, Some(block), Some((action, world, query)), None)
+        }
+        [action, config, proof, block, world, query, previous_proof, previous_block, previous_world]
+            if action == "verify-activation-transition" => {
+            (config, proof, Some(block), Some((action, world, query)),
+                Some((previous_proof, previous_block, previous_world)))
+        }
+        _ => return Err(
+            "usage: finality-proof verify CONFIG FINALITY_JSON [BLOCK_COMMITMENT_JSON], finality-proof {verify-candidate-state|verify-activation-record} CONFIG FINALITY_JSON BLOCK_COMMITMENT_JSON WORLD_JSON QUERY_JSON, or finality-proof verify-activation-transition CONFIG FINALITY_JSON BLOCK_COMMITMENT_JSON WORLD_JSON EXPECTATION_JSON PREVIOUS_FINALITY_JSON PREVIOUS_BLOCK_JSON PREVIOUS_WORLD_JSON".into(),
+        ),
     };
-    if action != "verify" {
-        return Err("finality-proof supports verify only".into());
-    }
     let configuration =
         synergy_config::load(std::path::Path::new(config)).map_err(|e| e.to_string())?;
     let genesis_hash = crate::commands::selected_network::verify(&configuration)?;
@@ -272,12 +488,87 @@ pub(crate) fn verify_finality_proof_cli(args: impl Iterator<Item = String>) -> R
         MAX_DOCUMENT as u64,
         false,
     )?;
-    let verified = verify_finality_bytes(&bytes, &authority)?;
-    println!(
-        "{}",
-        json!({"version":1,"verified":true,"chain_id":configuration.chain_id,
-        "network_id":configuration.network_id,"genesis_hash":genesis_hash,"finalized":verified})
-    );
+    let finality = verify_finality_bytes(&bytes, &authority)?;
+    let verified = &finality.record;
+    let mut result = json!({"version":1,"verified":true,"chain_id":configuration.chain_id,
+        "network_id":configuration.network_id,"genesis_hash":genesis_hash,"finalized":verified});
+    if let Some(block) = block {
+        let block_bytes = super::super::apqe_transport::read(
+            std::path::Path::new(block),
+            MAX_DOCUMENT as u64,
+            false,
+        )?;
+        let header = verify_block_commitment(&block_bytes, verified)?;
+        let state_root = header.state_root;
+        let (epoch, epoch_context_root, timestamp_unix) =
+            verified_consensus_position(verified, &authority)?;
+        result["state_root"] = json!(state_root);
+        result["epoch"] = json!(epoch);
+        result["epoch_context_root"] = json!(epoch_context_root);
+        result["consensus_timestamp_unix"] = json!(timestamp_unix);
+        if let Some((action, world, query)) = inspection {
+            use super::super::protected_accounts::inspection::{inspect, CandidateReadQuery};
+            let query =
+                super::super::apqe_transport::read(std::path::Path::new(query), 8 * 1024, false)?;
+            let world = read_canonical_world(world)?;
+            if let Some((previous_proof, previous_block, previous_world)) = predecessor {
+                let expectation: ActivationRecordExpectation =
+                    serde_json::from_slice(&query).map_err(|error| error.to_string())?;
+                let read = |path: &str| {
+                    super::super::apqe_transport::read(
+                        std::path::Path::new(path),
+                        MAX_DOCUMENT as u64,
+                        false,
+                    )
+                };
+                let prior = verify_finality_bytes(&read(previous_proof)?, &authority)?;
+                let prior_block_bytes = read(previous_block)?;
+                let prior_header = verify_block_commitment(&prior_block_bytes, &prior.record)?;
+                let prior_world = read_canonical_world(previous_world)?;
+                result["activation_transition"] = inspect_activation_transition(
+                    ActivationBoundaryEvidence {
+                        finality: &prior,
+                        block: &prior_header,
+                        world: &prior_world,
+                    },
+                    ActivationBoundaryEvidence {
+                        finality: &finality,
+                        block: &header,
+                        world: &world,
+                    },
+                    configuration.chain_id,
+                    &configuration.network_id,
+                    &genesis_hash,
+                    &expectation,
+                )?;
+            } else if action == "verify-activation-record" {
+                let expectation: ActivationRecordExpectation =
+                    serde_json::from_slice(&query).map_err(|error| error.to_string())?;
+                result["activation_record"] = inspect_expected_activation_record(
+                    &world,
+                    verified,
+                    state_root,
+                    configuration.chain_id,
+                    &configuration.network_id,
+                    &genesis_hash,
+                    &expectation,
+                )?;
+            } else {
+                let query: CandidateReadQuery =
+                    serde_json::from_slice(&query).map_err(|error| error.to_string())?;
+                result["candidate_state"] = inspect(
+                    &world,
+                    verified,
+                    state_root,
+                    timestamp_unix,
+                    configuration.chain_id,
+                    &genesis_hash,
+                    query,
+                )?;
+            }
+        }
+    }
+    println!("{result}");
     Ok(())
 }
 
@@ -599,7 +890,10 @@ pub(crate) fn qualify_first_epoch_timeout(
         .unwrap();
     let proof = ingress.finality_proof(first).unwrap();
     let exact = serde_json::to_vec(&proof).unwrap();
-    assert_eq!(verify_finality_bytes(&exact, &active).unwrap(), expected);
+    assert_eq!(
+        verify_finality_bytes(&exact, &active).unwrap().record,
+        expected
+    );
     let mut invalid: ClientFinalityEvidence = serde_json::from_slice(&exact).unwrap();
     invalid.witness.timeout_certificates[0].highest_qc_proofs[0].participants[0].signature[0] ^= 1;
     assert!(verify_finality_bytes(&serde_json::to_vec(&invalid).unwrap(), &active).is_err());
@@ -608,6 +902,46 @@ pub(crate) fn qualify_first_epoch_timeout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verified_block_preimage_binds_the_state_root_to_the_finalized_height() {
+        let protected_root = "a".repeat(64);
+        let state_root = "b".repeat(64);
+        let preimage = |height, root: &str, protected: &str| {
+            serde_json::to_vec(&(
+                height,
+                "parent",
+                protected,
+                root,
+                Vec::<Value>::new(),
+                Vec::<Value>::new(),
+            ))
+            .unwrap()
+        };
+        let original = preimage(7, &state_root, &protected_root);
+        let record = FinalizedBlockRecord {
+            height: 7,
+            block_id: synergy_block::hash_block_bytes(&original),
+            protected_execution_root: protected_root.clone(),
+            finality_certificate_id: "c".repeat(64),
+        };
+        assert_eq!(
+            verify_block_commitment(&original, &record)
+                .unwrap()
+                .state_root,
+            state_root
+        );
+        let substituted = preimage(7, &"d".repeat(64), &protected_root);
+        assert!(verify_block_commitment(&substituted, &record).is_err());
+        let stale = preimage(6, &state_root, &protected_root);
+        let mut incorrect = record.clone();
+        incorrect.block_id = synergy_block::hash_block_bytes(&stale);
+        assert!(verify_block_commitment(&stale, &incorrect).is_err());
+        let wrong_protected_root = preimage(7, &state_root, &"e".repeat(64));
+        incorrect.block_id = synergy_block::hash_block_bytes(&wrong_protected_root);
+        assert!(verify_block_commitment(&wrong_protected_root, &incorrect).is_err());
+    }
+
     #[test]
     fn proof_pages_preserve_original_integer_bytes_and_require_pinned_continuation() {
         let original = (u128::MAX, "large\"integer", vec![u64::MAX; 35]);
@@ -830,7 +1164,34 @@ mod tests {
         let store = VerifiedQuorumCertificateStore::new(&scratch.0).unwrap();
         let mut parent = authority.anchor_parent.clone();
         let mut finality = ThreeQcFinality::default();
-        for height in 1..=3 {
+        let preceding_world = synergy_state::WorldState::default();
+        let mut world = preceding_world.clone();
+        let fixture_record = b"test-only externally pinned decision bytes";
+        let mutation = synergy_governance::GovernedStateMutation {
+            action_kind: "qualification".into(),
+            target: "fixture-activation".into(),
+            expected_value: None,
+            value: fixture_record.to_vec(),
+        };
+        let record_key = mutation.state_key().unwrap();
+        world.protocol.insert(record_key.clone(), mutation.value);
+        let preceding_root = synergy_state::state_root(&preceding_world).unwrap();
+        let root = synergy_state::state_root(&world).unwrap();
+        let protected_root = "e".repeat(64);
+        let mut preimages = Vec::new();
+        let mut expected = None;
+        for height in 1..=4 {
+            let block = serde_json::to_vec(&(
+                height,
+                parent.block_id(),
+                &protected_root,
+                if height == 1 { &preceding_root } else { &root },
+                Vec::<Value>::new(),
+                Vec::<Value>::new(),
+            ))
+            .unwrap();
+            let id = synergy_block::hash_block_bytes(&block);
+            preimages.push(block);
             let votes = pairs
                 .iter()
                 .take(4)
@@ -839,11 +1200,11 @@ mod tests {
                     let mut vote = BlockVote {
                         context: ConsensusObjectContext::for_height(&authority.epoch, height, 0)
                             .unwrap(),
-                        block_id: format!("proof-block-{height}"),
+                        block_id: id.clone(),
                         parent_block_id: parent.block_id().into(),
                         parent: parent.clone(),
                         takeover_tc_id: None,
-                        protected_execution_root: "e".repeat(64),
+                        protected_execution_root: protected_root.clone(),
                         validator_id: format!("proof-validator-{i}"),
                         key_id: format!("proof-key-{i}"),
                         signature: Vec::new(),
@@ -876,11 +1237,17 @@ mod tests {
                 qc_id: qc.id().unwrap(),
             };
             finality.accept(qc).unwrap();
+            if height == 3 {
+                expected = finality.last_finalized().cloned();
+            }
         }
-        let expected = finality.last_finalized().unwrap().clone();
-        synergy_posy::persistence::FinalityStore::new(&scratch.0)
-            .unwrap()
-            .commit_exactly_once(&expected, None)
+        let expected = expected.unwrap();
+        let expected_boundary = finality.last_finalized().unwrap();
+        assert_eq!((expected.height, expected_boundary.height), (1, 2));
+        let records = synergy_posy::persistence::FinalityStore::new(&scratch.0).unwrap();
+        records.commit_exactly_once(&expected, None).unwrap();
+        records
+            .commit_exactly_once(expected_boundary, Some(&expected))
             .unwrap();
         let budget = WorldResourceBudget::new(PROOF_SCRATCH * 2);
         let ingress =
@@ -921,7 +1288,185 @@ mod tests {
             entries,
             Some(engine),
         );
-        assert_eq!(verify_finality_bytes(&exact, &trusted).unwrap(), expected);
+        let verified = verify_finality_bytes(&exact, &trusted).unwrap();
+        assert_eq!(verified.record, expected);
+        let activation_evidence = serde_json::to_vec(&ingress.finality_proof(2).unwrap()).unwrap();
+        let boundary = verify_finality_bytes(&activation_evidence, &trusted).unwrap();
+        assert_eq!(&boundary.record, expected_boundary);
+        let before = verify_block_commitment(&preimages[0], &verified.record).unwrap();
+        let after = verify_block_commitment(&preimages[1], &boundary.record).unwrap();
+        let verified_root = after.state_root;
+        let genesis = "1".repeat(64);
+        let pinned = ActivationRecordExpectation {
+            chain_id: 23,
+            network_id: "qualification-network".into(),
+            genesis_hash: genesis.clone(),
+            activation_height: 2,
+            finalized_block_id: boundary.record.block_id.clone(),
+            state_root: verified_root.into(),
+            record_key: record_key.clone(),
+            record_sha256: Primitives
+                .hash(HashAlgorithm::Sha256, fixture_record)
+                .unwrap()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+        };
+        let observe = |world: &synergy_state::WorldState,
+                       expectation: ActivationRecordExpectation| {
+            inspect_expected_activation_record(
+                world,
+                &boundary.record,
+                verified_root,
+                23,
+                "qualification-network",
+                &genesis,
+                &expectation,
+            )
+        };
+        let transition = |prior_header: &VerifiedBlockCommitment<'_>,
+                          prior_world: &synergy_state::WorldState,
+                          next_header: &VerifiedBlockCommitment<'_>,
+                          expectation: &ActivationRecordExpectation| {
+            inspect_activation_transition(
+                ActivationBoundaryEvidence {
+                    finality: &verified,
+                    block: prior_header,
+                    world: prior_world,
+                },
+                ActivationBoundaryEvidence {
+                    finality: &boundary,
+                    block: next_header,
+                    world: &world,
+                },
+                23,
+                "qualification-network",
+                &genesis,
+                expectation,
+            )
+        };
+        let introduced = transition(&before, &preceding_world, &after, &pinned).unwrap();
+        assert_eq!(
+            introduced["status"],
+            "expected_record_introduced_at_finalized_boundary"
+        );
+        assert_eq!(introduced["predecessor"]["height"], 1);
+        assert_eq!(
+            introduced["predecessor"]["block_id"],
+            verified.record.block_id
+        );
+        assert_eq!(introduced["boundary_record"]["activation_height"], 2);
+        let unrelated_parent = VerifiedBlockCommitment {
+            parent_block_id: "another-parent",
+            state_root: after.state_root,
+        };
+        assert_eq!(
+            transition(&before, &preceding_world, &unrelated_parent, &pinned).unwrap_err(),
+            "activation proofs do not link adjacent certified blocks",
+        );
+        assert_eq!(
+            transition(&before, &world, &after, &pinned).unwrap_err(),
+            "activation predecessor World differs from its verified state root",
+        );
+        assert_eq!(
+            transition(
+                &VerifiedBlockCommitment {
+                    parent_block_id: before.parent_block_id,
+                    state_root: after.state_root
+                },
+                &world,
+                &after,
+                &pinned
+            )
+            .unwrap_err(),
+            "expected activation record already existed in the finalized predecessor",
+        );
+        assert_eq!(
+            transition(
+                &before,
+                &preceding_world,
+                &after,
+                &ActivationRecordExpectation {
+                    record_key: "governance/qualification/absent".into(),
+                    ..pinned.clone()
+                }
+            )
+            .unwrap_err(),
+            "expected activation record is absent at the verified boundary",
+        );
+        assert_eq!(
+            observe(&world, pinned.clone()).unwrap()["status"],
+            "exact_expected_record_finalized"
+        );
+        let mut altered = world.clone();
+        altered.protocol.insert(record_key, vec![0xff]);
+        assert!(observe(&altered, pinned.clone()).is_err());
+        for wrong in [
+            ActivationRecordExpectation {
+                genesis_hash: "2".repeat(64),
+                ..pinned.clone()
+            },
+            ActivationRecordExpectation {
+                chain_id: 24,
+                ..pinned.clone()
+            },
+            ActivationRecordExpectation {
+                network_id: "other-network".into(),
+                ..pinned.clone()
+            },
+            ActivationRecordExpectation {
+                activation_height: 3,
+                ..pinned.clone()
+            },
+            ActivationRecordExpectation {
+                record_sha256: "3".repeat(64),
+                ..pinned.clone()
+            },
+            ActivationRecordExpectation {
+                record_key: "governance/qualification/../fixture-activation".into(),
+                ..pinned.clone()
+            },
+        ] {
+            assert!(observe(&world, wrong).is_err());
+        }
+        assert_eq!(
+            observe(
+                &world,
+                ActivationRecordExpectation {
+                    record_key: "governance/qualification/absent".into(),
+                    ..pinned
+                }
+            )
+            .unwrap()["status"],
+            "expected_record_absent",
+        );
+        assert!(verified_consensus_position(&verified.record, &trusted).is_err());
+        let timed = Arc::new(trusted.qualification_with_ingress(
+            synergy_etdag::IngressKemKeyRegistry {
+                context_root: synergy_etdag::EtdagDigest::from_domain_bytes(
+                    "proof-test-registry",
+                    b"",
+                ),
+                records: Vec::new(),
+            },
+        ));
+        let (epoch, context, consensus_time) = verified_consensus_position(
+            &verify_finality_bytes(&exact, &timed).unwrap().record,
+            &timed,
+        )
+        .unwrap();
+        assert_eq!(
+            (epoch, context, consensus_time),
+            (1, timed.epoch.root().unwrap(), 1000)
+        );
+        let mut future = verified.record.clone();
+        future.height = timed.epoch.epoch_end_height + 1;
+        assert!(verified_consensus_position(&future, &timed).is_err());
+        let mut forged_clock: ClientFinalityEvidence = serde_json::from_slice(&exact).unwrap();
+        forged_clock.finalized.height += 1;
+        assert!(
+            verify_finality_bytes(&serde_json::to_vec(&forged_clock).unwrap(), &timed).is_err()
+        );
         let mut mismatched = serde_json::from_slice::<Value>(&exact).unwrap();
         mismatched["finalized"]["block_id"] = json!("substituted");
         assert!(

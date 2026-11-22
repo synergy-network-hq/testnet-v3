@@ -37,6 +37,21 @@ reconstruct bytes. SHA-256 pins page consistency; it does not authenticate the
 block, authority, or network. Normal JSON-RPC errors cover invalid queries and
 unavailable/pruned evidence. No partial witness is represented as complete.
 
+A client must fetch each required kind independently. The compact receipt
+index and retained finality witness can outlive the canonical block preimage.
+Core's certification-only read checks that its verified durable execution
+tip covers the requested height. It can return the original finality witness
+after the historical execution view is retired, provided the verifier still
+has the exact retained quorum and timeout certificates. Any surviving
+execution anchor must agree with that witness. The block and World proof
+kinds require their original preimages.
+For example, the current Canary returned the original finality pages at
+height 9,704 on November 21, 2026, while `block_commitment` returned
+`requested finalized evidence is not retained`. The compact receipt from
+that height cannot establish original receipt inclusion. There is no published
+guaranteed retention window for these preimages. Fetch the pages needed for
+verification while available and report missing evidence explicitly.
+
 ## Original commitments and verification
 
 * World bytes are the complete original canonical `WorldState` JSON, including
@@ -70,13 +85,230 @@ selected configuration; no custody, signing, network access, or storage writer):
 
 ```sh
 synergy-node finality-proof verify CONFIG REASSEMBLED_PROOF_JSON
+synergy-node finality-proof verify CONFIG REASSEMBLED_PROOF_JSON REASSEMBLED_BLOCK_COMMITMENT_JSON
 ```
 
 It authenticates configuration-selected signed Genesis and retained authority
 history, enforces canonical complete proof bytes, verifies native QC/TC evidence,
 and emits `version`, `verified:true`, `chain_id`, `network_id`, `genesis_hash`,
-and the authenticated `finalized` record. The caller must perform the block/World
-matches above. The CLI does not select trust from proof-supplied keys.
+and the authenticated `finalized` record. With the optional block commitment
+preimage it also checks the exact block-ID hash, height and protected execution
+root and emits `state_root`, `epoch`, `epoch_context_root` and
+`consensus_timestamp_unix`. The caller checks the intended height and matches
+the original World preimage to `state_root`. The CLI does not select trust from
+proof-supplied keys or use a gateway-provided clock.
+
+To derive the same clock in a client, verify all three QCs against their
+original authenticated epoch contexts. Select the authenticated protected time
+policy for the **finalized block's** height, including when the descendants
+that finalize it cross an epoch boundary. Evaluate
+`(epoch_start_timestamp_ms + (height - epoch_start_height) * target_block_time_ms) / 1000`
+with checked integer arithmetic and the height constrained to its authenticated
+epoch range. Reject missing policy, overflow or a substituted finalized record
+or block preimage. The result is the consensus time used by enrollment
+execution, not an observation time. This adds no field to the original v1
+proof bytes and no consensus action.
+
+## Finalized governance record inspection
+
+```sh
+synergy-node finality-proof verify-activation-record CONFIG FINALITY_JSON BLOCK_COMMITMENT_JSON WORLD_JSON EXPECTATION_JSON
+```
+
+For a separately authenticated decision, select the exact record key and
+original record SHA-256 independently of the proof source. The expectation
+contains `chain_id`, `network_id`, logical `genesis_hash`, `activation_height`,
+`finalized_block_id`, `state_root`, `record_key`, and `record_sha256`.
+The key names one `governance/<action-kind>/<target>` record. Each path
+segment permits ASCII alphanumerics, dots, underscores, and hyphens. The
+command has no default key, digest, or activation height.
+
+The reader verifies the original signed Genesis, applicable epoch authority,
+three-QC evidence, block commitment, and complete canonical World. At the
+exact selected height, it returns `exact_expected_record_finalized` if the
+World contains the expected bytes, or `expected_record_absent` if the key is
+absent in that authenticated World. A conflicting record, another chain or
+Genesis, insufficient evidence, or a height or hash mismatch fails closed.
+Use a second command when the release requires evidence that the record was
+introduced at the specified boundary.
+
+```sh
+synergy-node finality-proof verify-activation-transition CONFIG FINALITY_JSON BLOCK_COMMITMENT_JSON WORLD_JSON EXPECTATION_JSON PREVIOUS_FINALITY_JSON PREVIOUS_BLOCK_JSON PREVIOUS_WORLD_JSON
+```
+
+Supply the original finality, block, and World for height H−1 alongside the
+evidence and expectation for H. The verifier resolves each QC under its
+original authenticated epoch and checks that the QCs and committed block
+preimage link H directly to H−1. It verifies both World roots. It returns
+`expected_record_introduced_at_finalized_boundary` only if that key was absent
+at H−1 and its exact pinned bytes are present at H. The result includes the
+certified predecessor height, block ID, finality certificate ID, and state
+root. Missing, conflicting, or prematurely present records fail closed.
+
+An absent-to-present transition proves the change between those two states.
+Ratification authority, execution eligibility, and exclusion of older uses
+require separate evidence. The public World disclosure policy is unchanged.
+
+## Protected candidate state inspection
+
+```sh
+synergy-node finality-proof verify-candidate-state CONFIG FINALITY_JSON BLOCK_COMMITMENT_JSON WORLD_JSON QUERY_JSON
+```
+
+Supply the complete original World for the same finalized block, obtained from
+an authorized evidence source. The local query pins `height`, `block_id` and
+`state_root` and selects `ownership_chain_id` as a 32-byte lowercase hexadecimal
+integer and one to four distinct `provider_manifests` as 32-byte lowercase
+hexadecimal hashes. Select those parameters independently of the proof. Query
+up to eight total entries across `addresses`, `commitments`, `settlements`,
+`sponsorships` and `transition_settlements`.
+Use canonical `synw` addresses and 32-byte lowercase hexadecimal commitment
+hashes. A settlement selector has `sender`, `intent_id` and
+`signed_intent_digest`. Supply the original 32-byte signed intent ID and
+64-byte native intent digest in lowercase hexadecimal.
+A sponsorship selector carries a canonical ordinary `syna` payer, the
+`nonce_before`, and `signed_sponsor_digest` in lowercase hexadecimal. Compute
+the 64-byte digest as SHA3-512 over the ASCII domain `AEGIS/ENROLL-SPONSOR/v1`
+followed by the exact canonical sponsor intent bytes.
+
+The normal finality result includes a `candidate_state` projection labeled
+`unactivated_candidate`. Enrolled entries include the address, account ID,
+registration height, full SEC1 point, exact canonical policy bytes, policy hash
+and epoch, D/P/R public roles and keys, decimal nWei balance and next nonce.
+An account is `absent` only if the authenticated World lacks both its ledger and
+policy entries. A commitment includes its exact hash, inclusion height, recorded
+inclusion consensus time and `unconsumed` or `consumed` status. Query the same
+hash in the certified Worlds before and after reveal to compare observations.
+The consuming action and fees require their own certified receipt evidence.
+
+An enrolled account also returns `pending_transition`. It is `null` only when
+that account has no pending transition record in this authenticated World.
+Otherwise the closed projection contains `status:"scheduled_candidate"`,
+`mode` (`ordinary` or `recovery`), `pending_reference`, `replaced_role` (0 for
+D, 1 for P), `old_policy_epoch`, `old_policy_hash`, `new_policy_hash`,
+`scheduled_height`, `scheduled_consensus_timestamp_unix`, and
+`activation_timestamp_unix`. References and policy hashes are lowercase
+32-byte hexadecimal strings; timestamps are consensus seconds, not wall-clock
+observations. No additional query selector is required beyond the account
+address.
+
+The reader checks the canonical pending record against the same finalized
+account, active policy, Genesis and registration height. It validates the exact
+proposed canonical replacement and its delay against the recorded scheduling
+time, and requires the matching deadline-index entry and reference. A recovery
+record requires its nonzero continuity reference; this does not independently
+verify an external DKG/share-repair ceremony. Malformed, mismatched or unindexed
+pending state refuses the projection. A due `scheduled_candidate` is not proof
+that activation executed. `null` is not a terminal cancellation/veto receipt,
+proof of earlier activation, or evidence that no transition ever existed.
+
+A `transition_settlements` selector supplies a canonical `synw` `address`,
+the original 32-byte `pending_reference` and, for a signed cancellation or
+veto, an optional 64-byte `signed_intent_digest`. Both use lowercase
+hexadecimal. The output includes this array when requested.
+Each result is keyed by the account and exact reference and reports
+`canceled_candidate`, `vetoed_candidate`, `activated_candidate`, or
+`no_transition_settlement_in_snapshot`. A terminal result binds the mode,
+deadline, source and inclusion heights and consensus times, and the old and
+resulting policy epochs and hashes. A signed charge gives the action ID,
+exact signed intent ID and digest, gas, decimal nWei fee, and before/after
+nonce. Automatic activation returns `signed_charge:null`. A different
+digest, impossible terminal effect, or matching pending and terminal records
+refuses the projection.
+
+The candidate executor inserts that settlement atomically with its policy,
+pending, fee and nonce changes. Verification uses the existing block preimage
+format and authenticates the record through the original certified World root.
+Missing state at the selected snapshot cannot
+identify a refusal, lapse, or previously pruned outcome. This candidate
+projection does not change public World disclosure or authorize PW13.
+
+The transfer candidate writes its settlement record atomically with debit,
+credit, fee and nonce changes. An `applied_candidate` settlement includes the
+verified signed-intent digest, exact decrypted content SHA3-256, recipient,
+source and inclusion heights, inclusion consensus time, policy epoch, gas,
+requested `amount_nwei`, actual `credited_nwei`, fee and before/after nonce.
+An ordered, authenticated transfer that was feasible at its finalized source
+can settle as `reverted_candidate` when an earlier ordered write leaves
+insufficient transfer balance or a recipient credit would overflow. The
+candidate reason is `insufficient_transfer_balance` or
+`recipient_balance_overflow`. It records `credited_nwei:"0"`, the exact
+fee and one nonce advance. Funding the fee, current authority, exact encrypted
+content and the original intent remain required. Refusal, replay, invalid
+source state, and an atomic fee or settlement failure write no outcome.
+
+SNRG amounts and fees are decimal nWei strings. Authentication comes from the verified World and block supplied to
+the command. The record contains no self-referential resulting block or World
+hash. A different signed digest for an existing sender/intent ID fails closed.
+`no_settlement_in_snapshot` reports missing candidate state at the selected
+height. It provides no evidence of rejection, expiry or non-consumption.
+
+The isolated encryption fixture can also record an `engineering_etdag_opening`
+with `envelope_id`, `processing_context_root`, `authorization_height`, and
+`payload_root`. The payload root uses the existing processing function over the
+original context root, envelope ID, and exact opened plaintext. A selector may
+supply that object to require an exact match to the settled opening. The
+authorization height is the envelope's key-validity anchor. The record separately
+reports the source finalized height and the execution height. This evidence
+describes local native ETDAG encryption and decryption. The fixture assigns no
+public receipt ID and produces no live admission, readiness, or authorized reveal
+record.
+
+The sponsored enrollment candidate commits each paid outcome with its
+commitment, fee and nonce changes. The result reports
+`commit_applied_candidate`, `duplicate_paid_commit_candidate`,
+`reveal_applied_candidate` or `reveal_reverted_commit_used_candidate`, with
+exact commitment hash, gas, decimal nWei fee,
+source finalized height and consensus time, inclusion height and consensus
+time, and both nonce values. A fresh sponsor authorization for an existing
+commitment can pay a separate fee without rewriting that commitment. An exact
+retransmission can be reconciled by the original payer, nonce and digest
+without a second charge. A conflicting digest at that payer and nonce fails
+closed. A missing sponsorship record only states absence from the selected
+World. An ordinary action could have consumed the same payer nonce.
+
+The proposed paid revert covers one exact ordering conflict. The reveal and
+sponsor must pass the finalized-parent, proof, expiry, payer, and fee checks.
+The working block must already hold the exact consumed commitment and initial
+policy written by an earlier reveal at that height. The second action consumes
+one sponsor nonce and fee and writes its own outcome. The protected account,
+policy, and commitment are untouched. An already-consumed commitment in the
+finalized parent, a stale payer nonce, insufficient funds, expiry, and other
+failed checks carry no charge.
+
+### Candidate transition execution effects
+
+The isolated ordinary/recovery executors return a typed
+`TransitionExecutionOutcome` after a successful atomic write. It is an internal
+test-only result, not a serialized public receipt or an independently
+authenticated event. Its fields identify the deadline/account/reference/mode,
+`kind` (`Canceled`, `Vetoed` or `Activated`), source finalized height, inclusion
+height and consensus time, and old/resulting policy epochs and hashes.
+
+`Canceled` and `Vetoed` retain the active policy hash and epoch and carry
+`signed_charge`: the exact action, intent ID, native signed digest, gas, nWei
+fee and before/after nonce. They remove the exact pending record and index
+atomically with one authorized fee and nonce change. `Activated` advances the
+policy epoch and installs the proposed policy, with `signed_charge:None`:
+there is no submitted activation transaction, second nonce or fee. The bounded
+candidate scheduler returns its ordered outcome list only after the complete
+selected batch commits. A failed batch returns no successful effects.
+
+These returned effects do not persist a system-event journal, add a terminal
+World tombstone, or extend the block/receipt wire format. Existing transaction
+receipts remain paired with actual transactions. In particular, a scheduler
+activation must not be assigned a fabricated transaction ID or transaction
+receipt. Certified terminal evidence requires an approved commitment and its
+proof/replay contract; an in-memory outcome or missing pending record cannot
+substitute for that evidence. The before/after authenticated Worlds establish
+their respective state observations, not an uncommitted event's identity.
+
+Missing or pruned World bytes, malformed entries, scope mismatches and
+one-sided account records produce an error without a projection. The local
+command leaves the public World disclosure policy unchanged. The projection
+omits enrollment bytes, wallet UUIDs and unrelated state. It does not enable
+protected enrollment, spending or recovery, or establish external DKG
+provenance.
 
 ## Disclosure, resources and gateway behavior
 
