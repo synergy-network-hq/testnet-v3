@@ -130,6 +130,38 @@ pub(super) fn decode_transfer(
     }
 }
 
+/// Exact decoded PW13 transfer content after authenticated decryption. This
+/// parser carries no encrypted-ingress or consensus activation authority.
+pub(super) struct TransferContent<'a> {
+    pub intent: &'a [u8],
+    pub proofs: [TransferRoleProof<'a>; 2],
+}
+
+pub(super) struct TransferRoleProof<'a> {
+    pub key_version: u64,
+    pub participant_id: [u8; 32],
+    pub digest: [u8; 64],
+    pub signature: &'a [u8],
+}
+
+pub(super) fn decode_transfer_content(bytes: &[u8]) -> Result<TransferContent<'_>, &'static str> {
+    let mut reader = Reader(bytes);
+    reader.byte(0x84)?;
+    if reader.uint()? != u64::from(TRANSFER) {
+        return Err("INVALID_PROTECTED_TRANSFER_CONTENT_ACTION");
+    }
+    // The nested native body contains a 60-byte bounded action payload and
+    // fixed-size account, nonce, network and fee fields.
+    let intent = reader.bytes(1, 512)?;
+    reader.byte(0x82)?;
+    let proofs = [reader.transfer_role(0)?, reader.transfer_role(1)?];
+    reader.byte(0xf6)?; // A transfer has no replacement-key proof.
+    if !reader.0.is_empty() {
+        return Err("NONCANONICAL_PROTECTED_PAYLOAD");
+    }
+    Ok(TransferContent { intent, proofs })
+}
+
 pub(super) struct SponsorIntent<'a> {
     pub genesis: [u8; 32],
     pub payer: &'a str,
@@ -185,8 +217,38 @@ pub(super) fn decode_sponsor(bytes: &[u8]) -> Result<SponsorIntent<'_>, &'static
     })
 }
 
-struct Reader<'a>(&'a [u8]);
+pub(super) struct Reader<'a>(&'a [u8]);
 impl<'a> Reader<'a> {
+    pub(super) fn new(bytes: &'a [u8]) -> Self {
+        Self(bytes)
+    }
+    pub(super) fn finish(self) -> Result<(), &'static str> {
+        self.0
+            .is_empty()
+            .then_some(())
+            .ok_or("NONCANONICAL_PROTECTED_PAYLOAD")
+    }
+
+    pub(super) fn transfer_role(
+        &mut self,
+        role: u8,
+    ) -> Result<TransferRoleProof<'a>, &'static str> {
+        self.byte(0x87)?;
+        self.byte(1)?; // Role-proof format.
+        self.byte(1)?; // Candidate ML-DSA-87 algorithm.
+        let key_version = self.uint()?;
+        self.byte(role)?;
+        let participant_id = self.nonzero32()?;
+        let digest = self.fixed()?;
+        let signature = self.bytes(4_627, 4_627)?;
+        Ok(TransferRoleProof {
+            key_version,
+            participant_id,
+            digest,
+            signature,
+        })
+    }
+
     fn take(&mut self, n: usize) -> Result<&'a [u8], &'static str> {
         let (head, tail) = self
             .0
@@ -195,12 +257,12 @@ impl<'a> Reader<'a> {
         self.0 = tail;
         Ok(head)
     }
-    fn byte(&mut self, byte: u8) -> Result<(), &'static str> {
+    pub(super) fn byte(&mut self, byte: u8) -> Result<(), &'static str> {
         (self.take(1)? == [byte])
             .then_some(())
             .ok_or("NONCANONICAL_PROTECTED_PAYLOAD")
     }
-    fn bytes(&mut self, min: usize, max: usize) -> Result<&'a [u8], &'static str> {
+    pub(super) fn bytes(&mut self, min: usize, max: usize) -> Result<&'a [u8], &'static str> {
         let n = match self.take(1)?[0] {
             head @ 0x40..=0x57 => usize::from(head - 0x40),
             0x58 => {
@@ -226,7 +288,7 @@ impl<'a> Reader<'a> {
         }
         self.take(n)
     }
-    fn uint(&mut self) -> Result<u64, &'static str> {
+    pub(super) fn uint(&mut self) -> Result<u64, &'static str> {
         let head = self.take(1)?[0];
         let (width, min) = match head {
             0..=23 => return Ok(head.into()),
@@ -243,7 +305,7 @@ impl<'a> Reader<'a> {
             .then_some(value)
             .ok_or("NONCANONICAL_PROTECTED_PAYLOAD")
     }
-    fn fixed<const N: usize>(&mut self) -> Result<[u8; N], &'static str> {
+    pub(super) fn fixed<const N: usize>(&mut self) -> Result<[u8; N], &'static str> {
         self.bytes(N, N)?
             .try_into()
             .map_err(|_| "NONCANONICAL_PROTECTED_PAYLOAD")

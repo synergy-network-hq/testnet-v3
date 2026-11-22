@@ -203,6 +203,38 @@ pub struct IdentityAuthorizationCarrier {
 }
 
 impl IdentityAuthorizationCarrier {
+    /// Encode the complete carrier using the native canonical JSON rules.
+    /// This is transport framing. The binding and its proofs still need
+    /// verification against the external finalized commitment.
+    pub fn canonical_json_bytes(&self) -> Result<Vec<u8>, String> {
+        require_bounded_text(
+            "signature_domain",
+            &self.signature_domain,
+            MAX_CARRIER_DOMAIN_BYTES,
+        )?;
+        validate_binding_bounds(&self.binding)?;
+        let value = serde_json::to_value(self)
+            .map_err(|error| format!("serialize authorization carrier: {error}"))?;
+        let mut bytes = Vec::new();
+        write_canonical_json(&value, &mut bytes)?;
+        if bytes.len() > MAX_CANONICAL_BINDING_PAYLOAD_BYTES {
+            return Err("canonical identity authorization carrier exceeds its byte limit".into());
+        }
+        Ok(bytes)
+    }
+
+    pub fn from_canonical_json(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() > MAX_CANONICAL_BINDING_PAYLOAD_BYTES {
+            return Err("canonical identity authorization carrier exceeds its byte limit".into());
+        }
+        let carrier: Self = serde_json::from_slice(bytes)
+            .map_err(|error| format!("decode authorization carrier: {error}"))?;
+        if carrier.canonical_json_bytes()? != bytes {
+            return Err("noncanonical identity authorization carrier".into());
+        }
+        Ok(carrier)
+    }
+
     /// Checks the scoped dual-possession binding against finalized authority.
     #[allow(clippy::too_many_arguments)]
     pub fn identity_address_for_key_for_admission_at(

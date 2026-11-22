@@ -26,6 +26,7 @@ pub(crate) mod processing_proposals;
 pub(crate) mod processing_store;
 mod protected_accounts;
 mod protected_action_wire;
+mod protected_enrollment_wire;
 pub mod protected_admission;
 pub mod rpc;
 pub mod sentry;
