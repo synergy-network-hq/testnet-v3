@@ -12,6 +12,10 @@ fn compile_static_lib(name: &str, include_dirs: &[PathBuf], sources: &[PathBuf])
     let mut build = cc::Build::new();
     build
         .warnings(false)
+        // NIST rng.h callers must not bind libsodium's unrelated global RNG ABI.
+        // PQClean randombytes.h retains its own PQRUST_RUST_randombytes mapping.
+        .define("randombytes", "SYNERGY_CORE_NIST_randombytes")
+        .define("randombytes_init", "SYNERGY_CORE_NIST_randombytes_init")
         .flag_if_supported("-O3")
         .flag_if_supported("-std=c99");
 

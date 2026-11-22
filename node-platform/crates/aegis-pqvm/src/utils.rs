@@ -55,22 +55,24 @@ pub fn sha3_digest(data: &[u8]) -> [u8; 32] {
 //
 // Some NIST reference implementations include `rng.h` and call `randombytes()`
 // directly (instead of PQClean's macro indirection to PQRUST_RUST_randombytes).
-// We provide a single process-wide implementation here, backed by
-// pqrust-internals/getrandom.
+// Core owns only its namespaced compatibility ABI, backed by the unchanged
+// pqrust-internals/getrandom backend. Never export libsodium's process-wide
+// randombytes names: its ABI and state belong to libsodium/Stronghold.
+// build.rs applies the same mapping to native reference callers.
 
-#[no_mangle]
+#[export_name = "SYNERGY_CORE_NIST_randombytes"]
 /// Fill `buf` with `len` random bytes from the process RNG backend.
 ///
 /// # Safety
 ///
 /// `buf` must be valid for writes of at least `len` bytes. The pointer may be
 /// null only when `len == 0`.
-pub unsafe extern "C" fn randombytes(buf: *mut u8, len: libc::c_ulonglong) -> libc::c_int {
+pub unsafe extern "C" fn nist_randombytes(buf: *mut u8, len: libc::c_ulonglong) -> libc::c_int {
     // pqrust_internals::PQRUST_RUST_randombytes uses `size_t`.
     pqrust_internals::PQRUST_RUST_randombytes(buf, len as libc::size_t)
 }
 
-#[no_mangle]
+#[export_name = "SYNERGY_CORE_NIST_randombytes_init"]
 /// Initialize RNG state for compatibility with NIST-style APIs.
 ///
 /// # Safety
@@ -78,7 +80,7 @@ pub unsafe extern "C" fn randombytes(buf: *mut u8, len: libc::c_ulonglong) -> li
 /// Callers must pass pointers that are valid for the corresponding expected
 /// buffer sizes when non-null. This implementation does not dereference them
 /// and behaves as a no-op.
-pub unsafe extern "C" fn randombytes_init(
+pub unsafe extern "C" fn nist_randombytes_init(
     _entropy_input: *mut u8,
     _personalization_string: *mut u8,
     _security_strength: libc::c_int,
