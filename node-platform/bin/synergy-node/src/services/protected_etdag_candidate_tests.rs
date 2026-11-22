@@ -4,7 +4,14 @@
 use super::super::processing_pipeline::{
     qualify_processing_vertex, AuthenticatedProcessingOpening, RevealedProcessingPayload,
 };
-use super::{processing_admission::CandidateAdmission, WorldState};
+use super::{
+    processing_admission::CandidateAdmission,
+    processing_execution::{
+        execute_protected_candidate, CandidateActionOutcome, CandidateDispatch, CandidateSlot,
+        PreparedProtectedAction,
+    },
+    FinalizedSnapshot, Position, WorldState,
+};
 use std::{
     path::Path,
     sync::{Arc, Mutex},
@@ -33,8 +40,7 @@ use synergy_etdag::{
 };
 use synergy_execution::{
     processing_group_state, processing_group_transition, processing_member_claim,
-    processing_member_claim_optional, verify_processing_payload,
-    verify_processing_record_assignment, ParentProcessingRegistry, ProcessingReadinessVerifier,
+    processing_member_claim_optional, ParentProcessingRegistry, ProcessingReadinessVerifier,
     ProcessingReadyRecord,
 };
 use synergy_posy::{FinalizedBlockRecord, ValidatorRecord, ValidatorStatus};
@@ -72,85 +78,84 @@ impl OpenedCandidateEnvelope {
         &self.context
     }
 
-    /// Exercise the shared READY publication and consumption against the same
-    /// native-verified bytes. The first check stages protected writes privately.
-    pub(super) fn execute_ordered<T>(
+    pub(super) fn execute_ordered(
         &self,
-        apply_action: impl Fn(&mut BudgetedWorld) -> Result<T, String>,
-    ) -> Result<(BudgetedWorld, T), String> {
+        dispatch: CandidateDispatch<'_>,
+        inclusion: Position,
+        execution_finalized_parent: &FinalizedSnapshot<'_>,
+        parameters: &EtdagParameters,
+    ) -> Result<(BudgetedWorld, CandidateActionOutcome), String> {
         let order = self
             .order
             .as_ref()
             .ok_or("candidate lacks a closed order")?;
-        let parent = order.world.as_ref();
         let namespace = &order.permission.namespace_root;
-        let budget = order.world.budget();
-        let mut preflight = BudgetedWorld::try_clone_world(parent, budget).map_err(err)?;
-        apply_action(&mut preflight)?;
-        drop(preflight);
-
-        let claim = processing_member_claim(
-            parent,
-            &self.envelope.aad.sender_id,
-            self.envelope.aad.nonce_slot,
-        )
-        .map_err(err)?;
-        let payload = self.plaintext();
-        let scratch = budget.reserve(payload.len() * 8 + 4096).map_err(err)?;
-        let record =
-            ProcessingReadyRecord::for_revealed_member(namespace, &claim, payload).map_err(err)?;
-        drop(scratch);
-        let verifier = FixtureReady {
-            namespace,
-            record: &record,
+        let publication = CandidateSlot {
+            inclusion: Position {
+                height: inclusion.height - 1,
+                ..inclusion
+            },
+            finalized_parent: dispatch.source,
         };
-        let maximum_gas = record.item.gas_class_units;
-        let maximum_bytes = record.item.encoded_bytes;
+        let action =
+            PreparedProtectedAction::prepare(dispatch, self.payload(), &order.world, publication)?;
+        let (published, results) = execute_protected_candidate(
+            &order.world,
+            namespace,
+            parameters,
+            publication,
+            &[&action],
+            &[&action],
+        )?;
+        assert!(results.is_empty());
+        assert_eq!(published.accounts, order.world.accounts);
 
-        let registry = ParentProcessingRegistry::read(parent, namespace, budget).map_err(err)?;
-        let selected = registry
-            .select(&verifier, maximum_gas, maximum_bytes)
-            .map_err(err)?;
-        assert_eq!(selected.records().count(), 0);
-        let lifecycle = selected
-            .prepare_lifecycle(std::slice::from_ref(&record), None, &verifier)
-            .map_err(err)?;
-        let published = lifecycle
-            .apply(BudgetedWorld::try_clone_world(parent, budget).map_err(err)?)
-            .map_err(err)?;
-        assert_eq!(published.as_ref().accounts, parent.accounts);
-
-        let registry =
-            ParentProcessingRegistry::read(published.as_ref(), namespace, budget).map_err(err)?;
-        let selected = registry
-            .select(&verifier, maximum_gas, maximum_bytes)
-            .map_err(err)?;
-        let mut records = selected.records();
-        let committed = records
-            .next()
-            .ok_or("published protected candidate was not selected")?;
-        assert_eq!(committed, &record);
-        assert!(records.next().is_none());
-        verify_processing_payload(committed, payload, budget).map_err(err)?;
-        let lifecycle = selected
-            .prepare_lifecycle(&[], None, &verifier)
-            .map_err(err)?;
-        let mut execution =
-            BudgetedWorld::try_clone_world(published.as_ref(), budget).map_err(err)?;
-        let result = apply_action(&mut execution)?;
-        let settled = lifecycle.apply(execution).map_err(err)?;
+        let execution = CandidateSlot {
+            inclusion,
+            finalized_parent: execution_finalized_parent,
+        };
+        let mut changed_limits = parameters.clone();
+        changed_limits.max_protected_gas += 1;
+        assert!(matches!(
+            execute_protected_candidate(
+                &published, namespace, &changed_limits, execution, &[&action], &[],
+            ),
+            Err(error) if error == "protected processing limits differ from the authenticated admission"
+        ));
+        let (settled, outcomes) = execute_protected_candidate(
+            &published,
+            namespace,
+            parameters,
+            execution,
+            &[&action],
+            &[],
+        )?;
+        let [outcome] =
+            <[_; 1]>::try_from(outcomes).map_err(|_| "expected one protected action settlement")?;
         assert!(processing_member_claim_optional(
             settled.as_ref(),
-            &record.sender_wallet,
-            record.sender_nonce
+            &self.envelope.aad.sender_id,
+            self.envelope.aad.nonce_slot,
         )
         .map_err(err)?
         .is_none());
         let consumed =
-            ParentProcessingRegistry::read(settled.as_ref(), namespace, budget).map_err(err)?;
+            ParentProcessingRegistry::read(settled.as_ref(), namespace, settled.budget())
+                .map_err(err)?;
         assert!(consumed.records().is_empty());
-        Ok((settled, result))
+        let (replayed, duplicate) = execute_protected_candidate(
+            &settled,
+            namespace,
+            parameters,
+            execution,
+            &[&action],
+            &[],
+        )?;
+        assert!(duplicate.is_empty());
+        assert_eq!(replayed.as_ref(), settled.as_ref());
+        Ok((settled, outcome))
     }
+
 }
 struct SignedShares(Vec<ProcessingDecryptShare>);
 impl Drop for SignedShares {
@@ -369,49 +374,6 @@ impl ProcessingReadinessVerifier for FixtureOrder<'_> {
         _: &WorldState,
     ) -> Result<bool, String> {
         Err("fixture order cannot verify inclusion eligibility".into())
-    }
-}
-
-struct FixtureReady<'a> {
-    namespace: &'a EtdagDigest,
-    record: &'a ProcessingReadyRecord,
-}
-
-impl ProcessingReadinessVerifier for FixtureReady<'_> {
-    fn first_unconsumed_position(
-        &self,
-        record: &ProcessingReadyRecord,
-        parent: &WorldState,
-    ) -> Result<Option<u32>, String> {
-        let group = processing_group_state(parent, self.namespace, record.item.group_number)
-            .map_err(err)?;
-        Ok(Some(group.next_position))
-    }
-
-    fn verify_publication(
-        &self,
-        record: &ProcessingReadyRecord,
-        parent: &WorldState,
-    ) -> Result<(), String> {
-        if record != self.record {
-            return Err("publication differs from the validated protected opening".into());
-        }
-        verify_processing_record_assignment(parent, self.namespace, record)
-            .map(drop)
-            .map_err(err)
-    }
-
-    fn identity_is_current(
-        &self,
-        record: &ProcessingReadyRecord,
-        parent: &WorldState,
-    ) -> Result<bool, String> {
-        self.verify_publication(record, parent)?;
-        Ok(parent
-            .accounts
-            .get(&record.sender_wallet)
-            .map(|account| account.nonce)
-            == Some(record.sender_nonce))
     }
 }
 

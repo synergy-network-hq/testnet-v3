@@ -857,8 +857,7 @@ impl<'a> NativeProcessingParent<'a> {
 /// is wiped even if a subsequent content decoder refuses the payload.
 /// A successful opening grants no permission to execute its contents.
 pub(super) struct AuthenticatedProcessingOpening {
-    envelope_id: EtdagDigest,
-    context_root: EtdagDigest,
+    permission: ProcessingRevealPermission,
     plaintext: SecretBytes,
     plaintext_capacity: usize,
     permit: WorldResourcePermit,
@@ -869,6 +868,7 @@ pub(super) struct RevealedProcessingPayload<'a> {
     envelope: &'a ProcessingEnvelope,
     context: &'a ProcessingContext,
     plaintext: &'a [u8],
+    permission: &'a ProcessingRevealPermission,
 }
 
 impl<'a> RevealedProcessingPayload<'a> {
@@ -881,7 +881,58 @@ impl<'a> RevealedProcessingPayload<'a> {
     pub(super) fn plaintext(&self) -> &'a [u8] {
         self.plaintext
     }
+
+    pub(super) fn ready_record(
+        &self,
+        parent: &BudgetedWorld,
+    ) -> Result<ProcessingReadyRecord, String> {
+        let scratch = self
+            .plaintext
+            .len()
+            .checked_mul(8)
+            .and_then(|n| n.checked_add(128 * 1024))
+            .ok_or("processing READY length overflow")?;
+        let _permit = parent.budget().reserve(scratch).map_err(err)?;
+        ready_record_for_opening(
+            parent.as_ref(),
+            self.permission,
+            &self.envelope.aad.sender_id,
+            self.envelope.aad.nonce_slot,
+            self.plaintext,
+        )
+    }
+
 }
+
+/// Preserve the signed reveal's original assignment when publishing readiness.
+/// The caller still verifies the application authorization before publication.
+fn ready_record_for_opening(
+    parent: &WorldState,
+    permission: &ProcessingRevealPermission,
+    sender: &str,
+    nonce: u64,
+    plaintext: &[u8],
+) -> Result<ProcessingReadyRecord, String> {
+    let claim = synergy_execution::processing_member_claim(parent, sender, nonce).map_err(err)?;
+    let group = synergy_execution::processing_group_state(
+        parent,
+        &permission.namespace_root,
+        claim.group_number,
+    )
+    .map_err(err)?;
+    if claim.group_number != permission.group_number
+        || claim.group_root != permission.group_root
+        || group.group_root != permission.group_root
+        || group.closed_by_successor.as_ref() != Some(&permission.successor_root)
+        || claim.member.processing_context_root != permission.processing_context_root
+        || claim.member.envelope.tx_commitment != permission.envelope_id
+    {
+        return Err("READY assignment differs from the authenticated reveal permission".into());
+    }
+    ProcessingReadyRecord::for_revealed_member(&permission.namespace_root, &claim, plaintext)
+        .map_err(err)
+}
+
 
 impl AuthenticatedProcessingOpening {
     fn open_in(
@@ -993,8 +1044,7 @@ impl AuthenticatedProcessingOpening {
         let plaintext = synergy_etdag::crypto::unpad_plaintext(padded.as_bytes()).map_err(err)?;
         let plaintext_capacity = plaintext.capacity();
         Ok(Self {
-            envelope_id: envelope.envelope_id.clone(),
-            context_root: envelope.aad.processing_context_root.clone(),
+            permission: permission.clone(),
             plaintext: SecretBytes::from_bytes(plaintext),
             plaintext_capacity,
             permit,
@@ -1006,8 +1056,8 @@ impl AuthenticatedProcessingOpening {
         envelope: &'a ProcessingEnvelope,
         context: &'a ProcessingContext,
     ) -> Result<RevealedProcessingPayload<'a>, String> {
-        if envelope.envelope_id != self.envelope_id
-            || envelope.aad.processing_context_root != self.context_root
+        if envelope.envelope_id != self.permission.envelope_id
+            || envelope.aad.processing_context_root != self.permission.processing_context_root
         {
             return Err("processing payload differs from the authenticated opening".into());
         }
@@ -1016,6 +1066,7 @@ impl AuthenticatedProcessingOpening {
             envelope,
             context,
             plaintext: self.plaintext.as_bytes(),
+            permission: &self.permission,
         })
     }
 
@@ -1102,15 +1153,13 @@ impl NativeProcessingCompletion {
             },
         )
         .map_err(err)?;
-        let claim = synergy_execution::processing_member_claim(
+        let record = ready_record_for_opening(
             parent.world().as_ref(),
+            &opened.permission,
             &request.sender_wallet,
             request.sender_nonce,
-        )
-        .map_err(err)?;
-        let record =
-            ProcessingReadyRecord::for_revealed_member(&parent.namespace, &claim, plaintext)
-                .map_err(err)?;
+            plaintext,
+        )?;
         let retained = opened
             .plaintext_capacity
             .checked_add(

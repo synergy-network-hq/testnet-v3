@@ -43,12 +43,18 @@ pub struct ProcessingVertex<A = WalletProcessingAdmission> {
     pub key_id: String,
     pub author_signature: Vec<u8>,
 }
+pub fn processing_admission_authorization_root(
+    admission: &impl ProcessingVertexAdmission,
+) -> Result<EtdagDigest, EtdagError> {
+    EtdagDigest::from_canonical(
+        "SYNERGY_ETDAG_PROCESSING_WALLET_AUTHORIZATION_V1",
+        admission,
+    )
+}
+
 impl<A: ProcessingVertexAdmission> ProcessingVertex<A> {
     pub fn authorization_root(&self) -> Result<EtdagDigest, EtdagError> {
-        EtdagDigest::from_canonical(
-            "SYNERGY_ETDAG_PROCESSING_WALLET_AUTHORIZATION_V1",
-            &self.admission,
-        )
+        processing_admission_authorization_root(&self.admission)
     }
 
     pub fn id(&self) -> Result<EtdagDigest, EtdagError> {

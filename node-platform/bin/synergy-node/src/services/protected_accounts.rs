@@ -14,6 +14,8 @@ mod sponsor_settlement;
 mod etdag_candidate;
 #[path = "protected_processing_admission.rs"]
 mod processing_admission;
+#[path = "protected_processing_execution.rs"]
+mod processing_execution;
 #[path = "protected_transfer_admission.rs"]
 mod transfer_admission;
 #[path = "protected_sponsored_admission.rs"]
@@ -1880,6 +1882,9 @@ fn debug(error: impl std::fmt::Debug) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::processing_execution::{
+        CandidateActionOutcome, CandidateAuthorizationContext, CandidateDispatch,
+    };
     use super::processing_admission::{recover_before_reveal, CandidateAdmission, CandidateAuthorization};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2126,12 +2131,17 @@ mod tests {
                         },
                         ordering,
                         |recovered_context, recovered| {
-                            let CandidateAuthorization::SponsoredEnrollment(proof) = &recovered.authorization else {
-                                return Err("recovered wrong PW13 admission type".into());
-                            };
-                            registry.verify_sponsored_admission(
-                                &provider, &verifier, snapshot, recovered_context,
-                                &recovered.envelope, proof, &limits, &schedule, 5,
+                            registry.authorize_processing_candidate(
+                                recovered_context,
+                                recovered,
+                                CandidateAuthorizationContext {
+                                    source: snapshot,
+                                    provider: &provider,
+                                    sponsor_verifier: Some(&verifier),
+                                    parameters: &limits,
+                                    fee_schedule: &schedule,
+                                    metered_gas: 5,
+                                },
                             )
                         },
                     )
@@ -2222,40 +2232,67 @@ mod tests {
         let (altered_opening, altered_admission) =
             open(&altered_content, &first, &snapshot, &certificate).unwrap();
         assert_eq!(
-            registry.execute_opened_sponsored_enrollment(
-                &provider, &verifier, &snapshot, &mut world, position(2, 1001),
-                altered_opening.payload(), &altered_admission, &schedule,
-            ).unwrap_err(),
-            "opened enrollment differs from the signed sponsor admission",
-        );
-        assert_eq!(world, base);
-        let ordered_inclusion = position(2, 1001);
-        let (ordered, ordered_result) = first_opening
-            .execute_ordered(|candidate| {
-                registry.execute_opened_sponsored_enrollment(
+            registry
+                .execute_opened_sponsored_enrollment(
                     &provider,
                     &verifier,
                     &snapshot,
-                    candidate,
-                    ordered_inclusion,
-                    first_opening.payload(),
-                    &first_admission,
+                    &mut world,
+                    position(2, 1001),
+                    altered_opening.payload(),
+                    altered_admission.sponsor(),
                     &schedule,
                 )
-            })
+                .unwrap_err(),
+            "opened enrollment differs from the signed sponsor admission",
+        );
+        assert_eq!(world, base);
+        let ordered_inclusion = Position {
+            height: first_opening.envelope().aad.authorization_height + 3,
+            consensus_time: 1001,
+        };
+        let (ordered, ordered_result) = first_opening
+            .execute_ordered(
+                CandidateDispatch {
+                    source: &snapshot,
+                    provider: &provider,
+                    sponsor_verifier: Some(&verifier),
+                    fee_schedule: &schedule,
+                    admission: &first_admission,
+                },
+                ordered_inclusion,
+                &snapshot,
+                &limits,
+            )
             .unwrap();
-        assert_eq!(ordered_result, (CommitApplied, 10));
         assert_eq!(
-            registry.execute_opened_sponsored_enrollment(
-                &provider, &verifier, &snapshot, &mut world, position(2, 1001),
-                first_opening.payload(), &first_admission, &schedule,
-            ).unwrap(),
+            ordered_result,
+            CandidateActionOutcome::SponsoredEnrollment(CommitApplied, 10)
+        );
+        assert_eq!(
+            registry
+                .execute_opened_sponsored_enrollment(
+                    &provider,
+                    &verifier,
+                    &snapshot,
+                    &mut world,
+                    position(2, 1001),
+                    first_opening.payload(),
+                    first_admission.sponsor(),
+                    &schedule,
+                )
+                .unwrap(),
             (CommitApplied, 10)
         );
         assert_eq!(ordered.accounts, world.accounts);
-        for (key, bytes) in &world.protocol {
-            assert_eq!(ordered.protocol.get(key), Some(bytes));
-        }
+        assert_eq!(
+            registry
+                .pending_commit(ordered.as_ref(), commitment)
+                .unwrap()
+                .1
+                .included_height,
+            ordered_inclusion.height,
+        );
         let after_first = state_root(&world).unwrap();
         let second = commit_intent(1, 10, 1);
         let mut changed_payload = payload.clone();
@@ -2445,35 +2482,52 @@ mod tests {
         );
         let (reveal_opening, reveal_admission) =
             open(&reveal_content, &reveal_intent, &snapshot, &certificate).unwrap();
+        let ordered_inclusion = Position {
+            height: reveal_opening.envelope().aad.authorization_height + 3,
+            ..position
+        };
         let (ordered, ordered_result) = reveal_opening
-            .execute_ordered(|candidate| {
-                registry.execute_opened_sponsored_enrollment(
+            .execute_ordered(
+                CandidateDispatch {
+                    source: &snapshot,
+                    provider: &provider,
+                    sponsor_verifier: Some(&verifier),
+                    fee_schedule: &schedule,
+                    admission: &reveal_admission,
+                },
+                ordered_inclusion,
+                &snapshot,
+                &limits,
+            )
+            .unwrap();
+        assert_eq!(
+            ordered_result,
+            CandidateActionOutcome::SponsoredEnrollment(RevealApplied, 10)
+        );
+        assert_eq!(
+            registry
+                .execute_opened_sponsored_enrollment(
                     &provider,
                     &verifier,
                     &snapshot,
-                    candidate,
+                    &mut world,
                     position,
                     reveal_opening.payload(),
-                    &reveal_admission,
+                    reveal_admission.sponsor(),
                     &schedule,
                 )
-            })
-            .unwrap();
-        assert_eq!(ordered_result, (RevealApplied, 10));
-        assert_eq!(
-            registry.execute_opened_sponsored_enrollment(
-                &provider, &verifier, &snapshot, &mut world, position, reveal_opening.payload(),
-                &reveal_admission, &schedule,
-            ).unwrap(),
+                .unwrap(),
             (RevealApplied, 10)
         );
         assert_eq!(ordered.accounts, world.accounts);
         assert!(registry
             .pending_commit(ordered.as_ref(), commitment)
             .is_err());
-        for (key, bytes) in &world.protocol {
-            assert_eq!(ordered.protocol.get(key), Some(bytes));
-        }
+        let ordered_policy = registry
+            .read_policy(ordered.as_ref(), enrollment.account())
+            .unwrap();
+        assert_eq!(ordered_policy.registered_height, ordered_inclusion.height);
+        assert_eq!(ordered_policy.enrollment, encoded);
         assert_eq!(world.accounts[&target], AccountState::default());
         assert_eq!(world.accounts[&address].balance_nwei, 70);
         assert_eq!(world.accounts[&address].nonce, 3);
@@ -3466,10 +3520,18 @@ mod tests {
                         },
                         ordering,
                         |recovered_context, recovered| {
-                            let CandidateAuthorization::Transfer(proof) = &recovered.authorization else {
-                                return Err("recovered wrong PW13 admission type".into());
-                            };
-                            authenticate(snapshot, &recovered.envelope, recovered_context, proof)
+                            registry.authorize_processing_candidate(
+                                recovered_context,
+                                recovered,
+                                CandidateAuthorizationContext {
+                                    source: snapshot,
+                                    provider: &provider,
+                                    sponsor_verifier: None,
+                                    parameters: &limits,
+                                    fee_schedule: &schedule,
+                                    metered_gas: 21_000,
+                                },
+                            )
                         },
                     )
                 },
@@ -3515,7 +3577,7 @@ mod tests {
                     &provider,
                     &snapshot,
                     &mut rejected,
-                    OpenedEtdag(mismatched.payload(), &mismatched_admission),
+                    OpenedEtdag(mismatched.payload(), mismatched_admission.transfer()),
                     &schedule,
                     21_000,
                     inclusion,
@@ -3533,7 +3595,7 @@ mod tests {
                 &provider,
                 &snapshot,
                 &mut rejected,
-                OpenedEtdag(invalid.payload(), &invalid_admission),
+                OpenedEtdag(invalid.payload(), invalid_admission.transfer()),
                 &schedule,
                 21_000,
                 inclusion,
@@ -3553,37 +3615,65 @@ mod tests {
             )
             .unwrap(),
         };
-        let execute_ordered_transfer = |candidate: &mut BudgetedWorld| {
-            registry.execute_engineering_transfer(
-                &provider,
-                &snapshot,
-                candidate,
-                OpenedEtdag(opened.payload(), &admission),
-                &schedule,
-                21_000,
-                inclusion,
-            )
+        let ordered_inclusion = Position {
+            height: opened.envelope().aad.authorization_height + 3,
+            ..inclusion
         };
-        let (ordered, result) = opened.execute_ordered(execute_ordered_transfer).unwrap();
+        let dispatch = |admission| CandidateDispatch {
+            source: &snapshot,
+            provider: &provider,
+            sponsor_verifier: None,
+            fee_schedule: &schedule,
+            admission,
+        };
+        let (ordered, result) = opened
+            .execute_ordered(dispatch(&admission), ordered_inclusion, &snapshot, &limits)
+            .unwrap();
         assert_eq!(
             result,
-            CandidateTransferExecution {
+            CandidateActionOutcome::Transfer(CandidateTransferExecution {
                 fee_nwei: 840_000,
-                revert_reason: None
-            }
+                revert_reason: None,
+            }),
         );
-        let failure = invalid.execute_ordered(|candidate| {
-            registry.execute_engineering_transfer(
-                &provider,
+        assert!(invalid
+            .execute_ordered(
+                dispatch(&invalid_admission),
+                ordered_inclusion,
                 &snapshot,
-                candidate,
-                OpenedEtdag(invalid.payload(), &invalid_admission),
-                &schedule,
-                21_000,
-                inclusion,
+                &limits
             )
-        });
-        assert!(failure.is_err());
+            .is_err());
+        let substituted = opened.execute_ordered(
+            dispatch(&mismatched_admission),
+            ordered_inclusion,
+            &snapshot,
+            &limits,
+        );
+        assert!(matches!(substituted, Err(error) if error ==
+            "protected authorization differs from the original ordered admission"));
+        let premature = opened.execute_ordered(dispatch(&admission), inclusion, &snapshot, &limits);
+        assert!(matches!(premature, Err(error) if error ==
+            "protected execution precedes the original authorization height"));
+        let expired_height = body.valid_until_finalized_height + 1;
+        assert!(expired_height < ordered_inclusion.height);
+        let (expired_pointer, expired_proof) = finalized(expired_height, &spend_base);
+        let expired_parent = registry
+            .finalized_snapshot(
+                &spend_base,
+                &expired_pointer,
+                &expired_proof,
+                ordered_inclusion.consensus_time,
+            )
+            .unwrap();
+        let expired = opened.execute_ordered(
+            dispatch(&admission),
+            ordered_inclusion,
+            &expired_parent,
+            &limits,
+        );
+        assert!(matches!(expired, Err(error) if error ==
+            "protected authorization expired at the finalized predecessor"));
         let mut world = spend_base.clone();
         assert_eq!(
             registry
@@ -3591,7 +3681,7 @@ mod tests {
                     &provider,
                     &snapshot,
                     &mut world,
-                    OpenedEtdag(opened.payload(), &admission),
+                    OpenedEtdag(opened.payload(), admission.transfer()),
                     &schedule,
                     21_000,
                     inclusion,
@@ -3607,9 +3697,36 @@ mod tests {
         assert_eq!(world.accounts[&recipient_address].balance_nwei, 7);
         assert_eq!(world.accounts[&schedule.collector].balance_nwei, 840_000);
         assert_eq!(ordered.accounts, world.accounts);
-        for (key, bytes) in &world.protocol {
-            assert_eq!(ordered.protocol.get(key), Some(bytes));
-        }
+        let (ordered_pointer, ordered_proof) = finalized(ordered_inclusion.height, &ordered);
+        let ordered_scratch = Scratch::new();
+        let mut checkpoint = FinalizedStateStore::load(&ordered_scratch.0).unwrap();
+        checkpoint
+            .commit_verified_world_state(ordered_pointer.clone(), ordered.as_ref())
+            .unwrap();
+        drop(checkpoint);
+        let checkpoint = FinalizedStateStore::load(&ordered_scratch.0).unwrap();
+        let restored = checkpoint.current_world_state().unwrap().unwrap();
+        assert_eq!(&restored, ordered.as_ref());
+        let ordered_snapshot = registry
+            .finalized_snapshot(
+                &restored,
+                &ordered_pointer,
+                &ordered_proof,
+                ordered_inclusion.consensus_time,
+            )
+            .unwrap();
+        let ordered_receipt = settlement::inspect_transfer_settlement(
+            &ordered_snapshot,
+            enrollment.account(),
+            body.intent_id,
+            &inspection::hex_bytes(digest.as_bytes()),
+            Some(&opening),
+        )
+        .unwrap();
+        assert_eq!(ordered_receipt["included_height"], ordered_inclusion.height);
+        assert_eq!(ordered_receipt["fee_nwei"], "840000");
+        assert_eq!(ordered_receipt["nonce_after"], 1);
+        assert_eq!(ordered_receipt["status"], "applied_candidate");
         let after = state_root(&world).unwrap();
         let (retried_opening, retried_admission) =
             open(&content, &intent, body.transaction_nonce, &snapshot, &snapshot_proof).unwrap();
@@ -3622,7 +3739,7 @@ mod tests {
                 &provider,
                 &snapshot,
                 &mut world,
-                OpenedEtdag(retried_opening.payload(), &retried_admission),
+                OpenedEtdag(retried_opening.payload(), retried_admission.transfer()),
                 &schedule,
                 21_000,
                 inclusion,
@@ -3636,7 +3753,7 @@ mod tests {
                 &provider,
                 &snapshot,
                 &mut too_expensive,
-                OpenedEtdag(opened.payload(), &admission),
+                OpenedEtdag(opened.payload(), admission.transfer()),
                 &schedule,
                 21_001,
                 inclusion,
@@ -3666,7 +3783,7 @@ mod tests {
                 &provider,
                 &saturated_snapshot,
                 &mut failed,
-                OpenedEtdag(saturated_opening.payload(), &saturated_admission),
+                OpenedEtdag(saturated_opening.payload(), saturated_admission.transfer()),
                 &schedule,
                 21_000,
                 inclusion,
@@ -3688,7 +3805,7 @@ mod tests {
                 &provider,
                 &funded_snapshot,
                 &mut ordered,
-                OpenedEtdag(funded_opening.payload(), &funded_admission),
+                OpenedEtdag(funded_opening.payload(), funded_admission.transfer()),
                 &schedule,
                 21_000,
                 inclusion,
@@ -3736,7 +3853,7 @@ mod tests {
                     &provider,
                     &funded_snapshot,
                     &mut substitution_candidate,
-                    OpenedEtdag(substituted.payload(), &substituted_admission),
+                    OpenedEtdag(substituted.payload(), substituted_admission.transfer()),
                     &schedule,
                     21_000,
                     inclusion,
@@ -3750,7 +3867,7 @@ mod tests {
                 &provider,
                 &funded_snapshot,
                 candidate,
-                OpenedEtdag(second_opening.payload(), &second_admission),
+                OpenedEtdag(second_opening.payload(), second_admission.transfer()),
                 &schedule,
                 21_000,
                 inclusion,
@@ -3880,7 +3997,7 @@ mod tests {
                     &provider,
                     &snapshot,
                     &mut ordered_credit,
-                    OpenedEtdag(opened.payload(), &admission),
+                    OpenedEtdag(opened.payload(), admission.transfer()),
                     &schedule,
                     21_000,
                     inclusion,

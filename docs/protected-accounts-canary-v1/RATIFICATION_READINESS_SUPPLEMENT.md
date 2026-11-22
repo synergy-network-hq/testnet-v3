@@ -203,6 +203,21 @@ reveal, an applied D/P transfer and refusal of an altered D proof. Their
 ordering and inclusion coordinates are isolated engineering inputs. Live
 activation still requires the ratified dispatch and resource contract.
 
+The compiled protected candidate dispatcher derives authorization from the
+exact recovered encrypted admission. Before READY publication it compares the
+admission commitment and the signed opening with the original closed order.
+Publication uses the same validated parent and slot. A later candidate checks
+the original record, authenticated resource limits and signed expiry at the
+selected finalized predecessor. It then executes the typed sponsor or D/P
+action and applies the resulting ledger writes, receipt and READY consumption
+to one private World. The isolated tests reject substituted authorizations,
+altered proof bytes, early execution, changed processing limits and expiry
+after publication. The transfer receipt survives reopening the resulting
+World. Reapplying the consuming transition does not charge the payer again.
+The ordinary node scheduler cannot select this dispatcher. Live qualification
+still requires governed candidate replay, terminal disposition, activation and
+the approved public wire contract.
+
 The offline settlement verifier checks the exact encrypted transfer and
 sponsored enrollment receipts against adjacent three-QC-certified blocks
 and their Worlds. It checks first appearance, the certified inclusion time,

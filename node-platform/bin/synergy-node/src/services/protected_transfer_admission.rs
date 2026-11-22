@@ -151,6 +151,10 @@ impl CandidateProtectedAccounts<'_> {
 }
 
 impl VerifiedTransferAdmission {
+    pub(super) fn gas(&self) -> u64 {
+        self.gas
+    }
+
     pub(super) fn verify_opened(
         &self,
         finalized: &FinalizedSnapshot<'_>,
