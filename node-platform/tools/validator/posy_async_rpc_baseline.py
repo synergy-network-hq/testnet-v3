@@ -238,7 +238,7 @@ def verify_operator_registry(keytool, registry, h):
     if result.returncode:
         raise h.BaselineError("native operator authority/Genesis/custody validation failed; no transaction authored")
 
-def validate_wallet_authority(views, public, error=ValueError):
+def validate_wallet_authority(views, public, error=ValueError, *, observation_names=None):
     """Funding is independent of signing authority. Verify exact finalized binding.
 
     Native authoring still verifies the carrier signatures and selected network;
@@ -247,7 +247,10 @@ def validate_wallet_authority(views, public, error=ValueError):
     expected = public.get("genesis_binding_commitment")
     if not isinstance(expected, dict) or not expected:
         raise error("wallet public record lacks its verified binding commitment")
-    if set(views) != {f"val{i}" for i in range(2, 7)} or any(not isinstance(view, dict) or "authorization_binding" not in view
+    expected_observers = tuple(observation_names) if observation_names is not None else tuple(f"val{i}" for i in range(2, 7))
+    if expected_observers not in (("val2", "val3", "val4", "val5", "val6"), ("val2", "val3", "val4", "val6")):
+        raise error("unsupported authorization observation cohort")
+    if set(views) != set(expected_observers) or any(not isinstance(view, dict) or "authorization_binding" not in view
                         for view in views.values()):
         raise error("workload wallet lacks explicit all-validator authorization observations")
     bindings = [view["authorization_binding"] for view in views.values()]
@@ -350,13 +353,14 @@ def validate_finalized_intent(transaction, record, network, chain_id, error=Valu
 
 def run_async(args, h):
     E = h.BaselineError
-    endpoints = dict(args.validator_rpc)
+    endpoints = h.observation_endpoints(args)
+    names = h.observation_names(endpoints)
+    all_five = names == h.VALIDATORS
     report = {"status": "running", "profile_id": PROFILE, "network_id": args.network_id,
               "transactions": [], "TPS_qualified": False, "capacity_result": False,
               "workload_mode": args.workload_mode, "execute": args.execute}
     args._partial_report = report
-    if set(endpoints) != set(h.VALIDATORS) or len(args.validator_rpc) != 5:
-        raise E("exactly five distinct validator endpoints required")
+    report.update(h.observation_report(endpoints))
     operator=bool(args.operator_wallet_registry)
     if operator:
         verify_installed_release(args, h)
@@ -413,6 +417,7 @@ def run_async(args, h):
     # Launch readiness is checked at actual exec by deployment. This later load
     # stage checks live health plus bounded common finalized progression.
     first = h.sample_fleet(endpoints, args.network_id, native_tips=True, expected_chain_id=chain_id, live_progress=True)
+    report["verified_observation_validators"] = sorted(first)
     report["readiness_scope"] = "live healthy services; normal Sync Pending permitted only with verified advancing common finality; actual-exec startup gate remains separate"
     initial_height = first["val2"]["common_height"]
     previous_height = initial_height
@@ -459,15 +464,16 @@ def run_async(args, h):
     common = state["val2"]["common_height"]
     for wallet in wallets:
         initial = h.pool_account(endpoints, wallet["sender"], common, include_views=True)
-        authority_mode = validate_wallet_authority(initial["validator_views"], json.loads(Path(custody[wallet["wallet_id"]]["wallet_public_path"]).read_text()), E)
+        authority_mode = validate_wallet_authority(initial["validator_views"], json.loads(Path(custody[wallet["wallet_id"]]["wallet_public_path"]).read_text()), E, observation_names=names)
         wallet.update(initial)
         wallet["authority_mode"] = authority_mode
         wallet.update(initial_nonce=wallet["nonce"], initial_balance=wallet["balance_nwei"], spent=0,
                       next_nonce=wallet["nonce"], outstanding={}, retired=False)
         if wallet["balance_nwei"] < args.amount_nwei + args.gas_limit * args.max_fee_per_gas_nwei:
-            raise E("independent generator wallet is not funded on all five")
+            raise E("independent generator wallet is not funded on all selected observers")
     receiver_initial = h.pool_account(endpoints, args.receiver, common, include_views=True)
-    report["workload_wallet_authority_verified_all_five"] = all(w["authority_mode"] == "existing_binding_verified" for w in wallets)
+    report["workload_wallet_authority_verified_all_observed"] = all(w["authority_mode"] == "existing_binding_verified" for w in wallets)
+    report["workload_wallet_authority_verified_all_five"] = all_five and report["workload_wallet_authority_verified_all_observed"]
     report["workload_wallet_authority_modes"] = {w["wallet_id"]: w["authority_mode"] for w in wallets}
     report["first_use_authority_basis"] = "uniformly absent canonical binding is not preauthorization; native authoring verifies root-signed owner/delegated-key carrier before any submission"
     if not args.execute:
@@ -740,7 +746,7 @@ def run_async(args, h):
                 amount = len(cohort) * args.amount_nwei
                 maximum_fee = sum(gas * record["intent"]["max_fee_per_gas_nwei"] for record, gas in cohort)
                 if account["nonce"] != wallet["nonce"] + len(cohort) or not amount <= debit <= amount + maximum_fee:
-                    raise E("all-five finalized sender effects differ from exactly-once transfer cohort/fee bound")
+                    raise E("all-selected-observer finalized sender effects differ from exactly-once transfer cohort/fee bound")
                 observed = time.monotonic()
                 with published_lock:
                     wallet.update(nonce=account["nonce"], balance_nwei=account["balance_nwei"], spent=wallet["spent"] + debit)
@@ -883,13 +889,13 @@ def run_async(args, h):
         for wallet in wallets:
             account = h.pool_account(endpoints, wallet["sender"], final_height, include_views=True)
             if account["nonce"] != wallet["nonce"] or account["balance_nwei"] != wallet["initial_balance"] - wallet["spent"]:
-                raise E("final all-five sender wallet reconciliation failed")
+                raise E("final all-selected-observer sender wallet reconciliation failed")
             effects.append({"sender": wallet["sender"], "initial_nonce": wallet["initial_nonce"], "final_nonce": wallet["nonce"],
                             "initial_by_validator": wallet["validator_views"], "final_by_validator": account["validator_views"]})
         receiver_end = h.pool_account(endpoints, args.receiver, final_height, include_views=True)
         finalized_count = totals.counts["finalized"]
         if receiver_end["balance_nwei"] - receiver_initial["balance_nwei"] != finalized_count * args.amount_nwei:
-            raise E("final all-five receiver credits differ from exact finalized cohort")
+            raise E("final all-selected-observer receiver credits differ from exact finalized cohort")
         now = time.monotonic()
         requested = 30 if closed else min(args.max_tx, math.ceil(args.rate_tps * args.duration_seconds))
         deadline_met = not closed or (finalized_count == 30 and attempted == 30 and now < deadline)
@@ -901,12 +907,12 @@ def run_async(args, h):
             cadence_target_met=0.5 <= preflight_cadence <= 1.5,
             measured_outside_cadence_target=getattr(args, "measure_outside_cadence_target", False),
             backlog={"peak": backlog_peak, "remaining_in_flight": 0},
-            latency_observation_basis="all-five exact finalized block and wallet proof completion on local client clock; admission observations are upper bounds, no fabricated native timestamps",
+            latency_observation_basis="all-selected-observer exact finalized block and wallet proof completion on local client clock; admission observations are upper bounds, no fabricated native timestamps",
             requested_transactions=requested, attempted_transactions=attempted,
             submitted_transactions=totals.counts["submitted"],
             finalized_transactions=finalized_count, remaining_in_flight=0, peak_in_flight=peak,
             generator_missed_offered_slots=None if closed else skipped, generator_limited=None if closed else skipped > 0 or attempted < requested,
-            offered_rate_tps=None if closed else args.rate_tps, wallet_effects_verified_all_five=bool(finalized_count),
+            offered_rate_tps=None if closed else args.rate_tps, wallet_effects_verified_all_observed=bool(finalized_count), wallet_effects_verified_all_five=all_five and bool(finalized_count),
             workload_deadline_seconds=300 if closed else None, workload_deadline_met=deadline_met,
             observed_client_latency_seconds=totals.latency_summary(),
             native_processing_stage_observations=totals.processing_stage_summary(args.duration_seconds),
@@ -922,12 +928,14 @@ def run_async(args, h):
                 "authored_and_encrypted_transactions": totals.counts["authored_steady"],
                 "submitted_transactions": totals.counts["submitted_steady"],
                 "observed_admitted_transactions": totals.counts["admitted_steady"],
-                "all_five_verified_finalized_transactions": totals.counts["finalized_steady"],
+                "all_observed_verified_finalized_transactions": totals.counts["finalized_steady"],
+                "all_five_verified_finalized_transactions": totals.counts["finalized_steady"] if all_five else None,
                 "authored_and_encrypted_tps": totals.counts["authored_steady"] / (args.duration_seconds - warmup_seconds),
                 "submitted_tps": totals.counts["submitted_steady"] / (args.duration_seconds - warmup_seconds),
                 "observed_admitted_tps": totals.counts["admitted_steady"] / (args.duration_seconds - warmup_seconds),
-                "all_five_verified_finalized_tps": totals.counts["finalized_steady"] / (args.duration_seconds - warmup_seconds),
-                "observation_basis": "client monotonic author/submission/first accepted observation/all-five proof completion",
+                "all_observed_verified_finalized_tps": totals.counts["finalized_steady"] / (args.duration_seconds - warmup_seconds),
+                "all_five_verified_finalized_tps": totals.counts["finalized_steady"] / (args.duration_seconds - warmup_seconds) if all_five else None,
+                "observation_basis": "client monotonic author/submission/first accepted observation/all-selected-observer proof completion",
                 "native_availability_dependency_completion_tps": None,
                 "native_execution_completion_tps": None,
                 "native_result_publication_tps": None,

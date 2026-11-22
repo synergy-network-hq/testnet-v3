@@ -35,6 +35,73 @@ from typing import Any
 
 
 VALIDATORS = ("val2", "val3", "val4", "val5", "val6")
+CANARY_OBSERVERS = ("val2", "val3", "val4", "val6")
+
+
+class ObservationEndpoints(dict):
+    """Explicit observer selection only; never a consensus membership registry."""
+    cohort = VALIDATORS
+    expected_genesis_hash = None
+
+
+def observation_names(endpoints):
+    names = getattr(endpoints, "cohort", VALIDATORS)
+    if names not in (VALIDATORS, CANARY_OBSERVERS) or set(endpoints) != set(names):
+        raise BaselineError("complete explicitly selected observation cohort required")
+    return names
+
+
+def observation_endpoints(args):
+    choice = getattr(args, "observation_cohort", "legacy-five")
+    if choice not in ("legacy-five", "canary-four"):
+        raise BaselineError("unsupported observation cohort")
+    names = CANARY_OBSERVERS if choice == "canary-four" else VALIDATORS
+    pairs = args.validator_rpc
+    endpoints = ObservationEndpoints(pairs)
+    endpoints.cohort = names
+    if len(pairs) != len(names):
+        raise BaselineError("exactly one distinct endpoint per selected observer required")
+    observation_names(endpoints)
+    identities = []
+    for url in endpoints.values():
+        validate_rpc_url(url)
+        parsed = urllib.parse.urlsplit(url)
+        identities.append((parsed.scheme.lower(), parsed.hostname.lower(),
+                           parsed.port or (443 if parsed.scheme == "https" else 80),
+                           parsed.path.rstrip("/") or "/", parsed.query))
+    if len(set(identities)) != len(names):
+        raise BaselineError("selected observers require distinct RPC endpoints")
+    if args.submit_validator not in names:
+        raise BaselineError("submit validator is outside the observation cohort")
+    if choice == "canary-four":
+        pin = getattr(args, "expected_genesis_hash", None)
+        if (not isinstance(pin, str) or len(pin) != 64 or pin == "0" * 64
+                or any(c not in "0123456789abcdef" for c in pin)):
+            raise BaselineError("four-host observation requires independently selected Genesis hash")
+        endpoints.expected_genesis_hash = pin
+    return endpoints
+
+
+def validate_observer_identity(name, native, endpoints, network):
+    if getattr(endpoints, "cohort", VALIDATORS) != CANARY_OBSERVERS:
+        return
+    expected_name = {"val2": "validator-02", "val3": "validator-03",
+                     "val4": "validator-04", "val6": "validator-06"}[name]
+    if (not isinstance(native, dict) or native.get("node_name") != expected_name
+            or native.get("network_identity") != network
+            or native.get("genesis_hash") != endpoints.expected_genesis_hash
+            or type(native.get("process_id")) is not int or native["process_id"] <= 0):
+        raise BaselineError(f"{name} observer identity/network/Genesis differs from selected scope")
+
+
+def observation_report(endpoints):
+    names = observation_names(endpoints)
+    return {"observation_validators": list(names), "observation_validator_count": len(names),
+            "observation_is_full_legacy_five": names == VALIDATORS,
+            "observation_expected_genesis_hash": getattr(endpoints, "expected_genesis_hash", None),
+            "observation_identity_basis": "endpoint transport and exact native validator name/Genesis observations; not independent physical-host attestation",
+            "consensus_denominator_basis": "unchanged independently authenticated signed authority; never observer count"}
+
 MAX_DURATION = 120
 MAX_RATE = 5.0
 MAX_TX = 600
@@ -120,7 +187,8 @@ def rpc(url: str, method: str, params: Any, *, timeout: float = RPC_TIMEOUT) -> 
     validate_rpc_url(url)
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
                       separators=(",", ":")).encode()
-    headers = {"Content-Type": "application/json"}
+    headers = {"Accept": "application/json", "Content-Type": "application/json",
+               "User-Agent": "Synergy-PoSy-Qualification/1.0"}
     if RPC_TOKEN is not None:
         headers["Authorization"] = "Bearer " + RPC_TOKEN
     request = urllib.request.Request(url, data=body, headers=headers)
@@ -576,12 +644,13 @@ def native_fleet_observation(endpoints: dict[str, str], expected_network: str,
     window. Identity, epoch, regression and pinned commitment conflicts fail
     immediately; this function never authors or submits a transaction.
     """
-    chain_ids = {validate_chain_id(states[name]["status"]["chain_id"], expected_chain_id) for name in VALIDATORS}
+    names = observation_names(endpoints)
+    chain_ids = {validate_chain_id(states[name]["status"]["chain_id"], expected_chain_id) for name in names}
     if len(chain_ids) != 1:
         raise BaselineError("validator chain identities disagree")
     chain_id = next(iter(chain_ids))
     epochs = [states[name]["native_epoch"] if states[name].get("context") is None
-              else states[name]["context"]["context"].get("epoch") for name in VALIDATORS]
+              else states[name]["context"]["context"].get("epoch") for name in names]
     if any(type(epoch) is not int or epoch < 0 for epoch in epochs) or len(set(epochs)) != 1:
         raise BaselineError("validator protected authority epochs disagree or are invalid")
     deadline = time.monotonic() + RPC_TIMEOUT
@@ -592,7 +661,8 @@ def native_fleet_observation(endpoints: dict[str, str], expected_network: str,
                     timeout=max(0.1, min(RPC_TIMEOUT, deadline - started)))
         if not isinstance(value, dict) or type(value.get("chain_id")) is not int or value["chain_id"] != chain_id:
             raise BaselineError(f"{name} invalid native chain identity")
-        expected_epoch = epochs[VALIDATORS.index(name)]
+        validate_observer_identity(name, value, endpoints, expected_network)
+        expected_epoch = epochs[names.index(name)]
         if (value.get("network_identity") != expected_network
                 or type(expected_epoch) is not int or expected_epoch < 0
                 or type(value.get("epoch")) is not int or value["epoch"] != expected_epoch):
@@ -607,7 +677,7 @@ def native_fleet_observation(endpoints: dict[str, str], expected_network: str,
         return {"started": started, "finished": time.monotonic(), "native": value}
     for _ in range(51):
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
-            pointers = dict(zip(VALIDATORS, pool.map(lambda name: query(name, {}), VALIDATORS)))
+            pointers = dict(zip(names, pool.map(lambda name: query(name, {}), names)))
         heights = {name: item["native"]["finalized_height"] for name, item in pointers.items()}
         readings.append({"heights": heights,
                          "query_span_seconds": max(p["finished"] for p in pointers.values()) - min(p["started"] for p in pointers.values())})
@@ -623,7 +693,7 @@ def native_fleet_observation(endpoints: dict[str, str], expected_network: str,
     # may advance while querying; the comparison height never changes mid-sample.
     deadline = time.monotonic() + RPC_TIMEOUT
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
-        pinned = dict(zip(VALIDATORS, pool.map(lambda name: query(name, {"at_height": common}), VALIDATORS)))
+        pinned = dict(zip(names, pool.map(lambda name: query(name, {"at_height": common}), names)))
     blocks = {}
     for name, item in pinned.items():
         commitment = item["native"].get("common_finalized_commitment")
@@ -647,8 +717,9 @@ def native_fleet_observation(endpoints: dict[str, str], expected_network: str,
 
 
 def sample_fleet(endpoints: dict[str, str], expected_network: str, submit_validator: str | None = None, *, native_tips: bool = False, expected_chain_id: int | None = None, native_prior_state: dict | None = None, live_progress: bool = False) -> dict[str, dict[str, Any]]:
+    names = observation_names(endpoints)
     if native_prior_state is not None:
-        if not native_tips or submit_validator is not None or set(native_prior_state) != set(VALIDATORS):
+        if not native_tips or submit_validator is not None or set(native_prior_state) != set(names):
             raise BaselineError("native progress requires the complete preceding startup-gated fleet")
         states = {name: dict(state) for name, state in native_prior_state.items()}
         for state in states.values():
@@ -662,13 +733,18 @@ def sample_fleet(endpoints: dict[str, str], expected_network: str, submit_valida
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
             if native_tips:
                 if submit_validator is not None:
-                    raise BaselineError("native tip observation requires the all-five local pool view")
+                    raise BaselineError("native tip observation requires the complete selected local pool view")
                 futures = {pool.submit(native_endpoint_state, name, url, expected_network, expected_chain_id, **({"live_progress": True} if live_progress else {})): name for name, url in endpoints.items()}
             else:
                 futures = {pool.submit(endpoint_state, name, url, submit_validator is None or name == submit_validator, expected_network, expected_chain_id): name for name, url in endpoints.items()}
             states = {futures[f]: f.result() for f in concurrent.futures.as_completed(futures)}
-    if set(states) != set(VALIDATORS):
-        raise BaselineError("exactly one RPC endpoint for each of Val2–Val6 is required")
+    if set(states) != set(names):
+        raise BaselineError("complete selected observation cohort required")
+    if getattr(endpoints, "cohort", VALIDATORS) == CANARY_OBSERVERS and not native_tips:
+        for name in names:
+            native = rpc(endpoints[name], "synergy_chainTelemetry", {})
+            validate_chain_id(native.get("chain_id"), expected_chain_id)
+            validate_observer_identity(name, native, endpoints, expected_network)
     chain_ids = {validate_chain_id(s["status"]["chain_id"], expected_chain_id) for s in states.values()}
     if len(chain_ids) != 1:
         raise BaselineError("validator chain identities disagree")
@@ -680,7 +756,7 @@ def sample_fleet(endpoints: dict[str, str], expected_network: str, submit_valida
         snapshot_deadline = time.monotonic() + RPC_TIMEOUT
         while True:
             with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
-                pointers = dict(zip(VALIDATORS, pool.map(finalized_peer_pointer, VALIDATORS)))
+                pointers = dict(zip(names, pool.map(finalized_peer_pointer, names)))
             heights = [p["state"]["finalized_height"] for p in pointers.values()]
             if max(heights) - min(heights) <= MAX_FINALIZED_LAG:
                 break
@@ -701,14 +777,14 @@ def sample_fleet(endpoints: dict[str, str], expected_network: str, submit_valida
     blocks: dict[str, dict[str, Any]] = {}
     if native_tips:
         if submit_validator is not None:
-            raise BaselineError("native tip observation requires the all-five local pool view")
+            raise BaselineError("native tip observation requires the complete selected local pool view")
         blocks = native_fleet_observation(endpoints, expected_network, states, expected_chain_id)
         common_height = min(s["height"] for s in states.values())
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
             futures = {pool.submit(rpc, endpoints[name], "synergy_getBlock",
                                    {"height": common_height, "hash": None}): name
-                       for name in VALIDATORS}
+                       for name in names}
             for future in concurrent.futures.as_completed(futures):
                 name = futures[future]
                 block = future.result()
@@ -753,12 +829,12 @@ def require_progressing_preflight(endpoints: dict[str, str], expected_network: s
             last_advance = now
             last_advance_height = current_height
         elif now - last_advance > maximum_gap_seconds:
-            raise BaselineError("finalized tip stalled during the all-five preflight")
+            raise BaselineError("finalized tip stalled during the selected-cohort preflight")
         prev = current
     elapsed = max(0.001, time.monotonic() - first_time)
     advanced = prev["val2"]["common_height"] - first["val2"]["common_height"]
     if advanced <= 0:
-        raise BaselineError("five-validator tip did not advance during the preflight window")
+        raise BaselineError("selected-cohort tip did not advance during the preflight window")
     prev["val2"]["preflight_average_block_time_seconds"] = elapsed / advanced
     return first, prev
 
@@ -815,8 +891,9 @@ def all_finalized(endpoints: dict[str, str], txid: str, target_height: int,
     height.  Once that target is finalized, the canonical finalized block view
     contains the transaction and its execution receipt.  Looking only there
     makes a missing result an honest "not finalized at its signed target" state
-    and bounds each reconciliation pass to five direct block reads.
+    and bounds each reconciliation pass to one direct block read per selected observer.
     """
+    observation_names(endpoints)
     if type(target_height) is not int or not 0 <= target_height < 2**64:
         raise BaselineError("invalid signed transaction target height")
 
@@ -939,9 +1016,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     partial: dict[str, Any] = {"status": "running", "network_id": args.network_id,
                                "execute": bool(args.execute), "transactions": []}
     args._partial_report = partial
-    endpoints = dict(args.validator_rpc)
-    if len(endpoints) != 5 or set(endpoints) != set(VALIDATORS):
-        raise BaselineError("provide exactly one --validator-rpc for each of Val2–Val6")
+    endpoints = observation_endpoints(args)
+    partial.update(observation_report(endpoints))
     if not math.isfinite(args.maximum_gap_seconds) or not 0 < args.maximum_gap_seconds <= 600:
         raise BaselineError("finite positive block stall budget at most 600 seconds required")
     if args.duration_seconds <= 0 or args.duration_seconds > MAX_DURATION:
@@ -985,6 +1061,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     first, stable_tip = require_progressing_preflight(endpoints, args.network_id, args.stability_seconds,
                                                      args.submit_validator, args.maximum_gap_seconds)
+    partial["verified_observation_validators"] = sorted(first)
     chain_id = first["val2"]["status"]["chain_id"]
     partial["chain_id"] = chain_id
     partial.update({"preflight_start_tip": tip_record(first),
@@ -992,7 +1069,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "preflight_complete": True,
                     "preflight_average_block_time_seconds": stable_tip["val2"]["preflight_average_block_time_seconds"]})
     if not args.execute:
-        return {"status": "dry_run_ready", "execute": False, "network_id": args.network_id, "chain_id": chain_id,
+        return {**observation_report(endpoints), "verified_observation_validators": sorted(first), "status": "dry_run_ready", "execute": False, "network_id": args.network_id, "chain_id": chain_id,
                 "start_tip": tip_record(first), "preflight_end_tip": tip_record(stable_tip),
                 "planned_rate_tps": args.rate_tps, "planned_duration_seconds": args.duration_seconds,
                 "planned_max_tx": args.max_tx, "signer_present": signer is not None,
@@ -1004,11 +1081,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     account_views = {name: rpc(url, "synergy_getAccount", {"address": sender, "at_height": None})
                      for name, url in endpoints.items()}
     if any(not isinstance(view, dict) for view in account_views.values()):
-        raise BaselineError("dedicated test wallet is not funded in the finalized state on all five")
+        raise BaselineError("dedicated test wallet is not funded in the finalized state on all selected observers")
     nonces = {v.get("nonce") for v in account_views.values()}
     balances = {int(v.get("balance_nwei", "0")) for v in account_views.values()}
     if len(nonces) != 1 or None in nonces or len(balances) != 1:
-        raise BaselineError("wallet nonce/balance differ across the five finalized views")
+        raise BaselineError("wallet nonce/balance differ across the selected finalized views")
     nonce = next(iter(nonces))
     max_cost = args.max_tx * (args.amount_nwei + args.gas_limit * args.max_fee_per_gas_nwei)
     if next(iter(balances)) < max_cost:
@@ -1164,7 +1241,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             if pending and failure is None:
                 time.sleep(POLL_SECONDS)
         if pending and failure is None:
-            failure = "one or more accepted transactions did not reach matching five-validator finality"
+            failure = "one or more accepted transactions did not reach matching selected-observer finality"
         final_states = sample_fleet(endpoints, args.network_id, args.submit_validator, expected_chain_id=chain_id)
     elapsed = time.monotonic() - started_mono
     load_window = max(0.0, load_end_mono - started_mono)
@@ -1172,8 +1249,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     end = tip_record(final_states)
     if counters_end is None:
         counters_end = {n: s["stats"] for n, s in final_states.items()}
-    accepted_tps = counter_rates(counters_start, counters_end, "accepted_total", load_window)
-    ordered_tps = counter_rates(counters_start, counters_end, "etdag_ordered_total", load_window)
+    accepted_tps = counter_rates(counters_start, counters_end, "accepted_total", load_window, observation_validators=observation_names(endpoints))
+    ordered_tps = counter_rates(counters_start, counters_end, "etdag_ordered_total", load_window, observation_validators=observation_names(endpoints))
     if any(value is None for value in accepted_tps.values()) or any(
             value is None for value in ordered_tps.values()):
         failure = failure or "validator admission counters reset or became unavailable during the run"
@@ -1207,6 +1284,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "resource_start": resource_start, "resource_end": sample_resource(),
             "validator_os_resources": "unavailable: current PoSy JSON-RPC has no host CPU/memory/disk/network metric",
             "transactions": submissions}
+    result.update(observation_report(endpoints), verified_observation_validators=sorted(first))
     partial.update(result)
     return result
 
@@ -1226,9 +1304,12 @@ def tip_record(states: dict[str, dict[str, Any]]) -> dict[str, Any]:
 
 
 def counter_rates(start: dict[str, Any], end: dict[str, Any], key: str,
-                  elapsed: float) -> dict[str, float | None]:
+                  elapsed: float, *, observation_validators=VALIDATORS) -> dict[str, float | None]:
+    if (observation_validators not in (VALIDATORS, CANARY_OBSERVERS)
+            or set(start) != set(observation_validators) or set(end) != set(observation_validators)):
+        raise BaselineError("counter observations differ from the selected complete cohort")
     rates: dict[str, float | None] = {}
-    for name in VALIDATORS:
+    for name in observation_validators:
         before = start[name].get(key)
         after = end[name].get(key)
         if type(before) is not int or type(after) is not int or after < before:
@@ -1527,8 +1608,9 @@ def wallet_pool_public(registry_path: Path, network: str, operator: bool = False
 
 
 def pool_account(endpoints: dict, address: str, height: int, *, include_views: bool = False) -> dict:
+    observation_names(endpoints)
     # Independent reads of the same finalized state need no serial dependency.
-    # Keep all-five comparison and proof completion inside the timing budget.
+    # Keep selected-observer comparison and proof completion inside the timing budget.
     def read(item):
         name,url=item
         return name,rpc(url,"synergy_getAccount",{"address":address,"at_height":height})
@@ -1596,12 +1678,12 @@ def closed_loop_deadline_met(attempted: int, transactions: list[dict], remaining
 
 def run_wallet_pool(args: argparse.Namespace) -> dict:
     """Explicitly authorized native load source; generator caps are never chain capacity."""
-    endpoints=dict(args.validator_rpc)
+    endpoints=observation_endpoints(args)
     report={"status":"running","execute":bool(args.execute),"network_id":args.network_id,"transactions":[],
             "workload_mode":getattr(args,"workload_mode","offered-rate"),"capacity_result":False,"TPS_qualified":False}
     args._partial_report=report
-    if set(endpoints)!=set(VALIDATORS) or len(args.validator_rpc)!=5:
-        raise BaselineError("exactly five distinct validator endpoints required")
+    report.update(observation_report(endpoints))
+    all_five = observation_names(endpoints) == VALIDATORS
     if getattr(args,"remote_signer",False) or args.signer_dir:
         raise BaselineError("pool mode runs on the authorized isolated custody host; no legacy signer flags")
     if not 1<=args.duration_seconds<=86400 or not 1<=args.max_tx<=100000:
@@ -1625,6 +1707,7 @@ def run_wallet_pool(args: argparse.Namespace) -> dict:
         raise BaselineError("funded receiver and explicit positive governed transfer gas/fee values required")
     # The reviewed profile supplies a gap budget; no historical hardcoded 0.5..1.5s gate.
     first=sample_fleet(endpoints,args.network_id,native_tips=True)
+    report["verified_observation_validators"] = sorted(first)
     chain_id=first["val2"]["status"]["chain_id"]
     report["chain_id"]=chain_id
     preflight_start=time.monotonic(); last_height=first["val2"]["common_height"]; last_advance=preflight_start
@@ -1648,7 +1731,7 @@ def run_wallet_pool(args: argparse.Namespace) -> dict:
         wallet["initial_nonce"]=wallet["nonce"];wallet["initial_balance"]=wallet["balance_nwei"];wallet["spent"]=0
         # One transaction worst-case reserve; each subsequent transfer is checked again.
         if wallet["balance_nwei"]<args.amount_nwei+args.gas_limit*args.max_fee_per_gas_nwei:
-            raise BaselineError("pool wallet is not independently funded on all five")
+            raise BaselineError("pool wallet is not independently funded on all selected observers")
     receiver_initial=pool_account(endpoints,args.receiver,common,include_views=True)
     effects_before_height=common
     state_at_load_start=sample_fleet(endpoints,args.network_id,native_tips=True, expected_chain_id=chain_id)
@@ -1854,11 +1937,12 @@ def run_wallet_pool(args: argparse.Namespace) -> dict:
         if closed_loop:
             effects_verified_at=time.monotonic()
             deadline_met=closed_loop_deadline_met(attempted,transactions,len(pending)+len(jobs),deadline,effects_verified_at)
-            report.update(all_five_effects_verified_mono=effects_verified_at,
+            report.update(all_observed_effects_verified_mono=effects_verified_at,
+                          all_five_effects_verified_mono=effects_verified_at if all_five else None,
                           workload_elapsed_seconds=effects_verified_at-start)
             report["workload_deadline_met"]=deadline_met
             if not deadline_met:
-                stop_reason=stop_reason or "closed-loop memory cohort requires all 30 exact proofs and all-five wallet effects before the count deadline"
+                stop_reason=stop_reason or "closed-loop memory cohort requires all 30 exact proofs and all-selected-observer wallet effects before the count deadline"
         else:
             if attempted<args.max_tx and args.max_tx<=math.ceil(args.rate_tps*args.duration_seconds):
                 stop_reason=stop_reason or "generator failed to deliver requested cohort"
@@ -1888,12 +1972,12 @@ def run_wallet_pool(args: argparse.Namespace) -> dict:
             drain={"offered_window_end_mono":deadline,"drained_at_mono":time.monotonic(),
                    "seconds_after_offered_window":max(0,time.monotonic()-deadline),
                    "unresolved":len(pending)+len(jobs)},
-            accepted_tps_by_validator=None if closed_loop else counter_rates(observed_start_counters,observed_end_counters,"accepted_total",observation_elapsed),
-            etdag_ordered_tps_by_validator=None if closed_loop else counter_rates(observed_start_counters,observed_end_counters,"etdag_ordered_total",observation_elapsed),
+            accepted_tps_by_validator=None if closed_loop else counter_rates(observed_start_counters,observed_end_counters,"accepted_total",observation_elapsed,observation_validators=observation_names(endpoints)),
+            etdag_ordered_tps_by_validator=None if closed_loop else counter_rates(observed_start_counters,observed_end_counters,"etdag_ordered_total",observation_elapsed,observation_validators=observation_names(endpoints)),
             diagnostic_achieved_finalized_rate=finalized/max(0.001,observation_elapsed) if closed_loop else None,
             native_counter_observation_seconds=observation_elapsed,native_counter_window="closed-loop memory workload; diagnostic only" if closed_loop else "load and drain; independent from offered window",
             executed_and_finalized_cohort_transactions=finalized,
-            p95_context_to_finality_seconds=percentile95(finalities),remaining_in_flight=len(pending)+len(jobs),wallet_effects_verified_all_five=True,
+            p95_context_to_finality_seconds=percentile95(finalities),remaining_in_flight=len(pending)+len(jobs),wallet_effects_verified_all_observed=True,wallet_effects_verified_all_five=all_five,
             capacity_result=False,TPS_qualified=False,note="Count-based resource qualification only; no offered-rate or TPS/capacity claim." if closed_loop else "One load step only. Generator limits and missed slots are reported separately; capacity requires highest clean ten-minute step and explicit overload/drain qualification.")
         return report
     finally:
@@ -1910,6 +1994,8 @@ def run_wallet_pool(args: argparse.Namespace) -> dict:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--observation-cohort", choices=("legacy-five", "canary-four"), default="legacy-five", help="explicit complete observer cohort only; never changes signed membership or quorum")
+    parser.add_argument("--expected-genesis-hash", help="independently selected logical Genesis hash, required for canary-four")
     parser.add_argument("--validator-rpc", action="append", type=parse_validator_rpc, default=[], metavar="VAL=URL")
     parser.add_argument("--rpc-token-file", type=Path, help="private run token for qualification-only VPN relays")
     parser.add_argument("--rpc-vpn-peer", action="append", default=[], help="exact authenticated VPN peer IP allowed for HTTP relay; requires token file")
@@ -1924,7 +2010,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--raw-proof-budget-bytes", type=int, default=16*1024**3, help="raw public evidence disk bound: 4 MiB..64 GiB, default16GiB, retaining1GiBfilesystemreserve")
     parser.add_argument("--raw-proof-stream", type=Path, help="create one bounded canonical raw JSONL evidence stream; otherwise derived from --output")
     parser.add_argument("--wallet-registry", type=Path, help="isolated funded wallet-pool registry; persistent native signing on this authorized custody host")
-    parser.add_argument("--wallet-id", action="append", default=[], help="explicit existing registry wallet IDs for this workload; all selected wallets still require native custody and all-five finalized authorization")
+    parser.add_argument("--wallet-id", action="append", default=[], help="explicit existing registry wallet IDs for this workload; all selected wallets still require native custody and all-selected-observer finalized authorization")
     parser.add_argument("--max-in-flight", type=int, default=32, help="bounded total pool generator concurrency")
     parser.add_argument("--author-workers", type=int, default=8, help="bounded native signing/RPC worker count, independent of outstanding transaction capacity")
     parser.add_argument("--max-in-flight-per-wallet", type=int, default=1,
@@ -1985,6 +2071,8 @@ def main() -> int:
             from posy_async_rpc_baseline import run_async
             report = run_async(args, sys.modules[__name__])
         elif args.exploratory_async_fixture:
+            if args.observation_cohort != "legacy-five":
+                raise BaselineError("explicit four-host observation is not supported by the exploratory fixture")
             from posy_async_fixture_baseline import run_fixture
             report = run_fixture(args)
         else:

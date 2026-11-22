@@ -166,6 +166,23 @@ class AsyncProofTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "signed intent"):
             adapter.validate_finalized_intent(transaction, record, "n", 1266)
 
+    def test_explicit_four_host_workload_checks_every_selected_view_without_five_host_claim(self):
+        report, rows = self.simulated_async(max_tx=1, observation_cohort="canary-four")
+        self.assertEqual(report["observation_validators"], list(harness.CANARY_OBSERVERS))
+        self.assertEqual(report["observation_validator_count"], 4)
+        self.assertTrue(report["workload_wallet_authority_verified_all_observed"])
+        self.assertFalse(report["workload_wallet_authority_verified_all_five"])
+        self.assertFalse(report["wallet_effects_verified_all_five"])
+        self.assertIsNone(report["steady_state"]["all_five_verified_finalized_transactions"])
+        self.assertEqual(report["finalized_transactions"], 1)
+        views = {name: {"authorization_binding": {"pin": 1}} for name in harness.CANARY_OBSERVERS}
+        public = {"genesis_binding_commitment": {"pin": 1}}
+        self.assertEqual(adapter.validate_wallet_authority(views, public,
+            observation_names=harness.CANARY_OBSERVERS), "existing_binding_verified")
+        del views["val6"]
+        with self.assertRaisesRegex(ValueError, "all-validator"):
+            adapter.validate_wallet_authority(views, public, observation_names=harness.CANARY_OBSERVERS)
+
     def test_rpc_driver_reuses_nonce_only_after_later_exact_inclusion(self):
         self.simulated_async()
 
@@ -295,7 +312,8 @@ class AsyncProofTests(unittest.TestCase):
 
     def simulated_async(self, inclusion_delay=1, max_tx=3, drain_timeout=None, stalled=False, failure=None,
                         per_wallet=1, wallet_count=1, batch=False, ambiguous=False, corrupt=None, first_use=False, cancel_after_submit=False,
-                        cadence_seconds=1.0):
+                        cadence_seconds=1.0, observation_cohort="legacy-five"):
+        observers = harness.CANARY_OBSERVERS if observation_cohort == "canary-four" else harness.VALIDATORS
         real_sleep = time.sleep
         class Clock:
             value = 0.0
@@ -340,7 +358,7 @@ class AsyncProofTests(unittest.TestCase):
                 return 100 + int((min(clock.monotonic(), 15) if stalled else clock.monotonic()) / cadence_seconds)
             def fleet(*args, **kwargs):
                 self.assertEqual(kwargs["expected_chain_id"], 9001)
-                return {name: {"common_height": height(), "height": height(), "native_epoch": 1} for name in harness.VALIDATORS}
+                return {name: {"common_height": height(), "height": height(), "native_epoch": 1} for name in observers}
             def account(endpoints, address, at, **kwargs):
                 own = [tx for tx in included if tx["height"] <= at]
                 sender = address in authored_by_sender
@@ -351,7 +369,7 @@ class AsyncProofTests(unittest.TestCase):
                     value["nonce"] += 1
                 if sender and count and corrupt == "balance":
                     value["balance_nwei"] -= 100
-                return {**value, "validator_views": {name: value for name in harness.VALIDATORS}}
+                return {**value, "validator_views": {name: value for name in observers}}
             def native_sign(argv, **kwargs):
                 self.assertEqual(argv[1], "prepare-wallet-processing-admission")
                 transfer = json.loads(Path(argv[2]).read_text())
@@ -406,7 +424,7 @@ class AsyncProofTests(unittest.TestCase):
                 def append(self, value):
                     rows.append(copy.deepcopy(value))
                     return super().append(value)
-            h = SimpleNamespace(**{name: getattr(harness, name) for name in ("BaselineError", "VALIDATORS", "MAX_FINALIZED_LAG", "POLL_SECONDS", "operational_drain_deadline", "validate_pool_workload", "pool_offer_slot", "transaction_id", "order_key", "RawProofStream", "RpcResponseError", "utc_now")})
+            h = SimpleNamespace(**{name: getattr(harness, name) for name in ("BaselineError", "VALIDATORS", "MAX_FINALIZED_LAG", "POLL_SECONDS", "operational_drain_deadline", "validate_pool_workload", "pool_offer_slot", "transaction_id", "order_key", "RawProofStream", "RpcResponseError", "utc_now", "observation_endpoints", "observation_names", "observation_report")})
             h.RawProofStream = CapturingProof
             h.wallet_pool_public = lambda *a: wallets
             h.sample_fleet = fleet
@@ -415,7 +433,7 @@ class AsyncProofTests(unittest.TestCase):
             h.rpc = rpc
             h.observe_pool_receipt = lambda url, record: rpc(url, "synergy_getProtectedAdmissionReceipt", {"receipt_id": record["receipt_id"]})
             h.subprocess = SimpleNamespace(run=native_sign, DEVNULL=None)
-            args = SimpleNamespace(validator_rpc=[(name, name) for name in harness.VALIDATORS], network_id="posy-isolated-test", workload_mode="offered-rate",
+            args = SimpleNamespace(validator_rpc=[(name, "https://" + name + ".invalid/rpc") for name in observers], observation_cohort=observation_cohort, expected_genesis_hash="aa" * 32, network_id="posy-isolated-test", workload_mode="offered-rate",
                 execute=True, submit_validator="val2", wallet_registry=registry, remote_signer=False, signer_dir=None, operator_wallet_registry=False,
                 output=root / "report.json", duration_seconds=12, max_tx=max_tx, rate_tps=float(per_wallet * wallet_count),
                 max_in_flight=per_wallet * wallet_count, max_in_flight_per_wallet=per_wallet, stability_seconds=10,
@@ -441,7 +459,8 @@ class AsyncProofTests(unittest.TestCase):
             for nonces in authored_by_sender.values():
                 self.assertEqual(nonces, list(range(len(nonces))))
             self.assertEqual(report["finalized_transactions"], expected_count)
-            self.assertTrue(report["wallet_effects_verified_all_five"])
+            self.assertTrue(report["wallet_effects_verified_all_observed"])
+            self.assertEqual(report["wallet_effects_verified_all_five"], observation_cohort == "legacy-five")
             self.assertTrue(report["generator_observer"]["offered_scheduler_independent"])
             self.assertEqual(report["generator_observer"]["maximum_concurrent_reads"], 1)
             self.assertGreater(report["generator_resources"]["process_peak_rss_bytes"], 0)
@@ -455,7 +474,7 @@ class AsyncProofTests(unittest.TestCase):
             self.assertEqual(persisted[0]["kind"], "active_intent_checkpoint")
             self.assertEqual(persisted[0]["active"], [])
             self.assertFalse(any(row["kind"] == "finalized_transfer" for row in persisted))
-            self.assertEqual({row["validator"] for row in rows if row["kind"] == "finalized_block_observation"}, set(harness.VALIDATORS))
+            self.assertEqual({row["validator"] for row in rows if row["kind"] == "finalized_block_observation"}, set(observers))
             return report, rows
 
 

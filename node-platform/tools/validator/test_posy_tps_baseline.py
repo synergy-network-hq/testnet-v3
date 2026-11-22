@@ -7,6 +7,7 @@ import json
 import threading
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -128,6 +129,7 @@ class BaselineMockRpcTests(unittest.TestCase):
                     self.assertEqual(HARNESS.rpc(self.url, "synergy_chainTelemetry", {}), 123)
                 request = opener.open.call_args.args[0]
                 self.assertEqual(request.get_header("Authorization"), "Bearer test-private-run-token")
+                self.assertEqual(request.get_header("User-agent"), "Synergy-PoSy-Qualification/1.0")
             finally:
                 HARNESS.configure_rpc_transport()
 
@@ -978,7 +980,7 @@ class ClosedLoopMemoryTests(unittest.TestCase):
             return {"status":"accepted"},{"transaction":{"unsigned":{"sender":record["sender"],"nonce":record["nonce"],"receiver":"receiver","amount_nwei":1}},"receipt":{"gas_used":0},"block_height":100,"validator_views":{name:{} for name in HARNESS.VALIDATORS}}
         def submit(_url,_admission,record):submitted.append(clock[0])
         args=self.args(workload_mode=mode,duration_seconds=300 if mode=="closed-loop-memory" else 30,
-            validator_rpc=[(name,name) for name in HARNESS.VALIDATORS],network_id="network",execute=True,
+            validator_rpc=[(name,"https://"+name+".invalid/rpc") for name in HARNESS.VALIDATORS],network_id="network",execute=True,
             remote_signer=False,signer_dir=None,rate_tps=1.0,stability_seconds=10,
             finality_budget_seconds=20,maximum_gap_seconds=30,wallet_registry=Path("unused"),
             receiver="receiver",amount_nwei=1,gas_limit=1,max_fee_per_gas_nwei=1,gas_class_units=1,fee_class=1,
@@ -1039,6 +1041,76 @@ class ClosedLoopMemoryTests(unittest.TestCase):
         self.assertEqual(report["remaining_in_flight"],0)
         self.assertEqual(report["status"],"failed");self.assertFalse(report["workload_deadline_met"])
 
+
+
+
+class ExplicitObservationCohortTests(unittest.TestCase):
+    def test_cli_default_and_explicit_four_selection(self):
+        with patch.object(HARNESS.sys, "argv", ["baseline"]):
+            defaults = HARNESS.parse_args()
+        self.assertEqual(defaults.observation_cohort, "legacy-five")
+        with patch.object(HARNESS.sys, "argv", ["baseline", "--observation-cohort", "canary-four",
+                "--expected-genesis-hash", "aa"*32]):
+            selected = HARNESS.parse_args()
+        self.assertEqual(selected.observation_cohort, "canary-four")
+        self.assertEqual(selected.expected_genesis_hash, "aa"*32)
+
+    def args(self, **changes):
+        values = dict(observation_cohort="canary-four", expected_genesis_hash="aa" * 32,
+            submit_validator="val2", validator_rpc=[(name, "https://" + name + ".invalid/rpc")
+                for name in HARNESS.CANARY_OBSERVERS])
+        values.update(changes)
+        return SimpleNamespace(**values)
+
+    def test_explicit_selection_required_and_fixed_complete_cohort(self):
+        endpoints = HARNESS.observation_endpoints(self.args())
+        self.assertEqual(HARNESS.observation_names(endpoints), HARNESS.CANARY_OBSERVERS)
+        for change in [dict(observation_cohort="legacy-five"), dict(observation_cohort="three"),
+                dict(expected_genesis_hash=None), dict(submit_validator="val5"),
+                dict(validator_rpc=list(endpoints.items())[:-1]),
+                dict(validator_rpc=list(endpoints.items()) + [next(iter(endpoints.items()))])]:
+            with self.subTest(change=change), self.assertRaises(HARNESS.BaselineError):
+                HARNESS.observation_endpoints(self.args(**change))
+        with self.assertRaises(HARNESS.BaselineError):
+            HARNESS.sample_fleet(dict(endpoints), "native-network", native_tips=True)
+        duplicate = list(endpoints.items())
+        duplicate[-1] = (duplicate[-1][0], duplicate[0][1] + "/")
+        with self.assertRaisesRegex(HARNESS.BaselineError, "distinct RPC"):
+            HARNESS.observation_endpoints(self.args(validator_rpc=duplicate))
+        default = self.args(validator_rpc=[(name, "https://"+name+".invalid/rpc") for name in HARNESS.VALIDATORS])
+        del default.observation_cohort
+        self.assertEqual(HARNESS.observation_names(HARNESS.observation_endpoints(default)), HARNESS.VALIDATORS)
+
+    def test_four_native_observers_match_exact_identity_genesis_and_pinned_height(self):
+        endpoints = HARNESS.observation_endpoints(self.args())
+        states = {name: value for name, value in NativeTipObservationTests().states().items()
+                  if name in endpoints}
+        names = {url: name for name, url in endpoints.items()}
+        def read(url, method, params, **kwargs):
+            name = names[url]
+            value = NativeTipObservationTests().response(name, params)
+            value.update(node_name="validator-0"+name[-1], genesis_hash="aa"*32, process_id=100+int(name[-1]))
+            return value
+        with patch.object(HARNESS, "rpc", side_effect=read) as requests:
+            blocks = HARNESS.native_fleet_observation(endpoints, "native-network", states)
+        self.assertEqual(set(blocks), set(HARNESS.CANARY_OBSERVERS))
+        self.assertEqual(requests.call_count, 8)
+        self.assertTrue(all(value["height"] == 110 for value in blocks.values()))
+        for field, value in [("node_name", "validator-02"), ("genesis_hash", "bb"*32),
+                             ("network_identity", "foreign"), ("process_id", None)]:
+            def foreign(url, method, params, **kwargs):
+                result = read(url, method, params, **kwargs)
+                if names[url] == "val6": result[field] = value
+                return result
+            with self.subTest(field=field), patch.object(HARNESS, "rpc", side_effect=foreign):
+                with self.assertRaises(HARNESS.BaselineError):
+                    HARNESS.native_fleet_observation(endpoints, "native-network", states)
+        def conflict(url, method, params, **kwargs):
+            result = read(url, method, params, **kwargs)
+            if names[url] == "val6" and params: result["common_finalized_commitment"]["protected_execution_root"] = "foreign"
+            return result
+        with patch.object(HARNESS, "rpc", side_effect=conflict), self.assertRaises(HARNESS.BaselineError):
+            HARNESS.native_fleet_observation(endpoints, "native-network", states)
 
 if __name__ == "__main__":
     unittest.main()
