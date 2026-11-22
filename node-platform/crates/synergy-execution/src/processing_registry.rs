@@ -148,6 +148,12 @@ pub trait ProcessingReadinessVerifier {
         record: &ProcessingReadyRecord,
         parent: &WorldState,
     ) -> Result<bool, String>;
+
+    /// A verified terminal disposition can consume the ordered position
+    /// without spending or unlocking the next nonce.
+    fn retires_without_nonce(&self, _: &ProcessingReadyRecord) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -661,6 +667,9 @@ impl<V: ProcessingReadinessVerifier> ProcessingSelectionPolicy for ParentEligibi
                 return Ok(false);
             }
         }
+        if self.verifier.retires_without_nonce(record) {
+            return Ok(true);
+        }
         let current = self
             .nonces
             .get(record.sender_wallet.as_str())
@@ -686,6 +695,9 @@ impl<V: ProcessingReadinessVerifier> ProcessingSelectionPolicy for ParentEligibi
             .entry(record.item.group_number)
             .or_default();
         *selected = selected.checked_add(1).ok_or(EtdagError::InvalidCapacity)?;
+        if self.verifier.retires_without_nonce(record) {
+            return Ok(());
+        }
         let nonce = self.nonces.entry(&record.sender_wallet).or_insert_with(|| {
             self.registry
                 .parent
@@ -902,6 +914,46 @@ mod tests {
         let recovered =
             ParentProcessingRegistry::read(&consumed, &digest("scope"), &budget).unwrap();
         assert_eq!(recovered.records.len(), 3);
+    }
+
+    #[test]
+    fn terminal_processing_positions_do_not_enable_a_later_nonce() {
+        struct TerminalVerifier;
+        impl ProcessingReadinessVerifier for TerminalVerifier {
+            fn verify_publication(
+                &self,
+                record: &ProcessingReadyRecord,
+                world: &WorldState,
+            ) -> Result<(), String> {
+                FixtureVerifier.verify_publication(record, world)
+            }
+            fn identity_is_current(
+                &self,
+                record: &ProcessingReadyRecord,
+                world: &WorldState,
+            ) -> Result<bool, String> {
+                FixtureVerifier.identity_is_current(record, world)
+            }
+            fn retires_without_nonce(&self, record: &ProcessingReadyRecord) -> bool {
+                record.item.group_number == 1 || record.item.group_number == 3
+            }
+        }
+
+        let budget = WorldResourceBudget::new(4 * 1024 * 1024);
+        let mut branch = WorldState::default();
+        let records = [
+            record(1, 0, "alice"),
+            record(2, 1, "alice"),
+            record(3, 3, "bob"),
+            record(4, 0, "bob"),
+        ];
+        let published = publish(&branch, &records, &budget);
+        published.diff.apply(&mut branch).unwrap();
+        let registry = ParentProcessingRegistry::read(&branch, &digest("scope"), &budget).unwrap();
+        let terminal = registry.select(&TerminalVerifier, 1000, 1000).unwrap();
+        assert_eq!(terminal.selection.item_indices, vec![0, 2, 3]);
+        let ordinary = registry.select(&FixtureVerifier, 1000, 1000).unwrap();
+        assert_eq!(ordinary.selection.item_indices, vec![0, 1, 3]);
     }
 
     #[test]

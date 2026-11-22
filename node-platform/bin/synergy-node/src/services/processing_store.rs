@@ -1326,6 +1326,22 @@ impl<A: ProcessingAdmissionRecord> PendingProcessingStore<A> {
             &Arc<WorldResourceBudget>,
         ) -> Result<T, ProcessingStoreError>,
     ) -> Result<T, ProcessingStoreError> {
+        self.with_original(envelope, verifier, action)
+    }
+
+    /// Read original admission bytes using the existing slot reservation.
+    /// The owner still binds them to the applicable authenticated context.
+    pub(super) fn with_original<T>(
+        &self,
+        envelope: &EtdagDigest,
+        verifier: &impl ProcessingAdmissionAuthenticator<A>,
+        action: impl FnOnce(
+            &ProcessingContext,
+            u64,
+            &A,
+            &Arc<WorldResourceBudget>,
+        ) -> Result<T, ProcessingStoreError>,
+    ) -> Result<T, ProcessingStoreError> {
         let slot = self
             .slots
             .iter()

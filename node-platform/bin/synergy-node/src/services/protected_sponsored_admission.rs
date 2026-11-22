@@ -26,6 +26,12 @@ pub(super) struct VerifiedSponsoredAdmission {
     gas: u64,
 }
 
+impl VerifiedSponsoredAdmission {
+    pub(super) fn resources(&self) -> &Pw13SponsoredResources {
+        &self.resources
+    }
+}
+
 impl CandidateProtectedAccounts<'_> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn verify_sponsored_admission(

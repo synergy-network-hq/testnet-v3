@@ -151,6 +151,10 @@ impl CandidateProtectedAccounts<'_> {
 }
 
 impl VerifiedTransferAdmission {
+    pub(super) fn resources(&self) -> &Pw13TransferResources {
+        &self.resources
+    }
+
     pub(super) fn gas(&self) -> u64 {
         self.gas
     }

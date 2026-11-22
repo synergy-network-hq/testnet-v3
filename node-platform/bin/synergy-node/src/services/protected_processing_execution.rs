@@ -3,11 +3,12 @@
 use super::{
     debug,
     processing_admission::{CandidateAdmission, CandidateAuthorization},
+    processing_disposition::{self, Disposition, DispositionSlot},
     sponsor_settlement::SponsoredOutcome,
     sponsored_admission::VerifiedSponsoredAdmission,
     transfer_admission::VerifiedTransferAdmission,
-    CandidateProtectedAccounts, CandidateTransferExecution, ChainId, FinalizedSnapshot, Position,
-    TransferCandidateContent,
+    AccountIdentifier, CandidateProtectedAccounts, CandidateTransferExecution, ChainId,
+    FinalizedSnapshot, Position, TransferCandidateContent,
 };
 use crate::services::processing_pipeline::{
     AuthenticatedProcessingOpening, NativeProcessingRecovery, ProcessingCompletionEvidence,
@@ -16,14 +17,14 @@ use crate::services::processing_pipeline::{
 use crate::services::processing_store::{
     PendingProcessingStore, ProcessingAdmissionAuthenticator, ProcessingStoreError,
 };
-#[cfg(test)]
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use synergy_address_engine::apqe::provider::{variants::Mldsa87, PqProvider};
 use synergy_aegis::ApqeIdentityVerifier;
 use synergy_etdag::{
-    execution::processing_admission_authorization_root, EtdagDigest, EtdagParameters,
-    ProcessingContext, ProcessingEnvelope,
+    admission::{Pw13SponsoredResources, Pw13TransferResources},
+    execution::processing_admission_authorization_root,
+    EtdagDigest, EtdagParameters, ProcessingContext, ProcessingEnvelope,
 };
 use synergy_execution::{
     decode_budgeted_pw13_engineering_candidate, processing_group_state, verify_processing_payload,
@@ -33,7 +34,7 @@ use synergy_execution::{
 use synergy_state::{
     state_root,
     world_resources::{BudgetedWorld, WorldResourceBudget, WorldResourcePermit},
-    WorldState,
+    StateDiff, WorldState,
 };
 
 enum ActionAuthorization {
@@ -41,11 +42,93 @@ enum ActionAuthorization {
     SponsoredEnrollment(VerifiedSponsoredAdmission),
 }
 
+struct IntentTerms<'a> {
+    valid_until_finalized_height: u64,
+    digest: &'a [u8],
+    policy: Option<&'a Pw13TransferResources>,
+}
+
+impl<'a> From<&'a Pw13TransferResources> for IntentTerms<'a> {
+    fn from(resources: &'a Pw13TransferResources) -> Self {
+        Self {
+            valid_until_finalized_height: resources.valid_until_finalized_height,
+            digest: &resources.native_intent_digest,
+            policy: Some(resources),
+        }
+    }
+}
+
+impl<'a> From<&'a Pw13SponsoredResources> for IntentTerms<'a> {
+    fn from(resources: &'a Pw13SponsoredResources) -> Self {
+        Self {
+            valid_until_finalized_height: resources.valid_until_finalized_height,
+            digest: &resources.sponsor_intent_digest,
+            policy: None,
+        }
+    }
+}
+
+impl IntentTerms<'_> {
+    fn disposition(
+        &self,
+        record: &ProcessingReadyRecord,
+        finalized: &FinalizedSnapshot<'_>,
+    ) -> Result<Option<Disposition>, String> {
+        if finalized.position.height > self.valid_until_finalized_height {
+            return Ok(Some(Disposition::Expired));
+        }
+        let ledger = finalized
+            .world
+            .accounts
+            .get(&record.sender_wallet)
+            .filter(|account| account.code_hash.is_none())
+            .ok_or("protected READY payer has no finalized account")?;
+        if ledger.nonce > record.sender_nonce {
+            return Ok(Some(Disposition::NonceSuperseded {
+                finalized_nonce: ledger.nonce,
+            }));
+        }
+        if let Some(signed) = self.policy {
+            let registry = finalized.registry;
+            let current = registry.read_policy(
+                finalized.world,
+                AccountIdentifier::from_bytes(signed.account),
+            )?;
+            if current.registered_height > finalized.position.height
+                || current.policy_epoch < signed.policy_epoch
+                || (current.policy_epoch == signed.policy_epoch
+                    && current.policy_hash != signed.policy_hash)
+            {
+                return Err("protected READY policy disagrees with finalized history".into());
+            }
+            if current.policy_epoch > signed.policy_epoch {
+                let enrollment =
+                    super::CanonicalEnrollment::decode(&current.enrollment, registry.wire)
+                        .map_err(super::display)?;
+                registry.canonical_policy(&current, &enrollment)?;
+                return Ok(Some(Disposition::PolicySuperseded {
+                    signed_policy_epoch: signed.policy_epoch,
+                    finalized_policy_epoch: current.policy_epoch,
+                }));
+            }
+        }
+        Ok(None)
+    }
+}
+
 pub(super) struct AuthorizedCandidateAdmission {
     authorization_root: EtdagDigest,
     parameters: EtdagParameters,
-    valid_until_finalized_height: u64,
     action: ActionAuthorization,
+}
+
+impl AuthorizedCandidateAdmission {
+    fn terms(&self) -> IntentTerms<'_> {
+        match &self.action {
+            ActionAuthorization::Transfer(proof) => proof.resources().into(),
+            ActionAuthorization::SponsoredEnrollment(proof) => proof.resources().into(),
+        }
+    }
 }
 
 pub(super) struct CandidateAuthorizationContext<'a> {
@@ -64,7 +147,7 @@ impl CandidateProtectedAccounts<'_> {
         admission: &CandidateAdmission,
         terms: CandidateAuthorizationContext<'_>,
     ) -> Result<AuthorizedCandidateAdmission, String> {
-        let (action, valid_until_finalized_height) = match &admission.authorization {
+        let action = match &admission.authorization {
             CandidateAuthorization::Transfer(proof) => {
                 let verified = self.verify_transfer_admission(
                     terms.provider,
@@ -76,10 +159,7 @@ impl CandidateProtectedAccounts<'_> {
                     terms.fee_schedule,
                     terms.metered_gas,
                 )?;
-                (
-                    ActionAuthorization::Transfer(verified),
-                    proof.resources.valid_until_finalized_height,
-                )
+                ActionAuthorization::Transfer(verified)
             }
             CandidateAuthorization::SponsoredEnrollment(proof) => {
                 let identity = terms
@@ -96,10 +176,7 @@ impl CandidateProtectedAccounts<'_> {
                     terms.fee_schedule,
                     terms.metered_gas,
                 )?;
-                (
-                    ActionAuthorization::SponsoredEnrollment(verified),
-                    proof.resources.valid_until_finalized_height,
-                )
+                ActionAuthorization::SponsoredEnrollment(verified)
             }
         };
         let authorization_root =
@@ -107,7 +184,6 @@ impl CandidateProtectedAccounts<'_> {
         Ok(AuthorizedCandidateAdmission {
             authorization_root,
             parameters: terms.parameters.clone(),
-            valid_until_finalized_height,
             action,
         })
     }
@@ -266,6 +342,46 @@ pub(super) struct ProtectedJournalRecovery<'a> {
 }
 
 impl ProtectedJournalRecovery<'_> {
+    fn disposition(
+        &self,
+        pending: &PendingProcessingStore<CandidateAdmission>,
+        record: &ProcessingReadyRecord,
+        finalized: &FinalizedSnapshot<'_>,
+    ) -> Result<Option<Disposition>, String> {
+        pending
+            .with_original(
+                &record.item.envelope_id,
+                self,
+                |_, _, admission, workspace| {
+                    let _policy =
+                        workspace.reserve(super::MAX_STORED_POLICY_BYTES * 4 + 16 * 1024)?;
+                    if admission.envelope.aad.processing_context_root
+                        != record.processing_context_root
+                        || admission.envelope.aad.sender_id != record.sender_wallet
+                        || admission.envelope.aad.nonce_slot != record.sender_nonce
+                        || processing_admission_authorization_root(admission)
+                            .map_err(|error| ProcessingStoreError::Verification(debug(error)))?
+                            != record.authorization_root
+                    {
+                        return Err(ProcessingStoreError::Verification(
+                            "protected READY differs from the original authenticated admission"
+                                .into(),
+                        ));
+                    }
+                    let terms: IntentTerms<'_> = match &admission.authorization {
+                        CandidateAuthorization::Transfer(proof) => (&proof.resources).into(),
+                        CandidateAuthorization::SponsoredEnrollment(proof) => {
+                            (&proof.resources).into()
+                        }
+                    };
+                    terms
+                        .disposition(record, finalized)
+                        .map_err(ProcessingStoreError::Verification)
+                },
+            )
+            .map_err(debug)
+    }
+
     fn completion_source(
         &self,
         admission: &CandidateAdmission,
@@ -411,6 +527,7 @@ pub(super) struct CandidateSlot<'a> {
 pub(super) enum CandidateActionOutcome {
     Transfer(CandidateTransferExecution),
     SponsoredEnrollment(SponsoredOutcome, u128),
+    Disposition(Disposition),
 }
 
 const READY_RECORD_RESERVATION: usize = 32 * 1024;
@@ -471,6 +588,19 @@ impl<'a> PreparedProtectedAction<'a> {
                 "protected READY publication differs from the authenticated opening".into(),
             );
         }
+        self.validate_slot(slot)?;
+        match self
+            .dispatch
+            .admission
+            .terms()
+            .disposition(record, slot.finalized_parent)?
+        {
+            Some(Disposition::Expired) => {
+                return Err("protected authorization expired at the finalized predecessor".into());
+            }
+            Some(_) => return Err("superseded protected authorization cannot publish READY".into()),
+            None => {}
+        }
         // Refuse invalid decrypted content before publishing readiness. These
         // tentative ledger and receipt writes are never a publication effect.
         let mut trial =
@@ -496,11 +626,7 @@ impl<'a> PreparedProtectedAction<'a> {
         Ok(())
     }
 
-    fn execute(
-        &self,
-        candidate: &mut BudgetedWorld,
-        slot: CandidateSlot<'_>,
-    ) -> Result<CandidateActionOutcome, String> {
+    fn validate_slot(&self, slot: CandidateSlot<'_>) -> Result<(), String> {
         let inclusion = slot.inclusion;
         if inclusion.height < self.opened.envelope().aad.authorization_height {
             return Err("protected execution precedes the original authorization height".into());
@@ -517,9 +643,57 @@ impl<'a> PreparedProtectedAction<'a> {
         {
             return Err("protected execution has an inconsistent finalized predecessor".into());
         }
-        if finalized.position.height > self.dispatch.admission.valid_until_finalized_height {
-            return Err("protected authorization expired at the finalized predecessor".into());
+        Ok(())
+    }
+
+    fn execute_selected(
+        &self,
+        candidate: &mut BudgetedWorld,
+        slot: CandidateSlot<'_>,
+        disposition: Option<Disposition>,
+    ) -> Result<CandidateActionOutcome, String> {
+        self.validate_slot(slot)?;
+        let terms = self.dispatch.admission.terms();
+        let _policy = candidate
+            .budget()
+            .reserve(super::MAX_STORED_POLICY_BYTES * 4 + 16 * 1024)
+            .map_err(debug)?;
+        if terms.disposition(&self.record, slot.finalized_parent)? != disposition {
+            return Err(
+                "protected READY disposition differs from exact authenticated replay".into(),
+            );
         }
+        if let Some(disposition) = disposition {
+            let change = processing_disposition::prepare(
+                candidate.as_ref(),
+                &self.record,
+                self.opened.envelope().aad.authorization_height,
+                terms.digest,
+                terms.valid_until_finalized_height,
+                DispositionSlot {
+                    source_finalized_height: self.dispatch.source.position.height,
+                    finalized: slot.finalized_parent,
+                    inclusion: slot.inclusion,
+                },
+                disposition,
+            )?;
+            candidate
+                .try_apply(&StateDiff {
+                    protocol_changes: vec![change],
+                    ..StateDiff::default()
+                })
+                .map_err(debug)?;
+            return Ok(CandidateActionOutcome::Disposition(disposition));
+        }
+        self.execute(candidate, slot)
+    }
+
+    fn execute(
+        &self,
+        candidate: &mut BudgetedWorld,
+        slot: CandidateSlot<'_>,
+    ) -> Result<CandidateActionOutcome, String> {
+        let inclusion = slot.inclusion;
         verify_processing_payload(&self.record, self.opened.plaintext(), candidate.budget())
             .map_err(debug)?;
         let payer = self.record.sender_wallet.as_str();
@@ -571,6 +745,7 @@ impl<'a> PreparedProtectedAction<'a> {
 struct ProtectedReadiness<'a, F> {
     namespace: &'a EtdagDigest,
     verify_publication: F,
+    dispositions: BTreeMap<&'a EtdagDigest, Disposition>,
 }
 
 impl<F> ProcessingReadinessVerifier for ProtectedReadiness<'_, F>
@@ -606,6 +781,10 @@ where
             .is_some_and(|account| {
                 account.code_hash.is_none() && account.nonce <= record.sender_nonce
             }))
+    }
+
+    fn retires_without_nonce(&self, record: &ProcessingReadyRecord) -> bool {
+        self.dispositions.contains_key(&record.item.envelope_id)
     }
 }
 
@@ -701,10 +880,17 @@ pub(super) fn execute_protected_candidate<'a>(
         context,
         &publication_records,
         |record| find(record)?.verify_publication(parent, record, context.slot),
-        |record, candidate| {
+        |record| {
+            find(record)?
+                .dispatch
+                .admission
+                .terms()
+                .disposition(record, context.slot.finalized_parent)
+        },
+        |record, disposition, candidate| {
             let action = find(record)?;
             action.verify_selection(parent, record)?;
-            action.execute(candidate, context.slot)
+            action.execute_selected(candidate, context.slot, disposition)
         },
     )
 }
@@ -716,8 +902,10 @@ fn assemble_protected_candidate(
     context: ProtectedCandidateContext<'_>,
     publications: &[ProcessingReadyRecord],
     verify_publication: impl Fn(&ProcessingReadyRecord) -> Result<(), String>,
+    disposition: impl Fn(&ProcessingReadyRecord) -> Result<Option<Disposition>, String>,
     execute: impl Fn(
         &ProcessingReadyRecord,
+        Option<Disposition>,
         &mut BudgetedWorld,
     ) -> Result<CandidateActionOutcome, String>,
 ) -> Result<(BudgetedExecutionCandidate, Vec<CandidateActionOutcome>), String> {
@@ -733,12 +921,22 @@ fn assemble_protected_candidate(
     }
     let scope = context.scope(parent)?;
     let budget = parent.budget();
+    let registry =
+        ParentProcessingRegistry::read(parent.as_ref(), namespace, budget).map_err(debug)?;
+    let _dispositions = budget
+        .reserve(registry.records().len() * 256 + 16 * 1024)
+        .map_err(debug)?;
+    let mut dispositions = BTreeMap::new();
+    for record in registry.records() {
+        if let Some(result) = disposition(record)? {
+            dispositions.insert(&record.item.envelope_id, result);
+        }
+    }
     let readiness = ProtectedReadiness {
         namespace,
         verify_publication,
+        dispositions,
     };
-    let registry =
-        ParentProcessingRegistry::read(parent.as_ref(), namespace, budget).map_err(debug)?;
     let selected = registry
         .select(
             &readiness,
@@ -752,7 +950,14 @@ fn assemble_protected_candidate(
     let mut candidate = BudgetedWorld::try_clone_world(parent.as_ref(), budget).map_err(debug)?;
     let mut outcomes = Vec::with_capacity(selected.selection().item_indices.len());
     for record in selected.records() {
-        outcomes.push(execute(record, &mut candidate)?);
+        outcomes.push(execute(
+            record,
+            readiness
+                .dispositions
+                .get(&record.item.envelope_id)
+                .copied(),
+            &mut candidate,
+        )?);
     }
     let candidate = lifecycle
         .assemble_pw13_engineering(
@@ -785,10 +990,11 @@ pub(super) fn execute_protected_journal_candidate(
                 action.verify_publication(parent, record, context.slot)
             })
         },
-        |record, candidate| {
+        |record| recovery.disposition(pending, record, context.slot.finalized_parent),
+        |record, disposition, candidate| {
             recovery.with_action(pending, record, parent, context.parameters, |action| {
                 action.verify_selection(parent, record)?;
-                action.execute(candidate, context.slot)
+                action.execute_selected(candidate, context.slot, disposition)
             })
         },
     )

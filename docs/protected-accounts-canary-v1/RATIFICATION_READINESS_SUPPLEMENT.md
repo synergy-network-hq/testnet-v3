@@ -254,6 +254,19 @@ publication and settlement and reject a missing completion, a substituted
 payload commitment and a different retained reveal parent. The existing
 ordinary decoder and live ingress gates still require the approved profile.
 
+For ratification, the engineering dispatcher proposes closing an already
+published READY item once its signed expiry is strictly below the authenticated
+finalized predecessor height. At the expiry height itself, the request remains
+eligible. If it has not expired, the dispatcher checks for a higher finalized
+payer nonce or a newer canonical protected policy epoch. The resulting receipt
+commits the original envelope, processing context, authorization and payload
+commitments, signed intent digest and deciding finality. The same candidate
+consumes the exact READY and ordered positions. These dispositions charge no
+fee, consume no nonce, and never make the next nonce eligible by themselves.
+Offline receipt inspection can check first appearance against adjacent certified
+Worlds. This proposal does not assign production wire identifiers or enable
+the public route. Its resource and retention rules remain subject to ratification.
+
 The offline settlement verifier checks the exact encrypted transfer and
 sponsored enrollment receipts against adjacent three-QC-certified blocks
 and their Worlds. It checks first appearance, the certified inclusion time,

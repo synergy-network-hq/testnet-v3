@@ -29,6 +29,8 @@ pub(crate) struct CandidateReadQuery {
     sponsorships: Vec<SponsorshipQuery>,
     #[serde(default)]
     transition_settlements: Vec<TransitionSettlementQuery>,
+    #[serde(default)]
+    dispositions: Vec<processing_disposition::DispositionQuery>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -120,7 +122,8 @@ pub(crate) fn inspect(
         + query.commitments.len()
         + query.settlements.len()
         + query.sponsorships.len()
-        + query.transition_settlements.len();
+        + query.transition_settlements.len()
+        + query.dispositions.len();
     if !(1..=MAX_SELECTORS).contains(&selectors)
         || query.provider_manifests.is_empty()
         || query.provider_manifests.len() > MAX_PROVIDER_PINS
@@ -255,6 +258,20 @@ pub(crate) fn inspect(
     if !transition_settlements.is_empty() {
         result["transition_settlements"] = json!(transition_settlements);
     }
+    if !query.dispositions.is_empty() {
+        let mut envelopes = BTreeSet::new();
+        let dispositions = query
+            .dispositions
+            .iter()
+            .map(|query| {
+                if !envelopes.insert(&query.opening.envelope_id) {
+                    return Err("duplicate protected disposition selector".into());
+                }
+                processing_disposition::inspect(&snapshot, query)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        result["dispositions"] = json!(dispositions);
+    }
     Ok(result)
 }
 
@@ -324,6 +341,7 @@ pub(crate) fn inspect_settlement_inclusion(
             ..query.clone()
         },
     )?;
+    let dispositions = query.dispositions.clone();
     let mut applied = inclusion.project(chain_id, genesis, query)?;
     let mut touched = BTreeSet::new();
     for (section, payer) in [("settlements", "sender"), ("sponsorships", "payer")] {
@@ -364,6 +382,37 @@ pub(crate) fn inspect_settlement_inclusion(
                 touched.insert(recipient.to_owned());
             }
         }
+    }
+    for (index, query) in dispositions.iter().enumerate() {
+        let receipt = &applied["dispositions"][index];
+        if previous["dispositions"][index]["status"] != "no_disposition_in_snapshot"
+            || receipt["included_height"].as_u64() != Some(inclusion.finality.height)
+            || receipt["inclusion_consensus_timestamp_unix"].as_u64()
+                != Some(inclusion.consensus_time)
+        {
+            return Err("disposition was not introduced at the verified inclusion slot".into());
+        }
+        let payer = receipt["payer"]
+            .as_str()
+            .ok_or("disposition payer missing")?;
+        let nonce = receipt["request_nonce"]
+            .as_u64()
+            .ok_or("disposition nonce missing")?;
+        let original = synergy_execution::processing_member_claim(predecessor.world, payer, nonce)
+            .map_err(debug)?;
+        let remaining =
+            synergy_execution::processing_member_claim_optional(inclusion.world, payer, nonce)
+                .map_err(debug)?;
+        if original.member.envelope.tx_commitment != query.opening.envelope_id
+            || original.member.authorization_root != query.authorization_root
+            || original.member.processing_context_root != query.opening.processing_context_root
+            || remaining.is_some_and(|claim| {
+                claim.member.envelope.tx_commitment == query.opening.envelope_id
+            })
+        {
+            return Err("disposition does not consume the exact original ordered member".into());
+        }
+        touched.insert(payer.to_owned());
     }
     applied["ledger"] = json!(touched.into_iter().map(|address| {
         let before = settlement_ledger(predecessor.world, &address)?;

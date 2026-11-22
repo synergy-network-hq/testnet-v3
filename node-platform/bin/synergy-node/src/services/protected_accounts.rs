@@ -14,6 +14,8 @@ mod sponsor_settlement;
 mod etdag_candidate;
 #[path = "protected_processing_admission.rs"]
 mod processing_admission;
+#[path = "protected_processing_disposition.rs"]
+mod processing_disposition;
 #[path = "protected_processing_execution.rs"]
 mod processing_execution;
 #[path = "protected_transfer_admission.rs"]
@@ -1684,6 +1686,7 @@ impl CandidateEnrollmentWrite {
                     || settlement::owns_key(&change.key)
                     || sponsor_settlement::owns_key(&change.key)
                     || transition_settlement::owns_key(&change.key)
+                    || processing_disposition::owns_key(&change.key)
             })
         {
             return Err("protected enrollment conflicts with existing state or fee writes".into());
@@ -3854,14 +3857,45 @@ mod tests {
                 ordered_inclusion.consensus_time,
             )
             .unwrap();
-        let expired = opened.execute_ordered(
-            dispatch(&admission),
-            ordered_inclusion,
-            &expired_parent,
-            &limits,
+        let (expired, outcome) = opened
+            .execute_ordered(
+                dispatch(&admission),
+                ordered_inclusion,
+                &expired_parent,
+                &limits,
+            )
+            .unwrap();
+        assert_eq!(expired.accounts, spend_base.accounts);
+        assert_eq!(
+            outcome,
+            CandidateActionOutcome::Disposition(processing_disposition::Disposition::Expired)
         );
-        assert!(matches!(expired, Err(error) if error ==
-            "protected authorization expired at the finalized predecessor"));
+        let mut superseding_world = spend_base.clone();
+        superseding_world.accounts.get_mut(&address).unwrap().nonce = 1;
+        let (superseding_pointer, superseding_proof) =
+            finalized(body.valid_until_finalized_height, &superseding_world);
+        let superseding_parent = registry
+            .finalized_snapshot(
+                &superseding_world,
+                &superseding_pointer,
+                &superseding_proof,
+                ordered_inclusion.consensus_time,
+            )
+            .unwrap();
+        let (_, outcome) = opened
+            .execute_ordered(
+                dispatch(&admission),
+                ordered_inclusion,
+                &superseding_parent,
+                &limits,
+            )
+            .unwrap();
+        assert_eq!(
+            outcome,
+            CandidateActionOutcome::Disposition(
+                processing_disposition::Disposition::NonceSuperseded { finalized_nonce: 1 }
+            )
+        );
         let mut world = spend_base.clone();
         assert_eq!(
             registry

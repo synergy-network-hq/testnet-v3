@@ -7,7 +7,8 @@ use super::super::processing_pipeline::{
     ProcessingSource, RevealedProcessingPayload,
 };
 use super::{
-    processing_admission::CandidateAdmission,
+    processing_admission::{CandidateAdmission, CandidateAuthorization},
+    processing_disposition::{self, Disposition, DispositionQuery},
     processing_execution::{
         execute_protected_candidate, execute_protected_journal_candidate,
         replay_protected_candidate, replay_protected_journal_candidate, CandidateActionOutcome,
@@ -824,7 +825,7 @@ impl ProcessingReadinessVerifier for FixtureOrder<'_> {
 
 #[allow(clippy::too_many_arguments)]
 fn qualify_retained_replay(
-    authority: &super::super::authority::VerifiedAuthority,
+    fixture: &CandidateOrderFixture<'_>,
     source: &NativeSourceFixture,
     context: &ProcessingContext,
     order: &ClosedCandidateOrder,
@@ -832,6 +833,7 @@ fn qualify_retained_replay(
     shares: &[ProcessingDecryptShare],
     terms: NativeSourceTerms<'_>,
 ) -> Result<(Arc<BudgetedWorld>, CandidateActionOutcome), String> {
+    let authority = fixture.authority;
     let retained = order
         .native
         .as_ref()
@@ -1071,7 +1073,236 @@ fn qualify_retained_replay(
         &recovery,
     )?;
     assert_eq!(replayed, settled);
+    if let CandidateAuthorization::Transfer(proof) = &retained.vertex.admission.authorization {
+        qualify_expired_journal_receipt(
+            fixture,
+            retained,
+            context,
+            &published,
+            execution,
+            &reopened,
+            &recovery,
+            &evidence.record,
+            &proof.resources,
+        )?;
+    }
     Ok((replayed.state, outcome))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn qualify_expired_journal_receipt(
+    fixture: &CandidateOrderFixture<'_>,
+    retained: &RetainedNativeFixture,
+    context: &ProcessingContext,
+    published: &BudgetedExecutionCandidate,
+    execution: ProtectedCandidateContext<'_>,
+    pending: &PendingProcessingStore<CandidateAdmission>,
+    recovery: &ProtectedJournalRecovery<'_>,
+    record: &ProcessingReadyRecord,
+    resources: &synergy_etdag::admission::Pw13TransferResources,
+) -> Result<(), String> {
+    let authority = fixture.authority;
+    let certify = |candidate: &BudgetedExecutionCandidate, parent: &SimplifiedFinalityParent| {
+        certify_fixture_qc(
+            candidate,
+            parent,
+            authority,
+            fixture.engine,
+            fixture.signers,
+        )
+    };
+    let reveal = certify(&retained.parent, &retained.validation.candidate.parent)?;
+    let publication = certify(published, &next_fixture_parent(&reveal)?)?;
+    let deciding_height = (published.height + 1).max(resources.valid_until_finalized_height + 1);
+    let mut witness = Vec::new();
+    let mut deciding_candidate = None;
+    let mut tip_qc = publication;
+    for height in published.height + 1..=deciding_height + 2 {
+        let parent = next_fixture_parent(&tip_qc)?;
+        let candidate = proof_candidate(&published.state, execution.namespace, height, &parent)?;
+        tip_qc = certify(&candidate, &parent)?;
+        if height >= deciding_height {
+            witness.push(tip_qc.clone());
+        }
+        if height == deciding_height {
+            deciding_candidate = Some(candidate);
+        }
+    }
+    let deciding_candidate = deciding_candidate.ok_or("missing expiry source candidate")?;
+    let mut finality = ThreeQcFinality::default();
+    for qc in &witness {
+        finality.accept(qc.clone()).map_err(err)?;
+    }
+    let deciding_finality = finality
+        .last_finalized()
+        .ok_or("missing expiry source finality")?;
+    let latest_context = ProcessingContext {
+        authority: authority
+            .protected_target(
+                Some(deciding_finality),
+                authority
+                    .protected_parameters()?
+                    .protected_target_height(deciding_height)
+                    .map_err(err)?,
+            )?
+            .0,
+        ..context.clone()
+    };
+    let native = NativeProcessingContext::verify_pw13(
+        authority,
+        &latest_context,
+        &deciding_candidate,
+        witness
+            .as_slice()
+            .try_into()
+            .map_err(|_| "expected three expiry source QCs")?,
+    )?;
+    let registry = execution.slot.finalized_parent.registry;
+    let latest = registry.native_finalized_snapshot(&native.pw13_finalized_source()?)?;
+    let expired_height = tip_qc.context.height + 1;
+    let expired_slot = ProtectedCandidateContext {
+        parent_block_id: &tip_qc.block_id,
+        slot: CandidateSlot {
+            inclusion: Position {
+                height: expired_height,
+                consensus_time: authority.consensus_timestamp_unix(expired_height)?,
+            },
+            finalized_parent: &latest,
+        },
+        ..execution
+    };
+    let (expired, result) = execute_protected_journal_candidate(
+        &published.state,
+        expired_slot,
+        &[],
+        pending,
+        recovery,
+    )?;
+    assert_eq!(
+        result,
+        vec![CandidateActionOutcome::Disposition(Disposition::Expired)]
+    );
+    assert_eq!(expired.state.accounts, published.state.accounts);
+    let original = serde_json::to_vec(&expired).map_err(err)?;
+    let expired = replay_protected_journal_candidate(
+        &original,
+        &published.state,
+        expired_slot,
+        &[],
+        pending,
+        recovery,
+    )?;
+    assert!(ParentProcessingRegistry::read(
+        expired.state.as_ref().as_ref(),
+        execution.namespace,
+        expired.state.budget(),
+    )
+    .map_err(err)?
+    .records()
+    .is_empty());
+    assert!(processing_member_claim_optional(
+        expired.state.as_ref().as_ref(),
+        &record.sender_wallet,
+        record.sender_nonce,
+    )
+    .map_err(err)?
+    .is_none());
+
+    // Reconstruct a signed three-QC witness for the actual terminal World.
+    // All signing keys and these candidate Worlds are isolated fixture inputs.
+    let inclusion_qc = certify(&expired, &next_fixture_parent(&tip_qc)?)?;
+    let mut parent = next_fixture_parent(&inclusion_qc)?;
+    let mut witness = vec![tip_qc.clone(), inclusion_qc];
+    for height in expired.height + 1..=expired.height + 2 {
+        let successor = proof_candidate(&expired.state, execution.namespace, height, &parent)?;
+        let qc = certify(&successor, &parent)?;
+        parent = next_fixture_parent(&qc)?;
+        witness.push(qc);
+    }
+    let mut finality = ThreeQcFinality::default();
+    let mut finalized_predecessor = None;
+    for qc in witness {
+        qc.verify(&authority.epoch, &authority.registry, authority)
+            .map_err(err)?;
+        finality.accept(qc).map_err(err)?;
+        if let Some(record) = finality.last_finalized() {
+            if record.height == tip_qc.context.height {
+                finalized_predecessor = Some(record.clone());
+            }
+        }
+    }
+    let finality = finality
+        .last_finalized()
+        .ok_or("expiry receipt lacks certified inclusion")?;
+    assert_eq!(finality.block_id, expired.block_id);
+    assert_eq!(
+        finality.protected_execution_root,
+        expired.protected_execution_root
+    );
+    let state = synergy_state::FinalizedState {
+        finalized_height: expired.height,
+        finalized_block_id: expired.block_id.clone(),
+        state_root: expired.state_root.clone(),
+    };
+    let world: WorldState =
+        serde_json::from_slice(&serde_json::to_vec(expired.state.as_ref().as_ref()).map_err(err)?)
+            .map_err(err)?;
+    let snapshot = registry.finalized_snapshot(
+        &world,
+        &state,
+        finality,
+        expired_slot.slot.inclusion.consensus_time,
+    )?;
+    let query = DispositionQuery {
+        opening: super::settlement::EngineeringEtdagOpening {
+            envelope_id: record.item.envelope_id.clone(),
+            processing_context_root: record.processing_context_root.clone(),
+            authorization_height: context.authority.target_height,
+            payload_root: record.item.payload_root.clone(),
+        },
+        authorization_root: record.authorization_root.clone(),
+        signed_intent_digest: super::inspection::hex_bytes(&resources.native_intent_digest),
+    };
+    let receipt = processing_disposition::inspect(&snapshot, &query)?;
+    assert_eq!(receipt["status"], "expired_candidate");
+    assert_eq!(receipt["fee_nwei"], "0");
+    assert_eq!(receipt["gas_used"], 0);
+    assert_eq!(receipt["nonce_consumed"], false);
+    assert_eq!(receipt["deciding_finalized_height"], deciding_height);
+    let previous = finalized_predecessor.ok_or("expiry receipt lacks certified predecessor")?;
+    let policy = registry.read_policy(&world, super::AccountIdentifier::from_bytes(resources.account))?;
+    let enrollment = super::CanonicalEnrollment::decode(&policy.enrollment, registry.wire)
+        .map_err(err)?;
+    let project = super::inspection::inspect_settlement_inclusion(
+        super::inspection::CandidateWorld {
+            world: published.state.as_ref().as_ref(),
+            finality: &previous,
+            state_root: &published.state_root,
+            consensus_time: authority.consensus_timestamp_unix(previous.height)?,
+        },
+        super::inspection::CandidateWorld {
+            world: &world,
+            finality,
+            state_root: &expired.state_root,
+            consensus_time: expired_slot.slot.inclusion.consensus_time,
+        },
+        authority.epoch.chain_id,
+        &super::inspection::hex_bytes(&registry.network.genesis),
+        serde_json::from_value(serde_json::json!({
+            "height": expired.height,
+            "block_id": expired.block_id,
+            "state_root": expired.state_root,
+            "ownership_chain_id": super::inspection::hex_bytes(&registry.network.ownership_chain),
+            "provider_manifests": [super::inspection::hex_bytes(&enrollment.policy().provider_manifest_hash)],
+            "dispositions": [query],
+        })).map_err(err)?,
+    )?;
+    assert_eq!(project["dispositions"][0], receipt);
+    assert_eq!(project["ledger"][0]["predecessor"], project["ledger"][0]["inclusion"]);
+    let mut substituted = query;
+    substituted.signed_intent_digest = "ac".repeat(64);
+    assert!(processing_disposition::inspect(&snapshot, &substituted).is_err());
+    Ok(())
 }
 
 /// Opens exactly the original supplied bytes. Report authentication and every
@@ -1383,7 +1614,7 @@ pub(super) fn open_candidate_envelope<T>(
     }
     let native_result = match (native, native_source.as_ref(), order.as_ref()) {
         (Some(terms), Some(source), Some(order)) => Some(qualify_retained_replay(
-            &authority,
+            &ordering,
             source,
             &context,
             order,
