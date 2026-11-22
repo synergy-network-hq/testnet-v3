@@ -2933,6 +2933,18 @@ fn processing_async_native_order_reveal_ready_and_execution_use_existing_posy_pr
         &vertex.signing_bytes().unwrap(),
     );
     let vertex_id = vertex.id().unwrap();
+    let legacy_authorization_root = EtdagDigest::from_canonical(
+        "SYNERGY_ETDAG_PROCESSING_WALLET_AUTHORIZATION_V1",
+        &vertex.admission,
+    ).unwrap();
+    let legacy_vertex_id = EtdagDigest::from_canonical(
+        "SYNERGY_ETDAG_PROCESSING_VERTEX_V1",
+        &(
+            vertex.vertex_version, &vertex.admission.request.context_root, legacy_authorization_root,
+            &vertex.envelope_ref, &vertex.parents, &vertex.author_id, &vertex.key_id,
+        ),
+    ).unwrap();
+    assert_eq!(vertex_id, legacy_vertex_id);
     let mut rewritten_authorization = vertex.clone();
     rewritten_authorization.admission.request.signature[0] ^= 1;
     assert_ne!(rewritten_authorization.id().unwrap(), vertex_id);

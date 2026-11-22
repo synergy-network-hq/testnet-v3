@@ -2,11 +2,15 @@
 //! local encrypt and reveal without starting any validator or network.
 #![cfg(test)]
 use super::super::processing_pipeline::{
-    AuthenticatedProcessingOpening, RevealedProcessingPayload,
+    qualify_processing_vertex, AuthenticatedProcessingOpening, RevealedProcessingPayload,
 };
-use std::path::Path;
+use super::{processing_admission::CandidateAdmission, WorldState};
+use std::{
+    path::Path,
+    sync::{Arc, Mutex},
+};
 use synergy_address_engine::{
-    apqe::{provider::SignOptions, SecretBytes},
+    apqe::{crypto_engine::CryptoEngine, provider::SignOptions, SecretBytes},
     types::Algorithm,
 };
 use synergy_aegis::{AegisProtectedPrimitives, ApqeKem};
@@ -16,13 +20,20 @@ use synergy_etdag::{
         PW13_TRANSFER_CANDIDATE_LANE, PW13_TRANSFER_CANDIDATE_PROFILE_ID,
     },
     crypto::{
-        decrypt_share_capsule_with_kem_diagnostic, encrypt_protected_payload_with_kem,
-        governed_reveal_threshold, pad_plaintext, IngressKemKeyRecord, IngressKemKeyRegistry,
-        IngressKemPublicKey, ML_KEM_1024_ALGORITHM,
+        canonical_signing_bytes, decrypt_share_capsule_with_kem_diagnostic,
+        encrypt_protected_payload_with_kem, governed_reveal_threshold, pad_plaintext,
+        IngressKemKeyRecord, IngressKemKeyRegistry, IngressKemPublicKey, ML_KEM_1024_ALGORITHM,
     },
-    execution::{ProcessingDecryptShare, ProcessingRevealPermission},
-    EtdagDigest, EtdagParameters, ProcessingContext, ProcessingEnvelope, ProcessingEnvelopeAad,
-    TargetAdmissionContextV3,
+    execution::{
+        processing_genesis_group_root, ProcessingDecryptShare, ProcessingOrderGroup,
+        ProcessingRevealPermission, ProcessingVertex,
+    },
+    AvailabilityCertificate, AvailabilityVote, CertifiedEnvelopeRef, EtdagDigest, EtdagParameters,
+    ProcessingContext, ProcessingEnvelope, ProcessingEnvelopeAad, TargetAdmissionContextV3,
+};
+use synergy_execution::{
+    processing_group_state, processing_group_transition, processing_member_claim,
+    ProcessingReadinessVerifier, ProcessingReadyRecord,
 };
 use synergy_posy::{FinalizedBlockRecord, ValidatorRecord, ValidatorStatus};
 use synergy_state::world_resources::WorldResourceBudget;
@@ -65,6 +76,214 @@ fn err(error: impl std::fmt::Debug) -> String {
     format!("isolated ETDAG crypto fixture refused: {error:?}")
 }
 
+pub(super) struct CandidateOrderFixture<'a> {
+    authority: &'a super::super::authority::VerifiedAuthority,
+    registry: &'a IngressKemKeyRegistry,
+    engine: &'a Arc<Mutex<CryptoEngine>>,
+    signers: &'a [SecretBytes],
+    source: &'a FinalizedBlockRecord,
+    budget: &'a Arc<WorldResourceBudget>,
+}
+
+impl CandidateOrderFixture<'_> {
+    fn sign(&self, index: usize, message: &[u8]) -> Result<Vec<u8>, String> {
+        self.engine
+            .lock()
+            .map_err(|_| "isolated APQE lock poisoned")?
+            .sign(
+                Algorithm::MlDsa65,
+                self.signers[index].as_bytes(),
+                message,
+                SignOptions::default(),
+            )
+            .map_err(err)
+    }
+
+    pub(super) fn certify<T>(
+        &self,
+        admission: CandidateAdmission,
+        context: &ProcessingContext,
+        parent: &WorldState,
+        authenticate: impl Fn(&CandidateAdmission) -> Result<T, String>,
+    ) -> Result<(T, ProcessingRevealPermission), String> {
+        let envelope = &admission.envelope;
+        // Selected for this isolated ordering fixture. The deployed profile
+        // supplies its ratified class policy and authenticated fee schedule.
+        const FEE_CLASS: u32 = 1;
+        let mut vertex = ProcessingVertex {
+            vertex_version: 1,
+            envelope_ref: CertifiedEnvelopeRef {
+                tx_commitment: envelope.envelope_id.clone(),
+                sender_id: envelope.aad.sender_id.clone(),
+                nonce_slot: envelope.aad.nonce_slot,
+                certified_dag_round: 0,
+                gas_class_units: admission.gas_limit(),
+                ciphertext_bytes: envelope.ciphertext.len() as u64,
+                fee_class: FEE_CLASS,
+                protocol_dependencies: vec![],
+            },
+            admission,
+            parents: vec![],
+            author_id: self.registry.records[0].validator_id.clone(),
+            key_id: "fixture-consensus-key-0".into(),
+            author_signature: vec![],
+        };
+        vertex.author_signature = self.sign(0, &vertex.signing_bytes().map_err(err)?)?;
+        let vertex_id = vertex.id().map_err(err)?;
+        let context_root = context.root().map_err(err)?;
+        let membership = self.registry.records.len();
+        let votes = self
+            .registry
+            .records
+            .iter()
+            .enumerate()
+            .take(membership - 1)
+            .map(|(index, record)| {
+                let mut vote = AvailabilityVote {
+                    context_root: context_root.clone(),
+                    vertex_id: vertex_id.clone(),
+                    validator_id: record.validator_id.clone(),
+                    key_id: format!("fixture-consensus-key-{index}"),
+                    signature: Vec::new(),
+                };
+                let transcript = canonical_signing_bytes(
+                    "SYNERGY_ETDAG_AVAILABILITY_VOTE_V1",
+                    &(
+                        &vote.context_root,
+                        &vote.vertex_id,
+                        &vote.validator_id,
+                        &vote.key_id,
+                    ),
+                )
+                .map_err(err)?;
+                vote.signature = self.sign(index, &transcript)?;
+                Ok(vote)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let certificate =
+            AvailabilityCertificate::from_votes(context_root.clone(), vertex_id, votes, membership)
+                .map_err(err)?;
+        let mut substituted = certificate.clone();
+        substituted.vertex_id = context_root.clone();
+        assert!(qualify_processing_vertex(
+            self.authority,
+            context,
+            self.registry,
+            &vertex,
+            &substituted,
+            self.budget,
+            &authenticate
+        )
+        .is_err());
+        let (member, authorized) = qualify_processing_vertex(
+            self.authority,
+            context,
+            self.registry,
+            &vertex,
+            &certificate,
+            self.budget,
+            authenticate,
+        )?;
+        let namespace = context_root.clone();
+        let ordered = ProcessingOrderGroup {
+            group_version: 1,
+            namespace_root: namespace.clone(),
+            group_number: 1,
+            previous_group_root: processing_genesis_group_root(&namespace).map_err(err)?,
+            order_seed: context_root,
+            members: vec![member],
+        };
+        let successor = ProcessingOrderGroup {
+            group_number: 2,
+            previous_group_root: ordered.root().map_err(err)?,
+            members: vec![],
+            ..ordered.clone()
+        };
+        let verifier = FixtureOrder {
+            ordered: &ordered,
+            successor: &successor,
+        };
+        let mut world = parent.clone();
+        processing_group_transition(
+            &world,
+            &namespace,
+            std::iter::empty(),
+            Some(&ordered),
+            &verifier,
+            self.budget,
+        )
+        .map_err(err)?
+        .diff()
+        .apply(&mut world)
+        .map_err(err)?;
+        assert!(processing_group_state(&world, &namespace, 1)
+            .map_err(err)?
+            .closed_by_successor
+            .is_none());
+        processing_group_transition(
+            &world,
+            &namespace,
+            std::iter::empty(),
+            Some(&successor),
+            &verifier,
+            self.budget,
+        )
+        .map_err(err)?
+        .diff()
+        .apply(&mut world)
+        .map_err(err)?;
+        let item = &ordered.members[0];
+        let claim =
+            processing_member_claim(&world, &item.envelope.sender_id, item.envelope.nonce_slot)
+                .map_err(err)?;
+        assert_eq!(&claim.member, item);
+        let group = processing_group_state(&world, &namespace, claim.group_number).map_err(err)?;
+        let permission = ProcessingRevealPermission {
+            namespace_root: namespace,
+            group_number: claim.group_number,
+            group_root: claim.group_root,
+            successor_root: group
+                .closed_by_successor
+                .ok_or("fixture predecessor is still open")?,
+            processing_context_root: claim.member.processing_context_root,
+            envelope_id: claim.member.envelope.tx_commitment,
+            parent_block_id: self.source.block_id.clone(),
+            validation_id: self.source.finality_certificate_id.clone(),
+        };
+        Ok((authorized, permission))
+    }
+}
+
+struct FixtureOrder<'a> {
+    ordered: &'a ProcessingOrderGroup,
+    successor: &'a ProcessingOrderGroup,
+}
+
+impl ProcessingReadinessVerifier for FixtureOrder<'_> {
+    fn verify_ordered_group(
+        &self,
+        group: &ProcessingOrderGroup,
+        _: &WorldState,
+    ) -> Result<(), String> {
+        if group != self.ordered && group != self.successor {
+            return Err("fixture group differs from the verified assignment".into());
+        }
+        Ok(())
+    }
+
+    fn verify_publication(&self, _: &ProcessingReadyRecord, _: &WorldState) -> Result<(), String> {
+        Err("fixture order cannot verify a READY publication".into())
+    }
+
+    fn identity_is_current(
+        &self,
+        _: &ProcessingReadyRecord,
+        _: &WorldState,
+    ) -> Result<bool, String> {
+        Err("fixture order cannot verify inclusion eligibility".into())
+    }
+}
+
 /// Opens exactly the original supplied bytes. Report authentication and every
 /// KEM operation use the native APQE owner; no embedded crypto fallback exists.
 /// Passed chain/source/sender/nonce values are fixture coordinates only. This
@@ -79,7 +298,11 @@ pub(super) fn open_candidate_envelope<T>(
     sender_id: &str,
     nonce: u64,
     profile: CandidateEnvelopeProfile,
-    before_open: impl FnOnce(&ProcessingEnvelope, &ProcessingContext) -> Result<T, String>,
+    before_open: impl FnOnce(
+        &ProcessingEnvelope,
+        &ProcessingContext,
+        &CandidateOrderFixture<'_>,
+    ) -> Result<(T, Option<ProcessingRevealPermission>), String>,
 ) -> Result<(OpenedCandidateEnvelope, T), String> {
     let source_height = source.height;
     if chain_id == 0 || source_height == 0 {
@@ -235,8 +458,17 @@ pub(super) fn open_candidate_envelope<T>(
     envelope.refresh_capsule_roots().map_err(err)?;
     envelope.envelope_id = envelope.commitment().map_err(err)?;
     envelope.validate_context(&context).map_err(err)?;
-    let admission = before_open(&envelope, &context)?;
-    let permission = ProcessingRevealPermission {
+    let budget = WorldResourceBudget::new(128 * 1024 * 1024);
+    let ordering = CandidateOrderFixture {
+        authority: &authority,
+        registry: &registry,
+        engine: &engine,
+        signers: &signers,
+        source,
+        budget: &budget,
+    };
+    let (admission, permission) = before_open(&envelope, &context, &ordering)?;
+    let permission = permission.unwrap_or_else(|| ProcessingRevealPermission {
         namespace_root: envelope.content_blind_order_key.clone(),
         group_number: 1,
         group_root: envelope.share_commitment_root.clone(),
@@ -245,7 +477,7 @@ pub(super) fn open_candidate_envelope<T>(
         envelope_id: envelope.envelope_id.clone(),
         parent_block_id: source.block_id.clone(),
         validation_id: source.finality_certificate_id.clone(),
-    };
+    });
     let mut shares = SignedShares(Vec::with_capacity(MEMBERS));
     for (index, ((capsule, record), secret)) in envelope
         .share_capsules
@@ -289,7 +521,6 @@ pub(super) fn open_candidate_envelope<T>(
             )
             .map_err(err)?;
     }
-    let budget = WorldResourceBudget::new(128 * 1024 * 1024);
     let open = |envelope: &ProcessingEnvelope, shares: &[ProcessingDecryptShare]| {
         AuthenticatedProcessingOpening::open_qualification_shares(
             &authority,
@@ -368,7 +599,7 @@ fn isolated_etdag_candidate_missing_provider_cannot_fall_back() {
         "fixture-sender",
         0,
         CandidateEnvelopeProfile::Transfer,
-        |_, _| Ok(()),
+        |_, _, _| Ok(((), None)),
     )
     .is_err());
 }
@@ -387,7 +618,7 @@ fn isolated_etdag_candidate_real_native_mlkem_roundtrip_and_rejection_checks() {
         "fixture-sender",
         9,
         CandidateEnvelopeProfile::Transfer,
-        |_, _| Ok(()),
+        |_, _, _| Ok(((), None)),
     )
     .unwrap();
     assert_eq!(opened.plaintext(), original);

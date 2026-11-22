@@ -3,18 +3,24 @@
 use serde::{Deserialize, Serialize};
 use synergy_etdag::{
     admission::{Pw13SponsoredAdmission, Pw13TransferAdmission},
-    EtdagDigest, EtdagError, ProcessingContext, ProcessingEnvelope,
+    execution::ProcessingVertexAdmission,
+    CertifiedEnvelopeRef, EtdagError, ProcessingContext, ProcessingEnvelope,
 };
+#[cfg(test)]
+use synergy_etdag::{execution::ProcessingRevealPermission, EtdagDigest};
+#[cfg(test)]
 use synergy_state::world_resources::WorldResourceBudget;
 
-use super::{debug, tests::Scratch, FinalizedSnapshot};
+#[cfg(test)]
+use super::{debug, etdag_candidate::CandidateOrderFixture, tests::Scratch, FinalizedSnapshot};
+use crate::services::processing_store::{PendingProcessingIdentity, ProcessingAdmissionRecord};
+#[cfg(test)]
 use crate::services::processing_store::{
-    PendingProcessingIdentity, PendingProcessingStore, ProcessingAdmissionAuthenticator,
-    ProcessingAdmissionRecord, ProcessingStoreError, ProcessingStoreLimits,
-    PROCESSING_INTAKE_HEADROOM_BYTES,
+    PendingProcessingStore, ProcessingAdmissionAuthenticator, ProcessingStoreError,
+    ProcessingStoreLimits, PROCESSING_INTAKE_HEADROOM_BYTES,
 };
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     content = "authorization",
@@ -26,11 +32,37 @@ pub(super) enum CandidateAuthorization {
     SponsoredEnrollment(Pw13SponsoredAdmission),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CandidateAdmission {
     pub(super) envelope: ProcessingEnvelope,
     pub(super) authorization: CandidateAuthorization,
+}
+
+impl CandidateAdmission {
+    pub(super) fn gas_limit(&self) -> u64 {
+        match &self.authorization {
+            CandidateAuthorization::Transfer(proof) => proof.resources.gas_limit,
+            CandidateAuthorization::SponsoredEnrollment(proof) => proof.resources.gas_limit,
+        }
+    }
+}
+
+impl ProcessingVertexAdmission for CandidateAdmission {
+    fn envelope(&self) -> &ProcessingEnvelope {
+        &self.envelope
+    }
+
+    fn validate_vertex_resources(
+        &self,
+        reference: &CertifiedEnvelopeRef,
+    ) -> Result<(), EtdagError> {
+        self.envelope.validate()?;
+        if self.gas_limit() != reference.gas_class_units {
+            return Err(EtdagError::InvalidExecutionInput);
+        }
+        Ok(())
+    }
 }
 
 impl ProcessingAdmissionRecord for CandidateAdmission {
@@ -55,12 +87,14 @@ impl ProcessingAdmissionRecord for CandidateAdmission {
     }
 }
 
+#[cfg(test)]
 struct CandidateVerifier<'a, F> {
     context: &'a ProcessingContext,
     timestamp: u64,
     verify_proofs: F,
 }
 
+#[cfg(test)]
 impl<F> ProcessingAdmissionAuthenticator<CandidateAdmission> for CandidateVerifier<'_, F>
 where
     F: Fn(&ProcessingContext, &CandidateAdmission) -> Result<(), String>,
@@ -83,12 +117,14 @@ where
 /// Read back the exact encrypted request before permitting the native reveal
 /// fixture to proceed. The proof callback verifies the recovered bytes against
 /// the independently selected historical World and APQE provider.
+#[cfg(test)]
 pub(super) fn recover_before_reveal<T>(
     finalized: &FinalizedSnapshot<'_>,
     context: &ProcessingContext,
     original: CandidateAdmission,
+    ordering: &CandidateOrderFixture<'_>,
     authorize: impl Fn(&ProcessingContext, &CandidateAdmission) -> Result<T, String>,
-) -> Result<T, String> {
+) -> Result<(T, Option<ProcessingRevealPermission>), String> {
     let root = Scratch::new();
     let namespace = EtdagDigest::from_canonical(
         "SYNERGY_PW13_ENGINEERING_PENDING_SCOPE_V1",
@@ -153,7 +189,15 @@ pub(super) fn recover_before_reveal<T>(
             |stored_context, stored_time, stored| {
                 assert_eq!(stored_time, timestamp);
                 assert_eq!(serde_json::to_vec(stored).unwrap(), bytes);
-                authorize(stored_context, stored).map_err(ProcessingStoreError::Verification)
+                ordering
+                    .certify(
+                        stored.clone(),
+                        stored_context,
+                        finalized.world,
+                        |admission| authorize(stored_context, admission),
+                    )
+                    .map(|(authorized, permission)| (authorized, Some(permission)))
+                    .map_err(ProcessingStoreError::Verification)
             },
         )
         .map_err(debug)

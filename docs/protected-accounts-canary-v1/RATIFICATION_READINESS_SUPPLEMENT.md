@@ -182,6 +182,16 @@ envelope's opening in the resulting settlement. Protected records require
 the corrected ML-KEM link. Qualification of live dispatch still requires the
 approved activation, fee reservation and certified processing transitions.
 
+The native vertex verifier now accepts a typed admission carrier. The protected
+qualification restores the original request from the pending store, binds its
+signed gas limit and encrypted envelope to the vertex, and checks the author,
+weighted availability quorum and ingress keys. The existing group transition
+records the exact member and sender nonce. The fixture opens the payload after
+the successor group closes that assignment. Substituted availability proof
+bytes are refused. The selected fee class and PoSy parent coordinates are
+fixture inputs. Live protected readiness and ordered execution still require
+the ratified policy and authenticated parent chain.
+
 The offline settlement verifier checks the exact encrypted transfer and
 sponsored enrollment receipts against adjacent three-QC-certified blocks
 and their Worlds. It checks first appearance, the certified inclusion time,

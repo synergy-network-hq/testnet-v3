@@ -12,7 +12,6 @@ mod sponsor_settlement;
 #[cfg(test)]
 #[path = "protected_etdag_candidate_tests.rs"]
 mod etdag_candidate;
-#[cfg(test)]
 #[path = "protected_processing_admission.rs"]
 mod processing_admission;
 #[path = "protected_transfer_admission.rs"]
@@ -2059,7 +2058,7 @@ mod tests {
             etdag_candidate::open_candidate_envelope(
                 content, &report, &pin, 99999, source, &address, sponsor.nonce,
                 etdag_candidate::CandidateEnvelopeProfile::SponsoredEnrollment,
-                |envelope, context| {
+                |envelope, context, ordering| {
                     let resources = Pw13SponsoredResources {
                         genesis: sponsor.genesis,
                         action: sponsor.action,
@@ -2092,6 +2091,7 @@ mod tests {
                             envelope: envelope.clone(),
                             authorization: CandidateAuthorization::SponsoredEnrollment(request),
                         },
+                        ordering,
                         |recovered_context, recovered| {
                             let CandidateAuthorization::SponsoredEnrollment(proof) = &recovered.authorization else {
                                 return Err("recovered wrong PW13 admission type".into());
@@ -3381,7 +3381,7 @@ mod tests {
                 &address,
                 nonce,
                 etdag_candidate::CandidateEnvelopeProfile::Transfer,
-                |envelope, context| {
+                |envelope, context, ordering| {
                     recover_before_reveal(
                         snapshot,
                         context,
@@ -3389,6 +3389,7 @@ mod tests {
                             envelope: envelope.clone(),
                             authorization: CandidateAuthorization::Transfer(make_admission(envelope, &signed)),
                         },
+                        ordering,
                         |recovered_context, recovered| {
                             let CandidateAuthorization::Transfer(proof) = &recovered.authorization else {
                                 return Err("recovered wrong PW13 admission type".into());

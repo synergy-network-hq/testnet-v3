@@ -1,20 +1,49 @@
 //! Versioned asynchronous carriers. Shape checks grant no release authority;
 //! native validation binds these to PoSy-authenticated candidate state.
-use crate::{CertifiedEnvelopeRef, EtdagDigest, EtdagError, WalletProcessingAdmission};
+use crate::{
+    CertifiedEnvelopeRef, EtdagDigest, EtdagError, ProcessingEnvelope, WalletProcessingAdmission,
+};
 use serde::{Deserialize, Serialize};
+
+/// A typed authorization carrier with an exact encrypted envelope. Native
+/// processing still authenticates the proof and selects the permitted profile.
+pub trait ProcessingVertexAdmission: Serialize {
+    fn envelope(&self) -> &ProcessingEnvelope;
+    fn validate_vertex_resources(&self, reference: &CertifiedEnvelopeRef)
+        -> Result<(), EtdagError>;
+}
+
+impl ProcessingVertexAdmission for WalletProcessingAdmission {
+    fn envelope(&self) -> &ProcessingEnvelope {
+        &self.request.envelope
+    }
+
+    fn validate_vertex_resources(
+        &self,
+        reference: &CertifiedEnvelopeRef,
+    ) -> Result<(), EtdagError> {
+        self.request.validate_shape()?;
+        if self.request.gas_class_units != reference.gas_class_units
+            || self.request.fee_class != reference.fee_class
+        {
+            return Err(EtdagError::InvalidExecutionInput);
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ProcessingVertex {
+pub struct ProcessingVertex<A = WalletProcessingAdmission> {
     pub vertex_version: u32,
-    pub admission: WalletProcessingAdmission,
+    pub admission: A,
     pub envelope_ref: CertifiedEnvelopeRef,
     pub parents: Vec<EtdagDigest>,
     pub author_id: String,
     pub key_id: String,
     pub author_signature: Vec<u8>,
 }
-impl ProcessingVertex {
+impl<A: ProcessingVertexAdmission> ProcessingVertex<A> {
     pub fn authorization_root(&self) -> Result<EtdagDigest, EtdagError> {
         EtdagDigest::from_canonical(
             "SYNERGY_ETDAG_PROCESSING_WALLET_AUTHORIZATION_V1",
@@ -23,8 +52,9 @@ impl ProcessingVertex {
     }
 
     pub fn id(&self) -> Result<EtdagDigest, EtdagError> {
-        self.admission.request.validate_shape()?;
-        let request = &self.admission.request;
+        self.admission
+            .validate_vertex_resources(&self.envelope_ref)?;
+        let envelope = self.admission.envelope();
         if self.vertex_version != 1
             || self.parents.len() > 64
             || self.author_id.is_empty()
@@ -33,12 +63,10 @@ impl ProcessingVertex {
             || self.key_id.len() > 256
             || self.envelope_ref.protocol_dependencies.len() > 64
             || self.envelope_ref.sender_id.len() > 256
-            || request.envelope.envelope_id != self.envelope_ref.tx_commitment
-            || request.sender_wallet != self.envelope_ref.sender_id
-            || request.sender_nonce != self.envelope_ref.nonce_slot
-            || request.gas_class_units != self.envelope_ref.gas_class_units
-            || request.fee_class != self.envelope_ref.fee_class
-            || request.envelope.ciphertext.len() as u64 != self.envelope_ref.ciphertext_bytes
+            || envelope.envelope_id != self.envelope_ref.tx_commitment
+            || envelope.aad.sender_id != self.envelope_ref.sender_id
+            || envelope.aad.nonce_slot != self.envelope_ref.nonce_slot
+            || envelope.ciphertext.len() as u64 != self.envelope_ref.ciphertext_bytes
             || (self.envelope_ref.certified_dag_round == 0 && !self.parents.is_empty())
             || (self.envelope_ref.certified_dag_round != 0 && self.parents.is_empty())
             || crate::dag::canonical_parents(&self.parents, 64)? != self.parents
@@ -50,7 +78,7 @@ impl ProcessingVertex {
             "SYNERGY_ETDAG_PROCESSING_VERTEX_V1",
             &(
                 self.vertex_version,
-                &request.context_root,
+                &envelope.aad.processing_context_root,
                 self.authorization_root()?,
                 &self.envelope_ref,
                 &self.parents,

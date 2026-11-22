@@ -1,5 +1,7 @@
 mod processing_flow;
-pub use processing_flow::{ProcessingDecryptShare, ProcessingRevealPermission, ProcessingVertex};
+pub use processing_flow::{
+    ProcessingDecryptShare, ProcessingRevealPermission, ProcessingVertex, ProcessingVertexAdmission,
+};
 mod batch_validation;
 mod deterministic_batch;
 mod execution_adapter;

@@ -22,7 +22,7 @@ use synergy_etdag::{
     crypto::{ShamirShare, SignatureVerifier},
     execution::{
         ProcessingDecryptShare, ProcessingGroupMember, ProcessingOrderGroup, ProcessingReadyItem,
-        ProcessingRevealPermission, ProcessingVertex,
+        ProcessingRevealPermission, ProcessingVertex, ProcessingVertexAdmission,
     },
     AvailabilityCertificate, EtdagDigest, ProcessingContext, ProcessingEnvelope,
 };
@@ -424,112 +424,26 @@ impl<'a> NativeProcessingVertex<'a> {
         parents: &[&NativeProcessingMember],
         budget: &Arc<WorldResourceBudget>,
     ) -> Result<Self, String> {
-        #[cfg(feature = "qualification-timing")]
-        let _diagnostic = diagnostic_span(DiagnosticStage::VertexVerification);
-        if certificate
-            .is_some_and(|cert| cert.votes.len() > source.authority.registry.active_count())
-            || vertex.parents.len() != parents.len()
-            || parents.len() > 64
-        {
-            return Err("processing vertex proof exceeds governed bounds".into());
-        }
-        let mut permit = reserve(vertex, budget)?;
-        permit
-            .grow(
-                encoded_len(&certificate)?
-                    .checked_mul(16)
-                    .ok_or("processing certificate overflow")?,
-            )
-            .map_err(err)?;
-        let vertex_id = vertex.id().map_err(err)?;
-        let context_root = source.context.root().map_err(err)?;
-        if vertex.admission.request.context_root != context_root
-            || certificate.is_some_and(|cert| {
-                cert.context_root != context_root || cert.vertex_id != vertex_id
-            })
-        {
-            return Err("processing availability binds different original material".into());
-        }
-        verify_wallet_processing_admission_with_authority(
-            &vertex.admission,
-            source.context,
-            &source.world,
-            source.timestamp,
-            Some(source.authority),
-        )?;
-        source
-            .authority
-            .verify(
-                &vertex.author_id,
-                &vertex.key_id,
-                &vertex.signing_bytes().map_err(err)?,
-                &vertex.author_signature,
-            )
-            .map_err(err)?;
-        let members = source
-            .authority
-            .registry
-            .active()
-            .map(|v| v.validator_id.clone())
-            .collect::<BTreeSet<_>>();
-        if let Some(certificate) = certificate {
-            synergy_etdag::availability::verify_availability_certificate(
-                certificate,
-                &members,
-                source.authority,
-            )
-            .map_err(err)?;
-            let signed_weight = certificate.votes.iter().try_fold(0u128, |sum, vote| {
-                sum.checked_add(
-                    source
-                        .authority
-                        .registry
-                        .active_validator(&vote.validator_id)
-                        .map_err(err)?
-                        .frozen_voting_weight,
+        let (member, vertex_id, permit, ()) = verify_processing_vertex(
+            ProcessingVertexSource {
+                authority: source.authority,
+                context: source.context,
+                registry: source.authority.protected_ingress_registry()?,
+            },
+            vertex,
+            certificate,
+            parents,
+            budget,
+            |admission| {
+                verify_wallet_processing_admission_with_authority(
+                    admission,
+                    source.context,
+                    &source.world,
+                    source.timestamp,
+                    Some(source.authority),
                 )
-                .ok_or_else(|| "processing availability weight overflow".to_owned())
-            })?;
-            let total = source.authority.registry.active_weight().map_err(err)?;
-            if signed_weight
-                .checked_mul(3)
-                .ok_or("processing weight overflow")?
-                <= total.checked_mul(2).ok_or("processing weight overflow")?
-            {
-                return Err("processing availability lacks strict weight quorum".into());
-            }
-        }
-        for (id, parent) in vertex.parents.iter().zip(parents) {
-            if *id != parent.vertex_id
-                || parent.member.processing_context_root != context_root
-                || parent.member.envelope.certified_dag_round.checked_add(1)
-                    != Some(vertex.envelope_ref.certified_dag_round)
-            {
-                return Err("processing DAG parent is not an authenticated preceding round".into());
-            }
-        }
-        // Resolve every capsule against the ORIGINAL key-validity anchor.
-        let registry = source.authority.protected_ingress_registry()?;
-        if vertex.admission.request.envelope.share_capsules.len() != members.len() {
-            return Err("processing capsule membership mismatch".into());
-        }
-        for capsule in &vertex.admission.request.envelope.share_capsules {
-            let key = synergy_etdag::crypto::active_key_for_validator(
-                registry,
-                &capsule.validator_id,
-                source.context.authority.target_height,
-            )
-            .map_err(err)?;
-            if !members.contains(&capsule.validator_id) || key.key_id != capsule.ingress_kem_key_id
-            {
-                return Err("processing capsule key is outside original authority".into());
-            }
-        }
-        let member = ProcessingGroupMember {
-            processing_context_root: context_root,
-            authorization_root: vertex.authorization_root().map_err(err)?,
-            envelope: vertex.envelope_ref.clone(),
-        };
+            },
+        )?;
         Ok(Self {
             vertex,
             source,
@@ -553,6 +467,157 @@ impl<'a> NativeProcessingVertex<'a> {
             _permit: permit,
         })
     }
+}
+
+struct ProcessingVertexSource<'a> {
+    authority: &'a VerifiedAuthority,
+    context: &'a ProcessingContext,
+    registry: &'a synergy_etdag::crypto::IngressKemKeyRegistry,
+}
+
+fn verify_processing_vertex<A: ProcessingVertexAdmission, T>(
+    source: ProcessingVertexSource<'_>,
+    vertex: &ProcessingVertex<A>,
+    certificate: Option<&AvailabilityCertificate>,
+    parents: &[&NativeProcessingMember],
+    budget: &Arc<WorldResourceBudget>,
+    authenticate: impl FnOnce(&A) -> Result<T, String>,
+) -> Result<(ProcessingGroupMember, EtdagDigest, WorldResourcePermit, T), String> {
+    let ProcessingVertexSource {
+        authority,
+        context,
+        registry,
+    } = source;
+    #[cfg(feature = "qualification-timing")]
+    let _diagnostic = diagnostic_span(DiagnosticStage::VertexVerification);
+    if certificate.is_some_and(|cert| cert.votes.len() > authority.registry.active_count())
+        || vertex.parents.len() != parents.len()
+        || parents.len() > 64
+    {
+        return Err("processing vertex proof exceeds governed bounds".into());
+    }
+    let mut permit = reserve(vertex, budget)?;
+    permit
+        .grow(
+            encoded_len(&certificate)?
+                .checked_mul(16)
+                .ok_or("processing certificate overflow")?,
+        )
+        .map_err(err)?;
+    let envelope = vertex.admission.envelope();
+    let vertex_id = vertex.id().map_err(err)?;
+    let context_root = context.root().map_err(err)?;
+    if envelope.aad.processing_context_root != context_root
+        || certificate
+            .is_some_and(|cert| cert.context_root != context_root || cert.vertex_id != vertex_id)
+    {
+        return Err("processing availability binds different original material".into());
+    }
+    let authorized = authenticate(&vertex.admission)?;
+    authority
+        .verify(
+            &vertex.author_id,
+            &vertex.key_id,
+            &vertex.signing_bytes().map_err(err)?,
+            &vertex.author_signature,
+        )
+        .map_err(err)?;
+    let members = authority
+        .registry
+        .active()
+        .map(|v| v.validator_id.clone())
+        .collect::<BTreeSet<_>>();
+    if let Some(certificate) = certificate {
+        synergy_etdag::availability::verify_availability_certificate(
+            certificate,
+            &members,
+            authority,
+        )
+        .map_err(err)?;
+        let signed_weight = certificate.votes.iter().try_fold(0u128, |sum, vote| {
+            sum.checked_add(
+                authority
+                    .registry
+                    .active_validator(&vote.validator_id)
+                    .map_err(err)?
+                    .frozen_voting_weight,
+            )
+            .ok_or_else(|| "processing availability weight overflow".to_owned())
+        })?;
+        let total = authority.registry.active_weight().map_err(err)?;
+        if signed_weight
+            .checked_mul(3)
+            .ok_or("processing weight overflow")?
+            <= total.checked_mul(2).ok_or("processing weight overflow")?
+        {
+            return Err("processing availability lacks strict weight quorum".into());
+        }
+    }
+    for (id, parent) in vertex.parents.iter().zip(parents) {
+        if *id != parent.vertex_id
+            || parent.member.processing_context_root != context_root
+            || parent.member.envelope.certified_dag_round.checked_add(1)
+                != Some(vertex.envelope_ref.certified_dag_round)
+        {
+            return Err("processing DAG parent is not an authenticated preceding round".into());
+        }
+    }
+    // Resolve every capsule against the ORIGINAL key-validity anchor.
+    if envelope.share_capsules.len() != members.len() {
+        return Err("processing capsule membership mismatch".into());
+    }
+    for capsule in &envelope.share_capsules {
+        let key = synergy_etdag::crypto::active_key_for_validator(
+            registry,
+            &capsule.validator_id,
+            context.authority.target_height,
+        )
+        .map_err(err)?;
+        if !members.contains(&capsule.validator_id) || key.key_id != capsule.ingress_kem_key_id {
+            return Err("processing capsule key is outside original authority".into());
+        }
+    }
+    let member = ProcessingGroupMember {
+        processing_context_root: context_root,
+        authorization_root: vertex.authorization_root().map_err(err)?,
+        envelope: vertex.envelope_ref.clone(),
+    };
+    Ok((member, vertex_id, permit, authorized))
+}
+
+#[cfg(test)]
+pub(super) fn qualify_processing_vertex<A: ProcessingVertexAdmission, T>(
+    authority: &VerifiedAuthority,
+    context: &ProcessingContext,
+    registry: &synergy_etdag::crypto::IngressKemKeyRegistry,
+    vertex: &ProcessingVertex<A>,
+    certificate: &AvailabilityCertificate,
+    budget: &Arc<WorldResourceBudget>,
+    authenticate: impl FnOnce(&A) -> Result<T, String>,
+) -> Result<(ProcessingGroupMember, T), String> {
+    if context.authority.chain_id != authority.epoch.chain_id
+        || context.authority.network_id != authority.epoch.network_id
+        || context.authority.active_validator_set_root != authority.epoch.active_validator_set_root
+        || context.authority.validator_consensus_key_root
+            != authority.epoch.validator_consensus_key_root
+        || context.authority.frozen_voting_weight_root != authority.epoch.frozen_voting_weight_root
+        || context.authority.ingress_kem_registry_root != registry.root().map_err(err)?
+    {
+        return Err("qualification vertex lacks its frozen authority or ingress keys".into());
+    }
+    verify_processing_vertex(
+        ProcessingVertexSource {
+            authority,
+            context,
+            registry,
+        },
+        vertex,
+        Some(certificate),
+        &[],
+        budget,
+        authenticate,
+    )
+    .map(|(member, _, _, authorized)| (member, authorized))
 }
 
 /// Existing n-1 ECHOs authenticate the exact ordinary candidate/World; they do
