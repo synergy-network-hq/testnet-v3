@@ -1,5 +1,7 @@
 use synergy_genesis::{builder, signing};
 
+mod wallet_release_cli;
+
 use std::fs::{self, File};
 use std::io::{Read, Take};
 use std::path::Path;
@@ -47,13 +49,25 @@ fn policy() -> AegisPolicy {
     }
 }
 fn run_arguments(arguments: &[String]) -> Result<(), String> {
+    match arguments {
+        [command, request, output] if command == "wallet-release-transcript" => {
+            return wallet_release_cli::run(request, None, output);
+        }
+        [command, request, signature, output] if command == "wallet-release-attach-signature" => {
+            return wallet_release_cli::run(request, Some(signature.as_str()), output);
+        }
+        [command, ..] if matches!(command.as_str(), "wallet-release-transcript" | "wallet-release-attach-signature") => {
+            return Err(wallet_release_cli::USAGE.into());
+        }
+        _ => {}
+    }
     let (arguments, provider) = provider_arguments(arguments)?;
     // Validate the command shape before reading any provider or private material.
     let requires_provider = matches!(arguments, [c,_,_,_,_,_] if c == "sign")
         || matches!(arguments, [c,_,_] if c == "verify")
         || matches!(arguments, [c,_,_,_] if c == "verify-binding");
     if !requires_provider && !matches!(arguments, [c,_] if c == "hash") {
-        return Err("usage: synergy-genesis <hash UNSIGNED|sign UNSIGNED KEY_ID SECRET_KEY TRUST_PUBLIC_KEY OUTPUT|verify SIGNED TRUST_PUBLIC_KEY|verify-binding SIGNED TRUST_PUBLIC_KEY AUTHORITY> [--apqe-report ABS --apqe-report-sha256 HEX]".into());
+        return Err(format!("usage: synergy-genesis <hash UNSIGNED|sign UNSIGNED KEY_ID SECRET_KEY TRUST_PUBLIC_KEY OUTPUT|verify SIGNED TRUST_PUBLIC_KEY|verify-binding SIGNED TRUST_PUBLIC_KEY AUTHORITY> [--apqe-report ABS --apqe-report-sha256 HEX]\n{}", wallet_release_cli::USAGE));
     }
     let engine = provider
         .map(|(report, digest)| {

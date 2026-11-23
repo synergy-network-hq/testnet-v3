@@ -167,6 +167,41 @@ pub struct WalletDispatchReleasePayload {
 }
 
 impl WalletDispatchReleasePayload {
+    /// Check placement and resource bounds against the supplied predecessor.
+    /// Authentication of that predecessor and its parameters is still required.
+    pub fn check_predecessor(
+        &self,
+        previous: &SimplifiedEpochContext,
+        parameters: &EtdagParameters,
+    ) -> Result<(), String> {
+        let next_first = previous
+            .epoch_end_height
+            .checked_add(1)
+            .ok_or("Wallet release successor height overflow")?;
+        let next_last = next_first
+            .checked_add(999)
+            .ok_or("Wallet release successor height overflow")?;
+        if self.predecessor_context_root != previous.root().map_err(|error| error.to_string())?
+            || self.policy.activation_finalized_height != next_first
+        {
+            return Err("Wallet release differs from the exact authenticated predecessor".into());
+        }
+        self.policy.validate_epoch_scope(
+            previous.chain_id,
+            &previous.network_id,
+            next_last,
+            parameters,
+        )
+    }
+
+    pub fn release_context(&self) -> Result<[u8; 32], String> {
+        let statement = self.enrollment_statement()?;
+        statement
+            .signing_bytes()
+            .map_err(|error| error.to_string())?;
+        Ok(statement.release_context)
+    }
+
     pub fn signing_context(
         &self,
         previous: &SimplifiedEpochContext,
@@ -270,6 +305,14 @@ pub struct WalletDispatchReleaseIssuerAuthorization {
 
 impl WalletDispatchReleaseIssuerAuthorization {
     pub fn signing_bytes(&self) -> Result<Vec<u8>, String> {
+        if self.version != 1
+            || !digest(&self.genesis_hash)
+            || !digest(&self.attachment_sha256)
+            || !digest(&self.issuer_sha256)
+            || KeyId::new(&self.issuer_key_id).is_err()
+        {
+            return Err("invalid Wallet release issuer transcript".into());
+        }
         let mut bytes = WALLET_RELEASE_ISSUER_DOMAIN.as_bytes().to_vec();
         bytes.push(0);
         serde_json::to_writer(
@@ -421,24 +464,7 @@ impl VerifiedWalletDispatchRelease {
         previous: &SimplifiedEpochContext,
         parameters: &EtdagParameters,
     ) -> Result<(), String> {
-        let next_first = previous
-            .epoch_end_height
-            .checked_add(1)
-            .ok_or("Wallet release successor height overflow")?;
-        let next_last = next_first
-            .checked_add(999)
-            .ok_or("Wallet release successor height overflow")?;
-        if self.predecessor_context_root() != previous.root().map_err(|error| error.to_string())?
-            || self.policy().activation_finalized_height != next_first
-        {
-            return Err("Wallet release differs from the exact authenticated predecessor".into());
-        }
-        self.policy().validate_epoch_scope(
-            previous.chain_id,
-            &previous.network_id,
-            next_last,
-            parameters,
-        )
+        self.payload.check_predecessor(previous, parameters)
     }
 
     pub fn enrollment(&self) -> &VerifiedEnrollmentRegistryRelease {

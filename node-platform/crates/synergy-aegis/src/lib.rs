@@ -47,4 +47,5 @@ pub use synergy_address_engine::apqe::{
         VerifiedEnrollmentRegistryRelease, ENROLLMENT_REGISTRY_RELEASE_DOMAIN,
     },
     identity::{ChainId, NativeGenesisHash},
+    provider::{NativeVerificationQualification, SignedNativeVerificationQualification},
 };
