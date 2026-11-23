@@ -610,6 +610,7 @@ mod tests {
                 enrollment,
                 registered_height: 1,
                 replacement_policy: None,
+                native_recovery_since: None,
             })
             .unwrap(),
         );

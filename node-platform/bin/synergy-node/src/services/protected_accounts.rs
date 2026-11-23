@@ -26,6 +26,8 @@ mod transfer_admission;
 mod sponsored_admission;
 #[path = "protected_recovery.rs"]
 pub(super) mod recovery;
+#[path = "protected_native_recovery.rs"]
+mod native_recovery;
 #[path = "protected_transition_queue.rs"]
 mod transition_queue;
 #[path = "protected_transition_settlement.rs"]
@@ -136,6 +138,8 @@ struct PolicyRecord {
     registered_height: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     replacement_policy: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_recovery_since: Option<u64>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -936,6 +940,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
                 enrollment: record.enrollment_bytes().to_vec(),
                 registered_height: inclusion.height,
                 replacement_policy: None,
+                native_recovery_since: None,
             },
         )
     }
@@ -1123,6 +1128,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
         let record = self.read_policy(finalized.world, account)?;
         if record != self.read_policy(world, account)?
             || record.registered_height > finalized.position.height
+            || record.native_recovery_since.is_some_and(|height| height > finalized.position.height)
         {
             return Err("protected policy changed or is not finalized".into());
         }
@@ -1532,6 +1538,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
         }
         let record = self.read_policy(finalized.world, recipient)?;
         if record.registered_height > finalized.position.height
+            || record.native_recovery_since.is_some_and(|height| height > finalized.position.height)
             || record != self.read_policy(world, recipient)?
         {
             return Err("invalid or unfinalized protected recipient".into());

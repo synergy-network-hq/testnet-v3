@@ -105,6 +105,7 @@ impl IntentTerms<'_> {
                 AccountIdentifier::from_bytes(signed.account),
             )?;
             if current.registered_height > finalized.position.height
+                || current.native_recovery_since.is_some_and(|height| height > finalized.position.height)
                 || current.policy_epoch < signed.policy_epoch
                 || (current.policy_epoch == signed.policy_epoch
                     && current.policy_hash != signed.policy_hash)

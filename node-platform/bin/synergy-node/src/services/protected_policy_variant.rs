@@ -3,6 +3,7 @@ use super::*;
 use synergy_address_engine::apqe::enrollment::{
     AccountPublicPolicy, CanonicalPrimaryCompanionEnrollment,
     CanonicalPrimaryCompanionPublicPolicy, RoleRecord,
+    native_recovery::CanonicalNativeRecoveryPublicPolicy,
 };
 
 pub(super) enum InitialEnrollment<'a> {
@@ -47,6 +48,7 @@ impl<'a> InitialEnrollment<'a> {
 pub(super) enum CurrentPolicy<'a> {
     WithRecovery(CanonicalPublicPolicy<'a>),
     PrimaryCompanion(CanonicalPrimaryCompanionPublicPolicy<'a>),
+    NativeOnlyRecovery(CanonicalNativeRecoveryPublicPolicy<'a>),
 }
 
 #[derive(Clone, Copy)]
@@ -77,6 +79,7 @@ impl<'a> CurrentPolicy<'a> {
         match self {
             Self::WithRecovery(policy) => policy.encoded(),
             Self::PrimaryCompanion(policy) => policy.encoded(),
+            Self::NativeOnlyRecovery(policy) => policy.encoded(),
         }
     }
 
@@ -84,6 +87,7 @@ impl<'a> CurrentPolicy<'a> {
         match self {
             Self::WithRecovery(policy) => PolicyTerms::from(policy.policy()),
             Self::PrimaryCompanion(policy) => PolicyTerms::from(policy.policy()),
+            Self::NativeOnlyRecovery(policy) => PolicyTerms::from(policy.policy()),
         }
     }
 
@@ -91,6 +95,9 @@ impl<'a> CurrentPolicy<'a> {
         match self {
             Self::WithRecovery(policy) => Ok(policy),
             Self::PrimaryCompanion(_) => Err("protected account recovery is unset".into()),
+            Self::NativeOnlyRecovery(_) => {
+                Err("protected account permits native recovery only".into())
+            }
         }
     }
 
@@ -98,6 +105,7 @@ impl<'a> CurrentPolicy<'a> {
         match self {
             Self::WithRecovery(policy) => policy.hash(),
             Self::PrimaryCompanion(policy) => policy.hash(),
+            Self::NativeOnlyRecovery(policy) => policy.hash(),
         }
         .map_err(display)
     }
@@ -128,6 +136,7 @@ impl<'a> CurrentPolicy<'a> {
                         enrolled(Role::R, r)?,
                     ],
                 )
+                .map_err(display)
             }
             Self::PrimaryCompanion(policy) => {
                 let [d, p] = policy.policy().roles;
@@ -137,9 +146,12 @@ impl<'a> CurrentPolicy<'a> {
                     policy_hash,
                     [enrolled(Role::D, d)?, enrolled(Role::P, p)?],
                 )
+                .map_err(display)
+            }
+            Self::NativeOnlyRecovery(policy) => {
+                policy.native_policy(coordinate.chain_id).map_err(display)
             }
         }
-        .map_err(display)
     }
 }
 
@@ -158,12 +170,36 @@ impl CandidateProtectedAccounts<'_> {
         let policy = match bytes.get(..3) {
             // A two-role origin cannot claim recovery through a substituted
             // policy. No qualified original-share attachment proof is admitted.
-            Some([0xab, 0, 1]) if !initial.primary_companion() => CurrentPolicy::WithRecovery(
-                CanonicalPublicPolicy::decode(bytes, self.wire).map_err(display)?,
-            ),
-            Some([0xaa, 0, 2]) if initial.primary_companion() => CurrentPolicy::PrimaryCompanion(
-                CanonicalPrimaryCompanionPublicPolicy::decode(bytes, self.wire).map_err(display)?,
-            ),
+            Some([0xab, 0, 1])
+                if !initial.primary_companion() && record.native_recovery_since.is_none() =>
+            {
+                CurrentPolicy::WithRecovery(
+                    CanonicalPublicPolicy::decode(bytes, self.wire).map_err(display)?,
+                )
+            }
+            Some([0xaa, 0, 2])
+                if initial.primary_companion() && record.native_recovery_since.is_none() =>
+            {
+                CurrentPolicy::PrimaryCompanion(
+                    CanonicalPrimaryCompanionPublicPolicy::decode(bytes, self.wire)
+                        .map_err(display)?,
+                )
+            }
+            Some([0xac, 0, 3])
+                if initial.primary_companion()
+                    && record
+                        .native_recovery_since
+                        .is_some_and(|height| height > record.registered_height) =>
+            {
+                let policy = CanonicalNativeRecoveryPublicPolicy::decode(bytes, self.wire)
+                    .map_err(display)?;
+                if policy.policy().provider_manifest_hash != original.provider_manifest_hash {
+                    return Err(
+                        "native-only recovery changes the original threshold provider".into(),
+                    );
+                }
+                CurrentPolicy::NativeOnlyRecovery(policy)
+            }
             _ => return Err("invalid protected policy profile transition".into()),
         };
         let current = policy.terms();

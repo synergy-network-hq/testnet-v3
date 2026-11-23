@@ -1,5 +1,12 @@
 ## Protected Wallet source integration — 2026-11-23
 
+**Native-only recovery candidate.** The offline attachment test verified
+original D/P consent and possession of an independent native R key.
+Finalized activation preserved the original public point, enrollment, balance
+and nonce. Old policy and duplicate activation requests were rejected. The
+public policy distinguishes native authorization-key replacement from
+threshold ECDSA recovery. The candidate has no managed action assignment.
+
 **Implemented and callers migrated in source.** The native ETDAG owner verifies
 and persists typed D/P Wallet submissions and supplies the original evidence
 to the validator's proposal and replay scheduler. The same scheduler orders

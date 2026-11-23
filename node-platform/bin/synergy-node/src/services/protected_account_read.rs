@@ -469,7 +469,9 @@ fn inspect_account(
         .ok_or("registered protected account has missing or executable ledger state")?;
     let registry = snapshot.registry;
     let record = registry.read_policy(snapshot.world, account)?;
-    if record.registered_height > snapshot.position.height {
+    if record.registered_height > snapshot.position.height
+        || record.native_recovery_since.is_some_and(|height| height > snapshot.position.height)
+    {
         return Err("candidate registration height exceeds selected finality".into());
     }
     let policy = registry.current_policy(&record)?;
@@ -489,7 +491,7 @@ fn inspect_account(
             "auth_public_key_base64": BASE64.encode(role.auth_public_key),
         })
     }).collect::<Vec<_>>();
-    Ok(json!({
+    let mut result = json!({
         "address": address,
         "account_id": account.lowercase_hex(),
         "status": "enrolled",
@@ -503,7 +505,12 @@ fn inspect_account(
         "balance_nwei": ledger.balance_nwei.to_string(),
         "next_nonce": ledger.nonce,
         "pending_transition": pending_transition,
-    }))
+    });
+    if let Some(height) = record.native_recovery_since {
+        result["recovery_scope"] = json!("native_signing_key_replacement_only");
+        result["native_recovery_activation_height"] = json!(height);
+    }
+    Ok(result)
 }
 
 fn inspect_commitment(snapshot: &FinalizedSnapshot<'_>, hash: [u8; 32]) -> Result<Value, String> {
