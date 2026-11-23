@@ -2189,9 +2189,11 @@ mod tests {
             "authorization_policy":{"policy_type":"single-key","threshold":1,"principals":[{
                 "principal_id":"sponsor","principal_type":"public-key","algorithm":"ML-DSA-87",
                 "public_key":hex_string(&signer.public_key),"public_key_sha3_256":hash(&signer.public_key),
-                "status":"active","purposes":[SPONSOR_PURPOSE]}]},
+                "status":"active","purposes":[SPONSOR_PURPOSE,"transaction-signing"]}]},
             "authorization_scopes":[{"signature_domain":SPONSOR_SIGNATURE_DOMAIN,
-                "chain_id":99999,"network_id":"test-sponsor", "purpose":SPONSOR_PURPOSE}],
+                "chain_id":99999,"network_id":"test-sponsor", "purpose":SPONSOR_PURPOSE},
+                {"signature_domain":AEGIS_TRANSACTION_AUTHORIZATION_DOMAIN,
+                "chain_id":99999,"network_id":"test-sponsor", "purpose":"transaction-signing"}],
             "current_auth_key_hash":hash(&signer.public_key),"auth_key_history":[],"supersession_history":[],
             "effective_at":"1970-01-01T00:00:10Z","binding_payload_sha3_256":"",
             "proofs":{"identity_root":{"algorithm":"FN-DSA-1024","signature":""}}
@@ -2252,14 +2254,36 @@ mod tests {
             enrollment.account(),
             1004,
         );
-        let bindings = base
-            .protocol
-            .get_mut(IDENTITY_AUTHORIZATION_BINDINGS_STATE_KEY)
-            .unwrap();
-        let mut commitments: std::collections::BTreeMap<_, _> =
-            serde_json::from_slice(bindings).unwrap();
-        assert!(commitments.insert(address.clone(), admitted).is_none());
-        *bindings = serde_json::to_vec(&commitments).unwrap();
+        let table = IDENTITY_AUTHORIZATION_BINDINGS_STATE_KEY;
+        let commitments: std::collections::BTreeMap<
+            String,
+            IdentityAuthorizationBindingCommitment,
+        > = serde_json::from_slice(&base.protocol[table]).unwrap();
+        assert_eq!(commitments.len(), 1);
+        let registrar = commitments.keys().next().unwrap();
+        assert_ne!(registrar, &address);
+        let registration_carrier = IdentityAuthorizationCarrier {
+            signature_domain: AEGIS_TRANSACTION_AUTHORIZATION_DOMAIN.into(),
+            ..carrier.clone()
+        };
+        let register = |carrier| {
+            synergy_identity::registration::register_authorization_with_verifier(
+                &base.protocol,
+                registrar,
+                carrier,
+                99999,
+                "test-sponsor",
+                1000,
+                Some(&verifier),
+            )
+        };
+        assert!(register(&carrier).is_err());
+        let changed_table = register(&registration_carrier).unwrap();
+        base.protocol.insert(table.into(), changed_table);
+        assert_eq!(
+            canonical_binding_commitment(&base.protocol, &address).unwrap(),
+            admitted
+        );
         base.accounts.insert(
             address.clone(),
             AccountState {
