@@ -814,6 +814,14 @@ def installed(root, expected_manifest=None, host=False, initialized=True, schema
         config=read(root/'config/node.json')
         validate_schema(config,schema if schema is not None else read(root/'assets/node-config.schema.json'))
         contained_paths(config)
+        from apqe_layout import wallet_release_package, wallet_release_selection
+        wallet_release = wallet_release_selection(config)
+        packaged_wallet_release = wallet_release_package(root, manifest)
+        if packaged_wallet_release is not None:
+            require(receipt.get('role') in ('validator','rpc_gateway') and wallet_release == packaged_wallet_release[0],
+                    'Sealed Wallet release and installed configuration differ')
+        elif wallet_release is not None:
+            require(not wallet_release.get('from_sealed_package'), 'Wallet release package input is absent')
         normalized=normalized_config(config,root)
         output.update(configuration_fingerprint=fingerprint(normalized),normalized_configuration=normalized)
     if stage=='commissioned' and not gateway:

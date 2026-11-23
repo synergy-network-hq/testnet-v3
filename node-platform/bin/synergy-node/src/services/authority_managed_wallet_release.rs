@@ -1,58 +1,49 @@
 //! The managed native configuration independently pins release inputs. Neither
 //! signed peer messages nor RPC can originate a Wallet release capability.
+use super::wallet_release_artifacts::{ManagedArtifacts, Platform, PlatformArtifact};
 use super::*;
 use crate::services::{apqe_transport, protected_accounts::inspection::candidate_wire_profile};
 use synergy_address_engine::apqe::{
     enrollment::UnactivatedWireProfile,
     enrollment_commit::UnactivatedCommitmentProfile,
     enrollment_registry::{EnrollmentRegistryRelease, EnrollmentRegistryReleaseIssuer},
-    provider::{
-        Operation, PqProvider, SignOptions, VerifiedNativeVerificationQualification,
-        variants::Mldsa87,
-    },
+    provider::{variants::Mldsa87, Operation, PqProvider, VerifiedNativeVerificationQualification},
 };
-use synergy_address_engine::types::Algorithm;
 use synergy_config::ManagedWalletDispatchReleaseConfiguration;
 use synergy_execution::FeeSchedule;
-use synergy_genesis::authority::{VerifiedWalletDispatchRelease, WalletDispatchReleaseTrust};
-
-pub(super) const WALLET_RELEASE_ISSUER_DOMAIN: &str = "SYNERGY-POSY-WALLET-RELEASE-ISSUER-V1";
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ReleaseIssuerAuthorization {
-    pub(super) version: u32,
-    pub(super) genesis_hash: String,
-    pub(super) attachment_sha256: String,
-    pub(super) issuer_sha256: String,
-    pub(super) issuer_key_id: String,
-    pub(super) signature: Vec<u8>,
-}
-
-impl ReleaseIssuerAuthorization {
-    pub(super) fn signing_bytes(&self) -> Result<Vec<u8>, String> {
-        let mut bytes = WALLET_RELEASE_ISSUER_DOMAIN.as_bytes().to_vec();
-        bytes.push(0);
-        serde_json::to_writer(
-            &mut bytes,
-            &(
-                self.version,
-                &self.genesis_hash,
-                &self.attachment_sha256,
-                &self.issuer_sha256,
-                &self.issuer_key_id,
-            ),
-        )
-        .map_err(|error| error.to_string())?;
-        Ok(bytes)
-    }
-}
+use synergy_genesis::authority::{
+    VerifiedWalletDispatchRelease, WalletDispatchReleaseIssuerAuthorization,
+    WalletDispatchReleaseIssuerTrust, WalletDispatchReleaseTrust,
+};
 
 pub(in crate::services) struct ManagedWalletRelease {
     pub(in crate::services) verified: VerifiedWalletDispatchRelease,
     pub(in crate::services) proof_provider: Mutex<PqProvider<Mldsa87>>,
     pub(in crate::services) wire: UnactivatedWireProfile,
     pub(in crate::services) fees: FeeSchedule,
+    artifacts: PlatformArtifact,
+    quick_setup_enrollment: bool,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WalletReleaseState {
+    VerifiedPending,
+    Active,
+    MissedActivation,
+}
+
+#[derive(Serialize)]
+pub(crate) struct WalletReleasePreflight<'a> {
+    state: WalletReleaseState,
+    initial_adoption_before_close: bool,
+    quick_setup_enrollment: bool,
+    activation_finalized_height: u64,
+    target: Platform,
+    managed_release_manifest_sha256: &'a str,
+    base_package_manifest_sha256: &'a str,
+    executable_sha256: &'a str,
+    apqe_report_sha256: &'a str,
 }
 
 impl std::fmt::Debug for ManagedWalletRelease {
@@ -73,55 +64,41 @@ impl ManagedWalletRelease {
         let SimplifiedFinalityParent::Genesis { genesis_hash, .. } = &origin.anchor_parent else {
             return Err("managed Wallet release lacks signed Genesis origin".into());
         };
-        let genesis_path = config
-            .genesis_path
+        let providers = config
+            .aegis_provider
             .as_ref()
-            .ok_or("managed Wallet release lacks a Genesis path")?;
-        let root = genesis_path
-            .parent()
-            .ok_or("managed Wallet release lacks its network directory")?;
+            .ok_or("managed Wallet release requires native APQE")?;
+        let root = if expected.from_sealed_package {
+            providers
+                .report_path
+                .ancestors()
+                .nth(3)
+                .filter(|root| providers.report_path == root.join("lib/apqe/build-report.json"))
+                .ok_or("managed Wallet release requires the canonical package APQE report path")?
+                .join("assets/wallet-dispatch")
+        } else {
+            config
+                .genesis_path
+                .as_ref()
+                .and_then(|path| path.parent())
+                .ok_or("managed Wallet release lacks its Genesis network directory")?
+                .to_path_buf()
+        };
         if !root.is_absolute() || root.canonicalize().map_err(|error| error.to_string())? != root {
             return Err(
-                "managed Wallet release requires its direct canonical network directory".into(),
+                "managed Wallet release requires its direct canonical artifact directory".into(),
             );
         }
-        let read = |name, maximum, pin: &str| {
-            let bytes = apqe_transport::read(&root.join(name), maximum, false)?;
-            if apqe_transport::sha256(&bytes) != pin {
-                return Err(format!(
-                    "managed Wallet release input {name} differs from the approved pin"
-                ));
-            }
-            Ok(bytes)
+        let read = |name, maximum| {
+            apqe_transport::read(&root.join(name), maximum, false)
+                .map_err(|error| format!("managed Wallet release input {name}: {error}"))
         };
-        let attachment = read(
-            "wallet-dispatch-release.json",
-            32 * 1024,
-            &expected.attachment_sha256,
-        )?;
-        let issuer_key = read(
-            "wallet-dispatch-release-issuer.pub",
-            1952,
-            &expected.issuer_sha256,
-        )?;
-        let endorsement_original = apqe_transport::read(
-            &root.join("wallet-dispatch-release-issuer-authorization.json"),
+        let attachment = read("wallet-dispatch-release.json", 32 * 1024)?;
+        let issuer_key = read("wallet-dispatch-release-issuer.pub", 1952)?;
+        let endorsement = read(
+            "wallet-dispatch-release-issuer-authorization.json",
             24 * 1024,
-            false,
         )?;
-        let endorsement: ReleaseIssuerAuthorization = serde_json::from_slice(&endorsement_original)
-            .map_err(|_| "invalid signed Wallet release issuer authorization")?;
-        if endorsement.version != 1
-            || endorsement.genesis_hash != *genesis_hash
-            || endorsement.attachment_sha256 != expected.attachment_sha256
-            || endorsement.issuer_sha256 != expected.issuer_sha256
-            || endorsement.issuer_key_id != expected.issuer_key_id
-            || endorsement.signature.len() != 3309
-            || serde_json::to_vec(&endorsement).map_err(|error| error.to_string())?
-                != endorsement_original
-        {
-            return Err("Wallet release issuer is outside the signed origin delegation".into());
-        }
         let original_root = apqe_transport::read(
             config
                 .consensus
@@ -144,32 +121,24 @@ impl ManagedWalletRelease {
             off_chain_approval_sha256: &expected.off_chain_approval_sha256,
             release_attestation_sha256: &expected.release_attestation_sha256,
         };
-        let providers = config
-            .aegis_provider
-            .as_ref()
-            .ok_or("managed Wallet release requires native APQE")?;
+        let selected = crate::commands::selected_network::verified_genesis(config)?;
+        WalletDispatchReleaseIssuerAuthorization::verify(
+            &endorsement,
+            &attachment,
+            &trust,
+            &WalletDispatchReleaseIssuerTrust {
+                origin: &selected,
+                authority_public_key: &original_root,
+                attachment_sha256: &expected.attachment_sha256,
+                issuer_sha256: &expected.issuer_sha256,
+            },
+            &origin.verifier,
+        )?;
         let engine = crate::services::apqe_provider::load_selected(providers)?;
         let (verified, qualification) = {
             let engine = engine
                 .lock()
                 .map_err(|_| "managed Wallet release provider poisoned")?;
-            let selected = crate::commands::selected_network::verified_genesis(config)?;
-            if selected.genesis_hash != *genesis_hash {
-                return Err("Wallet release delegation selected a different Genesis".into());
-            }
-            synergy_genesis::signing::verify(&selected, &origin.verifier, &original_root)?;
-            if !engine
-                .verify(
-                    Algorithm::MlDsa65,
-                    &original_root,
-                    &endorsement.signing_bytes()?,
-                    &endorsement.signature,
-                    SignOptions::default(),
-                )
-                .map_err(|error| error.to_string())?
-            {
-                return Err("Wallet release issuer delegation signature is invalid".into());
-            }
             let verified =
                 VerifiedWalletDispatchRelease::verify_signed(&attachment, &trust, &engine)?;
             let qualification_bytes = apqe_transport::read(
@@ -223,6 +192,11 @@ impl ManagedWalletRelease {
                 "managed Wallet release differs from the compiled APQE profile and provider".into(),
             );
         }
+        let artifacts = ManagedArtifacts::verify_current(
+            &root,
+            policy,
+            &providers.authenticated_report_sha256,
+        )?;
         let report_root = providers
             .report_path
             .parent()
@@ -254,16 +228,62 @@ impl ManagedWalletRelease {
             collector: policy.fee_collector.clone(),
             base_fee_per_gas_nwei: policy.base_fee_per_gas_nwei,
         };
+        let quick_setup_enrollment = statement.wire_profile_fingerprint == dual;
         Ok(Self {
             verified,
             proof_provider: Mutex::new(proof_provider),
             wire,
             fees,
+            artifacts,
+            quick_setup_enrollment,
         })
     }
 }
 
 impl VerifiedAuthority {
+    pub(crate) fn wallet_release_preflight(
+        &self,
+        configuration: &NodeConfiguration,
+    ) -> Result<Option<WalletReleasePreflight<'_>>, String> {
+        let Some(release) = self.managed_wallet_release.as_ref() else {
+            return Ok(None);
+        };
+        let policy = release.verified.policy();
+        let state = if self.wallet_dispatch_policy().is_some() {
+            self.native_wallet_release()?;
+            WalletReleaseState::Active
+        } else if self.epoch.epoch_start_height < policy.activation_finalized_height {
+            if self.epoch.epoch_end_height.checked_add(1)
+                == Some(policy.activation_finalized_height)
+            {
+                let protected = self
+                    .protected
+                    .as_ref()
+                    .ok_or("Wallet release lacks its predecessor parameters")?;
+                release
+                    .verified
+                    .prepare_successor(&self.epoch, protected, &self.registry)?;
+            }
+            WalletReleaseState::VerifiedPending
+        } else {
+            WalletReleaseState::MissedActivation
+        };
+        Ok(Some(WalletReleasePreflight {
+            initial_adoption_before_close: match state {
+                WalletReleaseState::VerifiedPending => unused_closing_slot(configuration, policy.activation_finalized_height)?,
+                _ => false,
+            },
+            state,
+            quick_setup_enrollment: release.quick_setup_enrollment,
+            activation_finalized_height: policy.activation_finalized_height,
+            target: release.artifacts.target,
+            managed_release_manifest_sha256: &policy.managed_release_manifest_sha256,
+            base_package_manifest_sha256: &release.artifacts.base_package_manifest_sha256,
+            executable_sha256: &release.artifacts.executable_sha256,
+            apqe_report_sha256: &release.artifacts.apqe_report_sha256,
+        }))
+    }
+
     pub(in crate::services) fn native_wallet_release(
         &self,
     ) -> Result<&Arc<ManagedWalletRelease>, String> {
@@ -290,4 +310,39 @@ impl VerifiedAuthority {
                     == Some(release.policy().activation_finalized_height)
             })
     }
+}
+
+fn unused_closing_slot(config: &NodeConfiguration, activation: u64) -> Result<bool, String> {
+    // The new governed subject appears in predecessor E-2, three heights
+    // below the first height in the selected successor. An already reserved
+    // vote or a finalized execution at that height cannot be rewritten.
+    let closing_height = activation.checked_sub(3).ok_or("invalid Wallet activation close")?;
+    let root = &config.storage.data_directory;
+    let optional = |relative: &str, maximum| {
+        let path = root.join(relative);
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.to_string()),
+            Ok(_) => apqe_transport::read(&path, maximum, false).map(Some),
+        }
+    };
+    if let Some(bytes) = optional("consensus/posy/sign-once.json", 4 * 1024 * 1024)? {
+        let height = synergy_posy::persistence::SignOnceJournal::highest_reserved_or_finalized_height(&bytes)
+            .map_err(|_| "invalid existing PoSy signing reservation")?;
+        if height >= closing_height { return Ok(false); }
+    }
+    if let Some(bytes) = optional("state/execution/finalized-state.json", 4096)? {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct CommittedPointer {
+            format: String,
+            state: synergy_state::FinalizedState,
+        }
+        let pointer: CommittedPointer = serde_json::from_slice(&bytes).map_err(|_| "invalid existing finalized pointer")?;
+        if pointer.format != "synergy-finalized-state-v1" {
+            return Err("unsupported existing finalized pointer".into());
+        }
+        if pointer.state.finalized_height >= closing_height { return Ok(false); }
+    }
+    Ok(true)
 }

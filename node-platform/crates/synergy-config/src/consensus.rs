@@ -24,10 +24,12 @@ pub struct AutonomousEpochActivation {
 }
 
 /// Independently pinned native inputs shipped by the managed release owner.
-/// The two attachment files reside with the selected authenticated Genesis.
+/// The attachments reside with the signed Genesis or in the sealed software package.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedWalletDispatchReleaseConfiguration {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_sealed_package: bool,
     pub attachment_sha256: String,
     pub issuer_key_id: String,
     pub issuer_sha256: String,

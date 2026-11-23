@@ -105,6 +105,24 @@
             "null"
           ]
         },
+        "managed_wallet_dispatch_release": {
+          "additionalProperties": false,
+          "properties": {
+            "attachment_sha256": {"type": "string"},
+            "from_sealed_package": {"type": "boolean"},
+            "issuer_key_id": {"type": "string"},
+            "issuer_sha256": {"type": "string"},
+            "managed_release_manifest_sha256": {"type": "string"},
+            "off_chain_approval_sha256": {"type": "string"},
+            "release_attestation_sha256": {"type": "string"},
+            "release_verifier_artifact_sha256": {"type": "string"}
+          },
+          "required": [
+            "attachment_sha256", "issuer_key_id", "issuer_sha256", "managed_release_manifest_sha256",
+            "off_chain_approval_sha256", "release_attestation_sha256", "release_verifier_artifact_sha256"
+          ],
+          "type": ["object", "null"]
+        },
         "max_rounds_behind": {
           "type": "integer"
         },

@@ -10,6 +10,8 @@ from unittest.mock import patch
 import canary_rpc_relay as gateway
 import controller
 import runtime_probe as probe
+from apqe_layout import (WALLET_RELEASE_PACKAGE_DIRECTORY, WALLET_RELEASE_PIN_FIELDS, WALLET_RELEASE_PUBLIC,
+                         _canonical_package_manifest)
 
 
 def sha(raw):
@@ -82,6 +84,20 @@ class RuntimeProbeTests(unittest.TestCase):
 
     def native(self, args, **kwargs):
         self.calls.append((args, kwargs))
+        if args[1] == 'preflight-wallet-release':
+            executable, _, option, path = args
+            self.assertEqual((executable, option), (self.package/'bin/synergy-node', '--config'))
+            self.assertEqual(path.parent.parent, self.root/'tmp')
+            self.assertEqual((kwargs['timeout'], kwargs['maximum_stdout']), (120, 8192))
+            config = json.loads(path.read_bytes())
+            self.assertEqual(config['consensus']['managed_wallet_dispatch_release'],
+                             {**self.wallet_selection, 'from_sealed_package': True})
+            self.assertEqual(config['storage']['data_directory'], str(self.root/'data'))
+            self.assertEqual(config['aegis_provider']['report_path'], str(self.package/'lib/apqe/build-report.json'))
+            self.assertEqual(Path(config['genesis_path']).parent, path.parent)
+            self.assertEqual(set(p.name for p in path.parent.iterdir()),
+                             set(gateway.GATEWAY_TARGET_PUBLIC) | {'node.json'})
+            return gateway._gateway_request_bytes(self.wallet_result)
         self.assertEqual(args, [self.package/'bin/synergy-node',
                                 'canary-rpc-relay', 'inspect-origin'])
         self.assertEqual((kwargs['timeout'], kwargs['maximum_stdout']), (120, 8192))
@@ -95,6 +111,39 @@ class RuntimeProbeTests(unittest.TestCase):
 
     def run_probe(self):
         return probe.upgrade_native_preflight(self.c, self.p)
+
+    def approve_wallet_release(self):
+        genesis = 'f'*64
+        manifest = json.dumps({'genesis_hash': genesis}).encode()
+        name = 'network-manifest.json'
+        self.save(self.c.control/'authorization/inputs/commissioning/network'/name, manifest)
+        self.pins[name] = sha(manifest)
+        self.policy['authorization_files']['commissioning/network/'+name] = sha(manifest)
+        self.policy['validator_commissioning_files']['network/'+name] = sha(manifest)
+        self.native_result['manifest_sha256'] = sha(manifest)
+        base_hash = sha(_canonical_package_manifest(self.manifest))
+        self.wallet_prefix = WALLET_RELEASE_PACKAGE_DIRECTORY + '/'
+        files = {name: ('wallet fixture '+name).encode() for name in WALLET_RELEASE_PUBLIC}
+        self.wallet_selection = {key: sha(key.encode()) for key in WALLET_RELEASE_PIN_FIELDS}
+        self.wallet_selection.update(issuer_key_id='fixture-issuer',
+            attachment_sha256=sha(files['wallet-dispatch-release.json']),
+            issuer_sha256=sha(files['wallet-dispatch-release-issuer.pub']),
+            managed_release_manifest_sha256=sha(files['wallet-dispatch-managed-artifacts.json']))
+        files['selection.json'] = _canonical_package_manifest(self.wallet_selection)
+        for name, raw in files.items():
+            self.save(self.package/self.wallet_prefix/name, raw)
+            self.manifest['files'][self.wallet_prefix+name] = sha(raw)
+        self.save(self.package/'package.json', _canonical_package_manifest(self.manifest))
+        self.p['manifest_sha256'] = sha((self.package/'package.json').read_bytes())
+        self.wallet_result = {'schema': 'nodenetwork-wallet-release-preflight-v1', 'read_only': True,
+            'chain_id': self.receipt['chain_id'], 'network_id': self.receipt['network_id'],
+            'genesis_hash': genesis, 'wallet_dispatch_release': {
+                'state': 'verified_pending', 'initial_adoption_before_close': True, 'quick_setup_enrollment': True,
+                'activation_finalized_height': 1001, 'target': 'x86_64-unknown-linux-gnu',
+                'managed_release_manifest_sha256': self.wallet_selection['managed_release_manifest_sha256'],
+                'base_package_manifest_sha256': base_hash,
+                'executable_sha256': self.manifest['files']['bin/synergy-node'],
+                'apqe_report_sha256': self.manifest['files']['lib/apqe/build-report.json']}}
 
     def test_validator_and_gateway_probe_fixed_candidate_without_writes_or_grants(self):
         for role in ('validator', 'rpc_gateway'):
@@ -170,6 +219,55 @@ class RuntimeProbeTests(unittest.TestCase):
             return package, manifest, approval
         with patch.object(self.c, 'approved_package', side_effect=changing):
             with self.assertRaises(ValueError): self.run_probe()
+
+    def test_approved_wallet_release_probes_exact_binary_apqe_and_package_without_install(self):
+        self.approve_wallet_release()
+        before = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        result = self.run_probe()
+        self.assertEqual(len(result), 21)
+        self.assertEqual(result['manifest_sha256'], self.p['manifest_sha256'])
+        self.assertEqual([call[0][1] for call in self.calls], ['canary-rpc-relay', 'preflight-wallet-release'])
+        self.assertFalse(result['mutation_performed'])
+        self.assertFalse(result['production_qualified'])
+        self.assertEqual(before, {p.relative_to(self.root): p.read_bytes()
+                                 for p in self.root.rglob('*') if p.is_file()})
+        self.assertFalse(list((self.root/'tmp').glob('wallet-release-preflight-*')))
+
+    def test_wallet_release_refuses_wrong_native_scope_package_report_and_missed_activation(self):
+        self.approve_wallet_release()
+        self.assertNotEqual(self.wallet_result['wallet_dispatch_release']['base_package_manifest_sha256'],
+                            self.p['manifest_sha256'])
+        for key, value in (('base_package_manifest_sha256', self.p['manifest_sha256']), ('executable_sha256', '0'*64),
+                           ('apqe_report_sha256', '0'*64), ('state', 'missed_activation'),
+                           ('quick_setup_enrollment', 1), ('initial_adoption_before_close', False)):
+            previous = self.wallet_result['wallet_dispatch_release'][key]
+            self.wallet_result['wallet_dispatch_release'][key] = value
+            with self.subTest(key=key), self.assertRaisesRegex(controller.Refused, 'Candidate native origin response refused'):
+                self.run_probe()
+            self.wallet_result['wallet_dispatch_release'][key] = previous
+        self.wallet_result['genesis_hash'] = '0'*64
+        with self.assertRaisesRegex(controller.Refused, 'Candidate native origin response refused'):
+            self.run_probe()
+        self.assertFalse(list((self.root/'tmp').glob('wallet-release-preflight-*')))
+
+    def test_wallet_release_refuses_incomplete_extra_or_changed_package_before_execution(self):
+        self.approve_wallet_release()
+        admitted = self.wallet_prefix + 'wallet-dispatch-release.json'
+        original = self.manifest['files'].pop(admitted)
+        with self.assertRaisesRegex(controller.Refused, 'Authenticated candidate inventory refused'):
+            self.run_probe()
+        unexpected = self.wallet_prefix + 'unapproved-extra.json'
+        self.manifest['files'][admitted] = original
+        self.manifest['files'][unexpected] = 'e'*64
+        self.save(self.package/unexpected, b'{}')
+        with self.assertRaisesRegex(controller.Refused, 'Authenticated candidate inventory refused'):
+            self.run_probe()
+        self.manifest['files'].pop(unexpected)
+        (self.package/unexpected).unlink()
+        self.save(self.package/admitted, b'modified signed release')
+        with self.assertRaisesRegex(controller.Refused, 'Authenticated candidate inventory refused'):
+            self.run_probe()
+        self.assertEqual(self.calls, [])
 
     def test_midprobe_origin_drift_and_unsafe_candidate_tree_are_rejected(self):
         path = self.c.control/'authorization/inputs/commissioning/network/genesis.json'

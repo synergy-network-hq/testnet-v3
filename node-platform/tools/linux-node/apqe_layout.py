@@ -14,12 +14,108 @@ KEYS = ('validator.pub.json','enrollment.json','custody.json','unlock')
 INPUTS = frozenset(['config/node.json','config/start-authorized.json'] +
                   ['network/'+name for name in PUBLIC] + ['keys/apqe/'+name for name in KEYS])
 FORMATION_PUBLIC_INPUTS = INPUTS-frozenset('keys/apqe/'+name for name in KEYS)
+WALLET_RELEASE_PUBLIC = {
+    'wallet-dispatch-managed-artifacts.json': 8 * 1024,
+    'wallet-dispatch-release.json': 32 * 1024,
+    'wallet-dispatch-release-issuer.pub': 1952,
+    'wallet-dispatch-release-issuer-authorization.json': 24 * 1024,
+    'wallet-dispatch-ml-dsa-87-qualification.json': 24 * 1024,
+}
+WALLET_RELEASE_PIN_FIELDS = {
+    'attachment_sha256', 'issuer_sha256', 'release_verifier_artifact_sha256',
+    'managed_release_manifest_sha256', 'off_chain_approval_sha256', 'release_attestation_sha256',
+}
+WALLET_RELEASE_PACKAGE_DIRECTORY = 'assets/wallet-dispatch'
+WALLET_RELEASE_PACKAGE_FILES = {**WALLET_RELEASE_PUBLIC, 'selection.json': 4096}
 BOUND_CUSTODY = {'unlock':'unlock','bundle/validator.enc.json':'custody.json',
                  'bundle/enrollment-request.json':'enrollment.json','node-identity.json':'validator.pub.json'}
 
 
 def selected(config):
     return config.get('apqe_transport') is not None
+
+
+def wallet_release_selection(config):
+    selection = config.get('consensus', {}).get('managed_wallet_dispatch_release')
+    if selection is None:
+        return None
+    require(isinstance(selection, dict)
+            and set(selection) - {'from_sealed_package'} == WALLET_RELEASE_PIN_FIELDS | {'issuer_key_id'}
+            and ('from_sealed_package' not in selection or selection['from_sealed_package'] is True)
+            and all(isinstance(selection[key], str) and re.fullmatch('[0-9a-f]{64}', selection[key])
+                    and selection[key] != '0' * 64 for key in WALLET_RELEASE_PIN_FIELDS)
+            and isinstance(selection['issuer_key_id'], str)
+            and re.fullmatch(r'[!-~]{1,128}', selection['issuer_key_id']),
+            'Exact independently pinned Wallet release selection required')
+    return selection
+
+
+def _canonical_package_manifest(manifest):
+    return (json.dumps(manifest, sort_keys=True, indent=2) + '\n').encode()
+
+
+def wallet_release_package(package, manifest):
+    """Read only release inputs from the independently approved package closure.
+
+    Version 1 pins the base manifest with exactly these six members omitted.
+    The controller separately authenticates the complete package manifest.
+    """
+    prefix = WALLET_RELEASE_PACKAGE_DIRECTORY + '/'
+    files = {name[len(prefix):]: pin for name, pin in manifest['files'].items()
+             if name.startswith(prefix)}
+    source = package/WALLET_RELEASE_PACKAGE_DIRECTORY
+    if not files:
+        require(not source.exists() and not source.is_symlink(), 'Unexpected Wallet release directory')
+        return None
+    require(set(files) == set(WALLET_RELEASE_PACKAGE_FILES) and source.is_dir() and not source.is_symlink()
+            and {path.name for path in source.iterdir()} == set(files),
+            'Exact sealed Wallet release input inventory required')
+    for name, maximum in WALLET_RELEASE_PACKAGE_FILES.items():
+        path = source/name
+        metadata = path.lstat()
+        require(stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1
+                and 0 < metadata.st_size <= maximum and digest(path) == files[name],
+                'Sealed Wallet release input differs from the exact package')
+    selection_path = source/'selection.json'
+    selection_bytes = selection_path.read_bytes()
+    selection = wallet_release_selection({'consensus': {
+        'managed_wallet_dispatch_release': json.loads(selection_bytes)}})
+    require(selection is not None and 'from_sealed_package' not in selection
+            and selection_bytes == _canonical_package_manifest(selection)
+            and selection['attachment_sha256'] == files['wallet-dispatch-release.json']
+            and selection['issuer_sha256'] == files['wallet-dispatch-release-issuer.pub']
+            and selection['managed_release_manifest_sha256'] == files['wallet-dispatch-managed-artifacts.json'],
+            'Managed Wallet release selection and pinned package bytes differ')
+    full = _canonical_package_manifest(manifest)
+    manifest_path = package/'package.json'
+    require(manifest_path.is_file() and not manifest_path.is_symlink()
+            and 0 < manifest_path.stat().st_size == len(full) <= 1024*1024
+            and manifest_path.read_bytes() == full, 'Canonical version 1 package manifest required')
+    base = {**manifest, 'files': {name: pin for name, pin in manifest['files'].items()
+                                  if not name.startswith(prefix)}}
+    return {**selection, 'from_sealed_package': True}, hashlib.sha256(_canonical_package_manifest(base)).hexdigest()
+
+
+def require_wallet_release_preflight(selection, release, base_package_sha256, executable_sha256, report_sha256):
+    if selection is None:
+        require(release is None, 'Unselected Wallet release returned by native preflight')
+        return
+    require(isinstance(release, dict) and set(release) == {
+        'state', 'initial_adoption_before_close', 'quick_setup_enrollment', 'activation_finalized_height', 'target',
+        'managed_release_manifest_sha256', 'base_package_manifest_sha256', 'executable_sha256',
+        'apqe_report_sha256',
+    } and release['state'] in ('verified_pending', 'active')
+        and type(release['quick_setup_enrollment']) is bool
+        and type(release['initial_adoption_before_close']) is bool
+        and (release['state'] != 'active' or not release['initial_adoption_before_close'])
+        and type(release['activation_finalized_height']) is int
+        and 0 < release['activation_finalized_height'] < 2**64
+        and release['target'] == 'x86_64-unknown-linux-gnu'
+        and release['managed_release_manifest_sha256'] == selection['managed_release_manifest_sha256']
+        and release['base_package_manifest_sha256'] == base_package_sha256
+        and release['executable_sha256'] == executable_sha256
+        and release['apqe_report_sha256'] == report_sha256,
+        'Native Wallet release preflight differs from the approved Linux package')
 
 
 def validate_layout(root, source=None, software=None):

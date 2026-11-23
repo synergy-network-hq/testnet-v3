@@ -15,6 +15,7 @@ pub enum Command {
     Version,
     Start(PathBuf),
     Preflight(PathBuf),
+    PreflightWalletRelease(PathBuf),
     Checkpoint(crate::commands::checkpoint::Request),
     Init(crate::commands::init::InitializationRequest),
     Join(crate::commands::join::JoinRequest),
@@ -55,6 +56,7 @@ impl Cli {
             "version" | "--version" | "-V" => CommandKind::Fixed(Command::Version),
             "start" => CommandKind::Start,
             "preflight" => CommandKind::Preflight,
+            "preflight-wallet-release" => CommandKind::PreflightWalletRelease,
             "init" => CommandKind::Init,
             "join" => CommandKind::Join,
             "manifest" => CommandKind::Manifest(
@@ -307,8 +309,7 @@ impl Cli {
         }
 
         let command = match command_kind {
-            CommandKind::Start | CommandKind::Preflight => {
-                let preflight = matches!(command_kind, CommandKind::Preflight);
+            CommandKind::Start | CommandKind::Preflight | CommandKind::PreflightWalletRelease => {
                 if admin_socket.is_some()
                     || request_id.is_some()
                     || idempotency_key.is_some()
@@ -317,17 +318,16 @@ impl Cli {
                     || !operation_arguments.is_empty()
                     || !standalone_arguments.is_empty()
                 {
-                    return Err("start accepts only --config <absolute path>".into());
+                    return Err(format!("{command_text} accepts only --config <absolute path>"));
                 }
-                let path = config_path
-                    .ok_or_else(|| "start requires --config <absolute path>".to_string())?;
+                let path = config_path.ok_or_else(|| format!("{command_text} requires --config <absolute path>"))?;
                 if !path.is_absolute() {
-                    return Err("start requires an absolute configuration path".into());
+                    return Err(format!("{command_text} requires an absolute configuration path"));
                 }
-                if preflight {
-                    Command::Preflight(path)
-                } else {
-                    Command::Start(path)
+                match command_kind {
+                    CommandKind::Preflight => Command::Preflight(path),
+                    CommandKind::PreflightWalletRelease => Command::PreflightWalletRelease(path),
+                    _ => Command::Start(path),
                 }
             }
             CommandKind::Init => {
@@ -560,6 +560,7 @@ fn parse_u128(value: &str, label: &str) -> Result<u128, String> {
 enum CommandKind {
     Start,
     Preflight,
+    PreflightWalletRelease,
     Init,
     Join,
     Manifest(String),
@@ -674,6 +675,7 @@ pub const HELP: &str = "Synergy node runtime and management CLI
 Usage:
   synergy-node start --config <absolute-path>
   synergy-node preflight --config <absolute-path> [--output json|human]
+  synergy-node preflight-wallet-release --config <absolute-path>
   synergy-node init --node-name <name> --role-name <role> --config <absolute-path> --data-directory <absolute-path>
   synergy-node join --config <absolute-path> --signed-manifest-path <absolute-path>
   synergy-node manifest <inspect|verify> --manifest-path <absolute-path> [--public-key <absolute-path>]
@@ -714,9 +716,16 @@ mod tests {
             parsed.command,
             Command::Preflight(PathBuf::from("/tmp/posy-isolated/node.json"))
         );
+        assert_eq!(
+            Cli::parse(["preflight-wallet-release", "--config", "/tmp/posy-isolated/node.json"].map(String::from))
+                .unwrap().command,
+            Command::PreflightWalletRelease(PathBuf::from("/tmp/posy-isolated/node.json"))
+        );
         for arguments in [
             vec!["preflight", "--config", "relative.json"],
             vec!["preflight"],
+            vec!["preflight-wallet-release", "--config", "relative.json"],
+            vec!["preflight-wallet-release", "--config", "/tmp/node.json", "--admin-socket", "/tmp/admin.sock"],
             vec![
                 "preflight",
                 "--config",

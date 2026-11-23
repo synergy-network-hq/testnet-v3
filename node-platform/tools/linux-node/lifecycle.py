@@ -466,7 +466,7 @@ def _start_check_locked(root):
             'finish authority recovery before startup')
     require(not (root/AUTONOMOUS_EPOCH_INTENT).exists() and not (root/AUTONOMOUS_EPOCH_INTENT).is_symlink(),
             'finish autonomous epoch activation before startup')
-    receipt, _ = _sealed_receipt(root)
+    receipt, installed_manifest = _sealed_receipt(root)
     pending_upgrade = _startup_pending_upgrade(root)
     _attributed_units(root)
     recover_consensus_archives(root)
@@ -495,6 +495,7 @@ def _start_check_locked(root):
             'selected authenticated network path mismatch')
     result = json.loads(native([root/'bin/synergy-node','preflight','--config',root/'config/node.json']))
     require(result['signed_authority_verified'] and result['signed_genesis_verified'], 'signed native Genesis/authority preflight required')
+    _verify_wallet_release_preflight(result, config, root, installed_manifest)
     authority = read(root/'network/authority.json')['payload']
     require(authority['network_id'] == receipt['network_id'] and authority['chain_id'] == receipt['chain_id'], 'authenticated authority incarnation differs')
     signed_ids = _authorized_validator_ids(policy,authority,identity['address'])
@@ -550,7 +551,7 @@ def _relay_start_check_locked(root):
     for name in (UPGRADE_INTENT,REPLACEMENT_INTENT,AUTHORITY_RECOVERY_INTENT,AUTONOMOUS_EPOCH_INTENT):
         require(not (root/name).exists() and not (root/name).is_symlink(),
                 'finish recorded lifecycle intent before relay startup')
-    receipt,_=_sealed_receipt(root)
+    receipt,installed_manifest=_sealed_receipt(root)
     _attributed_units(root)
     config=read(root/'config/node.json')
     policy=read(root/'config/start-authorized.json') if receipt.get('role')=='validator' else None
@@ -558,6 +559,11 @@ def _relay_start_check_locked(root):
     if receipt.get('role') == 'rpc_gateway':
         from canary_rpc_relay import verify_bootstrap_pin_record
         verify_bootstrap_pin_record(root)
+        from apqe_layout import wallet_release_package, wallet_release_selection
+        if wallet_release_package(root, installed_manifest) is not None or wallet_release_selection(config) is not None:
+            result = json.loads(native([root/'bin/synergy-node','preflight-wallet-release',
+                                        '--config',root/'config/node.json']))
+            _verify_wallet_release_preflight(result, config, root, installed_manifest)
     native([root/'bin/synergy-node','canary-rpc-relay','check',root/'config/canary-rpc-relay.json'])
     return {'relay_startup_check_passed':True}
 
@@ -786,8 +792,104 @@ def _root_registered_unit(root, unit, text, token, allowed_digests):
     os.replace(temporary,registered);_sync_directory(registered.parent)
 
 
+def _verify_wallet_release_preflight(result, config, package, manifest):
+    from apqe_layout import require_wallet_release_preflight, wallet_release_package, wallet_release_selection
+    selection = wallet_release_selection(config)
+    release = result.get('wallet_dispatch_release')
+    if selection is None:
+        require(release is None and (manifest is None or wallet_release_package(package, manifest) is None),
+                'Sealed Wallet release requires its independently verified runtime selection')
+        return
+    if manifest is None:
+        manifest = read(package/'package.json')
+    bundled = wallet_release_package(package, manifest)
+    if selection.get('from_sealed_package'):
+        require(bundled is not None and bundled[0] == selection,
+                'Installed Wallet release differs from its sealed package')
+        base_pin = bundled[1]
+    else:
+        require(bundled is None, 'Loose Wallet release selection cannot alter the sealed package')
+        base_pin = digest(package/'package.json')
+    require_wallet_release_preflight(selection, release, base_pin, manifest['files']['bin/synergy-node'],
+                                     manifest['files']['lib/apqe/build-report.json'])
+
+
+def _prepare_wallet_release_update(root, package, manifest, receipt, stage, prior):
+    """Authorize the one public configuration change under the upgrade lock."""
+    import tempfile
+    from apqe_layout import wallet_release_package, wallet_release_selection
+    from canary_rpc_relay import _is_digest, _unique_fields
+    bundled = wallet_release_package(package, manifest)
+    role = receipt.get('role')
+    if stage != 'commissioned' or role not in ('validator', 'rpc_gateway'):
+        require(prior is None, 'Recorded Wallet release requires its original commissioned node')
+        return None, None
+    path = root/'config/node.json'
+    metadata = path.lstat()
+    require(path.resolve() == path and stat.S_ISREG(metadata.st_mode)
+            and metadata.st_uid == os.geteuid() and metadata.st_nlink == 1
+            and not metadata.st_mode & 0o022 and 0 < metadata.st_size <= 1024 * 1024,
+            'Bounded canonical validator configuration required')
+    before = path.read_bytes()
+    config = json.loads(before, object_pairs_hook=_unique_fields)
+    original_selection = wallet_release_selection(config)
+    if bundled is None:
+        require(original_selection is None and prior is None,
+                'Upgrade cannot remove an independently approved Wallet release')
+        return None, None
+    selection, base_pin = bundled
+    require(original_selection is None or original_selection == selection,
+            'Upgrade cannot replace an independently approved Wallet release')
+    require(config.get('role') == role
+            and all(config.get(key) == receipt.get(key) for key in ('chain_id', 'network_id', 'node_name'))
+            and config.get('genesis_path') == str(root/'network/genesis.json')
+            and config.get('aegis_provider', {}).get('report_path') == str(root/'lib/apqe/build-report.json'),
+            'Wallet release upgrade must preserve the original managed node selection')
+    config['consensus']['managed_wallet_dispatch_release'] = selection
+    config['aegis_provider']['authenticated_report_sha256'] = manifest['files']['lib/apqe/build-report.json']
+    final_bytes = json.dumps(config, sort_keys=True, indent=2).encode() + b'\n'
+    observed = _hash_bytes(before)
+    wanted = _hash_bytes(final_bytes)
+    require(prior is None or (prior.get('after_config_sha256') == wanted
+                              and observed in (prior.get('before_config_sha256'), wanted)),
+            'Interrupted Wallet release upgrade differs from the recorded configuration')
+    # Preview the staged exact executable/provider using the original installed
+    # public identity, signed origin and retained epoch proofs. Ordinary
+    # preflight also authenticates that provider's transport enrollment.
+    config['aegis_provider']['report_path'] = str(package/'lib/apqe/build-report.json')
+    native_preflight = 'preflight' if role == 'validator' else 'preflight-wallet-release'
+    with tempfile.TemporaryDirectory(prefix='wallet-release-preflight-', dir=root/'tmp') as directory:
+        staged_config = Path(directory)/'node.json'
+        write_new(staged_config, config)
+        result = json.loads(native([package/'bin/synergy-node',native_preflight,'--config',staged_config],
+                                   timeout=120, maximum_stdout=16384), object_pairs_hook=_unique_fields)
+    require(path.read_bytes() == before and result.get('read_only') is True
+            and _is_digest(result.get('genesis_hash'))
+            and result['genesis_hash'] == read(root/'network/network-manifest.json')['genesis_hash']
+            and all(result.get(key) == receipt.get(key) for key in ('chain_id', 'network_id')),
+            'Managed Wallet release changed its authenticated origin or configuration')
+    if role == 'validator':
+        require(all(result.get(key) is True for key in
+                    ('signed_genesis_verified', 'signed_authority_verified', 'validator_membership_verified')),
+                'Wallet release preflight does not verify the original validator membership')
+    else:
+        require(result.get('schema') == 'nodenetwork-wallet-release-preflight-v1'
+                and config.get('consensus', {}).get('mode') == 'observe',
+                'Wallet release gateway must preserve its observer role')
+    _verify_wallet_release_preflight(result, config, package, manifest)
+    release = result['wallet_dispatch_release']
+    if original_selection is None and prior is None and release['state'] == 'verified_pending':
+        require(release['initial_adoption_before_close'] is True,
+                'Selected Wallet release missed its previously reserved epoch-close slot')
+    plan = {'base_package_manifest_sha256': base_pin,
+            'before_config_sha256': prior['before_config_sha256'] if prior is not None else observed,
+            'after_config_sha256': wanted, 'genesis_hash': result['genesis_hash']}
+    require(prior is None or prior == plan, 'Interrupted Wallet release upgrade differs from the exact recorded plan')
+    return plan, final_bytes
+
+
 def upgrade(root, package):
-    """Crash-resumable software-only replacement. Never starts PoSy or VPN."""
+    """Crash-resumable managed replacement. Never starts PoSy or VPN."""
     _require_operator()
     package = Path(package)
     contained = package == root/'tmp/update-master'
@@ -803,6 +905,7 @@ def upgrade(root, package):
         policy_path = root/'tmp/controller/policy.json'
         intent_path = root/UPGRADE_INTENT
         resumed = intent_path.exists()
+        wallet_config = None
         if resumed:
             intent = read(intent_path)
             require(intent.get('format') == 'synergy-software-upgrade-v1' and intent.get('root') == str(root)
@@ -813,6 +916,9 @@ def upgrade(root, package):
             old_manifest = json.loads(intent['old_manifest_json'])
             require(_hash_bytes(intent['old_manifest_json'].encode()) == receipt['package_sha256']
                     and old_manifest['files'] == receipt['package_files'], 'upgrade intent prior release binding differs')
+            wallet_plan, wallet_config = _prepare_wallet_release_update(
+                root, package, manifest, receipt, intent['stage'], intent.get('wallet_release'))
+            require(wallet_plan == intent.get('wallet_release'), 'Interrupted upgrade lacks its exact Wallet release plan')
         else:
             receipt, old_manifest = _sealed_receipt(root)
             staging=intent_path.parent/('.'+intent_path.name+'.upgrade-'+token[:16])
@@ -828,13 +934,18 @@ def upgrade(root, package):
             if stage != 'fresh' and receipt.get('role') != 'rpc_gateway': recover_consensus_archives(root)
             from conformance import installed
             installed(root,host=plan is not None,stage=stage,schema=read(package/'assets/node-config.schema.json'),allow_legacy_integrations=True,**staged)
+            wallet_plan, wallet_config = _prepare_wallet_release_update(root, package, manifest, receipt, stage, None)
             if receipt['package_sha256'] == token:
+                require(wallet_config is None or (root/'config/node.json').read_bytes() == wallet_config,
+                        'Current package lacks its previously adopted Wallet release configuration')
                 return {'package_sha256':token,'already_current':True,'consensus_started':False,'automatic_restart':False}
             candidate_plan = json.loads(native([sys.executable,'-B',package/'tools/lifecycle.py','render-units','--root',root])) if plan else {}
             candidate_units = candidate_plan.get('units',{})
             intent = {'format':'synergy-software-upgrade-v1','root':str(root),'old_receipt':receipt,
                 'old_manifest_json':(root/'package.json').read_text(),'new_package_sha256':token,'new_files':manifest['files'],
                 'registered':plan is not None,'stage':stage,'old_integration':plan,'new_units':candidate_units,'new_wrapper':candidate_plan.get('wrapper')}
+            if wallet_plan is not None:
+                intent['wallet_release'] = wallet_plan
             if plan:
                 require(set(candidate_units) == {Path(p).name for p in plan['paths']}, 'candidate service inventory differs')
                 intent['new_integration'] = {'root':str(root),'paths':plan['paths'],
@@ -917,6 +1028,13 @@ def upgrade(root, package):
                 try: parent.rmdir();_sync_directory(parent.parent)
                 except OSError: break
                 parent=parent.parent
+        if wallet_config is not None:
+            path = root/'config/node.json'
+            require(digest(path) in (wallet_plan['before_config_sha256'], wallet_plan['after_config_sha256'])
+                    and _hash_bytes(wallet_config) == wallet_plan['after_config_sha256'],
+                    'Wallet release configuration changed during upgrade')
+            if path.read_bytes() != wallet_config:
+                _replace_bytes(root,path,wallet_config,0o600,token)
         if registered:
             for unit,text in intent['new_units'].items():
                 registered_path=UNIT_DIRECTORY/unit
@@ -1038,6 +1156,7 @@ def _validate_commissioning_native(root, staged, package, *, require_readiness=T
             and result.get('validator_membership_verified') is True
             and result.get('production_approved') is False,
             'staged native APQE public preflight did not authenticate validator authority')
+    _verify_wallet_release_preflight(result, config, package, None)
     authority=read(staged/'network/authority.json')['payload']
     policy=read(staged/'config/start-authorized.json')
     from apqe_layout import startup_readiness_authorized

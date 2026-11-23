@@ -81,6 +81,8 @@ fn require_finality_execution_match(
     Ok(())
 }
 
+type LiveAuthority = Arc<RwLock<Option<Arc<super::authority::VerifiedAuthority>>>>;
+
 /// Reads only the durable records jointly owned by execution, PoSy finality,
 /// and finalized state. Every public result is re-bound across all three
 /// owners; a speculative execution candidate is never exposed as finalized.
@@ -88,6 +90,7 @@ pub(crate) struct CanonicalQueryStore {
     layout: NodeStorageLayout,
     candidates: Mutex<BudgetedCandidateStore>,
     world_budget: Arc<WorldResourceBudget>,
+    wallet_finalized_authority: Option<(String, LiveAuthority)>,
 }
 
 impl CanonicalQueryStore {
@@ -114,7 +117,15 @@ impl CanonicalQueryStore {
             layout,
             candidates: Mutex::new(candidates),
             world_budget,
+            wallet_finalized_authority: None,
         })
+    }
+
+    pub(crate) fn with_wallet_finalized_authority(
+        mut self, genesis: &str, authority: LiveAuthority,
+    ) -> Self {
+        self.wallet_finalized_authority = Some((genesis.into(), authority));
+        self
     }
 
     fn state_store(&self) -> Result<FinalizedStateStore, RpcError> {

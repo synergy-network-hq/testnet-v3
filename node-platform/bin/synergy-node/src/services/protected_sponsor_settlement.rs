@@ -109,6 +109,19 @@ fn validate(record: &SponsorSettlement) -> Result<(), String> {
     Ok(())
 }
 
+pub(super) fn validate_public_record(scope: &PublicWalletRecords, key: &str, bytes: &[u8]) -> Result<(), String> {
+    let record: SponsorSettlement = decode(bytes, MAX_STORED_RECEIPT_BYTES)?;
+    validate(&record)?;
+    if !scope.matches(&record.network, record.included_height)
+        || record.engineering_etdag_opening.is_none()
+        || key != receipt_key(&record.payer, record.nonce_before)
+        || encode(&record)? != bytes
+    {
+        return Err("invalid public sponsored enrollment settlement".into());
+    }
+    Ok(())
+}
+
 /// Called only after root's exact sponsor signature/binding/fee verification.
 /// The result must join the same atomic StateDiff as the fee/business outcome.
 /// It does not apply anything or grant sponsor authority over the new account.

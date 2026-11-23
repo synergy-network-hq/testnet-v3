@@ -99,6 +99,29 @@ pub(super) fn receipt_key(account: AccountIdentifier, intent: &[u8; 32]) -> Stri
     )
 }
 
+pub(super) fn validate_public_record(scope: &PublicWalletRecords, key: &str, bytes: &[u8]) -> Result<(), String> {
+    let record: TransferSettlement = decode(bytes, MAX_STORED_RECEIPT_BYTES)?;
+    let opening = record.engineering_etdag_opening.as_ref().ok_or("public transfer requires its ETDAG opening commitment")?;
+    opening.validate()?;
+    if !scope.matches(&record.network, record.included_height)
+        || record.version != 1 || record.source_finalized_height == 0
+        || record.source_finalized_height >= opening.authorization_height
+        || opening.authorization_height > record.included_height
+        || record.consensus_time == 0 || record.policy_epoch == 0
+        || record.nonce_before.checked_add(1) != Some(record.nonce_after)
+        || record.intent_id == [0; 32] || record.decrypted_content_sha3_256 == [0; 32]
+        || record.sender == [0; 20] || record.recipient == [0; 20] || record.sender == record.recipient
+        || record.amount_nwei == 0 || record.gas_used == 0 || record.fee_nwei == 0
+        || record.amount_nwei.checked_add(record.fee_nwei).is_none()
+        || EtdagDigest(record.signed_intent_digest.clone()).validate().is_err()
+        || key != receipt_key(AccountIdentifier::from_bytes(record.sender), &record.intent_id)
+        || encode(&record)? != bytes
+    {
+        return Err("invalid public protected transfer settlement".into());
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_transfer_settlement(
     finalized: &FinalizedSnapshot<'_>,

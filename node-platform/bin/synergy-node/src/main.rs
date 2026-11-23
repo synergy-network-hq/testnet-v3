@@ -60,6 +60,10 @@ fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
             let report = commands::start::preflight(config_path)?;
             println!("{}", output::json::render(&report)?);
         }
+        Command::PreflightWalletRelease(config_path) => {
+            let report = commands::start::preflight_wallet_release(config_path)?;
+            println!("{}", output::json::render(&report)?);
+        }
         Command::Init(request) => {
             let initialized = commands::init::initialize(request)?;
             let rendered = output::json::render(&initialized)?;

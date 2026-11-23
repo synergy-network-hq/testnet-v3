@@ -2,6 +2,10 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 use synergy_address_engine::apqe::{HashAlgorithm, HashStream, Primitives};
+use crate::services::protected_accounts::{PublicWalletRecords, validate_public_wallet_record};
+
+#[path = "rpc_public_processing.rs"]
+mod public_processing;
 
 const MAX_PAGE: usize = 64 * 1024;
 // A proof is a bounded transport of the existing commitment preimage, not a
@@ -609,6 +613,19 @@ pub(crate) fn verify_finality_proof_cli(args: impl Iterator<Item = String>) -> R
 }
 
 impl CanonicalQueryStore {
+    fn wallet_world_scope(&self, finalized: &FinalizedBlockRecord) -> Result<Option<PublicWalletRecords>, RpcError> {
+        let Some((genesis, owner)) = self.wallet_finalized_authority.as_ref() else { return Ok(None); };
+        let selected = owner.read().map_err(|_| RpcError::unavailable("Wallet proof authority unavailable"))?.clone();
+        let Some(authority) = selected.as_ref().and_then(|current| current.autonomous_authority_at(finalized.height))
+            else { return Ok(None); };
+        if authority.wallet_dispatch_policy().is_none() {
+            return Ok(None);
+        }
+        let approved = authority.native_wallet_release().map_err(RpcError::unavailable)?;
+        PublicWalletRecords::new(approved.verified.policy(), genesis, finalized)
+            .map(Some).map_err(RpcError::unavailable)
+    }
+
     pub(super) fn canonical_proof_page(&self, value: &Value) -> Result<Value, RpcError> {
         let query = ProofQuery::decode(value.clone())?;
         // Charge retained response scratch separately from the budgeted World.
@@ -616,7 +633,7 @@ impl CanonicalQueryStore {
             .world_budget
             .reserve(PROOF_SCRATCH)
             .map_err(|error| RpcError::unavailable(error.to_string()))?;
-        let (candidate, _) = self
+        let (candidate, finalized) = self
             .finalized_at(query.height)?
             .ok_or_else(|| RpcError::unavailable("requested finalized evidence is not retained"))?;
         let mut result = match query.kind {
@@ -632,7 +649,8 @@ impl CanonicalQueryStore {
                 ),
             )?,
             ProofKind::WorldState => {
-                require_public_world(&candidate.state)?;
+                let scope = self.wallet_world_scope(&finalized)?;
+                require_public_world(&candidate.state, scope.as_ref())?;
                 page(&query, &candidate.state)?
             }
             ProofKind::Finality => {
@@ -657,7 +675,7 @@ impl CanonicalQueryStore {
 // a different preimage; disclosing them could expose private application data.
 // Only these typed, explicitly public consensus records may be transported.
 // New protocol consumers must qualify disclosure before extending this list.
-fn require_public_world(world: &synergy_state::WorldState) -> Result<(), RpcError> {
+fn require_public_world(world: &synergy_state::WorldState, wallet: Option<&PublicWalletRecords>) -> Result<(), RpcError> {
     use synergy_identity::authorization::IDENTITY_AUTHORIZATION_BINDINGS_STATE_KEY;
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -700,7 +718,20 @@ fn require_public_world(world: &synergy_state::WorldState) -> Result<(), RpcErro
                 v.last_root.validate().map_err(|_| invalid())?;
                 let _public_counters = (v.last_number, v.groups, v.claims);
             }
-            _ => return Err(invalid()),
+            synergy_naming::WALLET_PROTOCOL_STATE_KEY => {
+                // The canonical registry contains only public aliases, addresses
+                // and registration heights. Keep the proof's working set bounded.
+                if bytes.len() > 64 * 1024 { return Err(invalid()); }
+                let names = synergy_naming::WalletSynIdRegistry::decode(Some(bytes)).map_err(|_| invalid())?;
+                if names.encode().map_err(|_| invalid())? != *bytes { return Err(invalid()); }
+            }
+            _ => {
+                let Some(scope) = wallet else { return Err(invalid()); };
+                if !public_processing::validate_record(key, bytes).map_err(|_| invalid())?
+                    && !validate_public_wallet_record(scope, world, key, bytes).map_err(|_| invalid())? {
+                    return Err(invalid());
+                }
+            }
         }
     }
     Ok(())
@@ -746,6 +777,52 @@ fn canonical_digest(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+#[cfg(test)]
+pub(crate) fn qualify_wallet_world_disclosure(
+    active: &Arc<super::super::authority::VerifiedAuthority>,
+    finalized: &FinalizedBlockRecord,
+    genesis: &str,
+) {
+    let approved = active.native_wallet_release().unwrap();
+    let scope = PublicWalletRecords::new(approved.verified.policy(), genesis, finalized).unwrap();
+    let (key, bytes) = scope.fixture_commit([7; 32]);
+    let mut world = synergy_state::WorldState::default();
+    world.protocol.insert(key.clone(), bytes.clone());
+    let group = synergy_execution::ProcessingGroupState {
+        namespace_root: synergy_etdag::EtdagDigest("a".repeat(128)),
+        group_number: 1,
+        group_root: synergy_etdag::EtdagDigest("b".repeat(128)),
+        remaining: 1,
+        next_position: 0,
+        closed_by_successor: Some(synergy_etdag::EtdagDigest("c".repeat(128))),
+    };
+    let group_key = "etdag-processing-groups-v1/group/00000000000000000001";
+    world.protocol.insert(group_key.into(), serde_json::to_vec(&group).unwrap());
+    assert!(require_public_world(&world, None).is_err());
+    require_public_world(&world, Some(&scope)).unwrap();
+    let query = ProofQuery::decode(json!({"height": finalized.height, "kind": "world_state"})).unwrap();
+    let observed = page(&query, &world).unwrap();
+    let raw = BASE64.decode(observed["bytes_base64"].as_str().unwrap()).unwrap();
+    assert_eq!(raw, serde_json::to_vec(&world).unwrap());
+    assert_eq!(synergy_state::state_root(&serde_json::from_slice(&raw).unwrap()).unwrap(),
+               synergy_state::state_root(&world).unwrap());
+    assert!(PublicWalletRecords::new(approved.verified.policy(), &"e".repeat(64), finalized).is_err());
+    let mut early = finalized.clone();
+    early.height -= 1;
+    assert!(PublicWalletRecords::new(approved.verified.policy(), genesis, &early).is_err());
+
+    for (foreign_key, field) in [(key.as_str(), "salt"), (group_key, "encrypted_payload")] {
+        let mut poisoned = world.clone();
+        let target = poisoned.protocol.get_mut(foreign_key).unwrap();
+        let mut decoded: Value = serde_json::from_slice(target).unwrap();
+        decoded[field] = json!("private");
+        *target = serde_json::to_vec(&decoded).unwrap();
+        assert!(require_public_world(&poisoned, Some(&scope)).is_err());
+    }
+    world.protocol.insert("apqe-protected-account-candidate/v1/private".into(), b"{}".to_vec());
+    assert!(require_public_world(&world, Some(&scope)).is_err());
 }
 
 #[cfg(test)]
@@ -1064,23 +1141,23 @@ mod tests {
                 code_hash: None,
             },
         );
-        assert!(require_public_world(&world).is_ok());
+        assert!(require_public_world(&world, None).is_ok());
         world
             .protocol
             .insert("private-application-state".into(), b"secret".to_vec());
-        assert!(require_public_world(&world).is_err());
+        assert!(require_public_world(&world, None).is_err());
         world.protocol.clear();
         let key = "etdag-processing-ready-v1/meta";
         let mut metadata = json!({"namespace_root":"a".repeat(128),"generation":0,"count":0});
         world
             .protocol
             .insert(key.into(), serde_json::to_vec(&metadata).unwrap());
-        assert!(require_public_world(&world).is_ok());
+        assert!(require_public_world(&world, None).is_ok());
         metadata["secret"] = json!("must not be disclosed");
         world
             .protocol
             .insert(key.into(), serde_json::to_vec(&metadata).unwrap());
-        assert!(require_public_world(&world).is_err());
+        assert!(require_public_world(&world, None).is_err());
     }
     #[test]
     fn identity_disclosure_rejects_hidden_duplicate_and_trailing_fields() {
@@ -1111,7 +1188,7 @@ mod tests {
                 code_hash: None,
             },
         );
-        require_public_world(&world).unwrap();
+        require_public_world(&world, None).unwrap();
         let query = ProofQuery::decode(json!({"height":1,"kind":"world_state"})).unwrap();
         let response = page(&query, &world).unwrap();
         let bytes = BASE64

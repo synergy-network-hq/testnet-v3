@@ -31,6 +31,8 @@ use synergy_genesis::authority::{ProtectedEpochPolicy, SignedAuthorityBinding};
 
 #[path = "authority_managed_wallet_release.rs"]
 pub(super) mod managed_wallet;
+#[path = "authority_wallet_release_artifacts.rs"]
+mod wallet_release_artifacts;
 
 pub(super) fn processing_finality_root(
     record: &FinalizedBlockRecord,
@@ -847,13 +849,7 @@ fn read_bounded(path: &std::path::Path, maximum: u64, label: &str) -> Result<Vec
 }
 
 pub fn load(configuration: &NodeConfiguration) -> Result<Option<Arc<VerifiedAuthority>>, String> {
-    let mut origin = load_signed(configuration)?;
-    if let Some(pins) = &configuration.consensus.managed_wallet_dispatch_release {
-        let verified = origin.as_mut().filter(|authority| authority.genesis_autonomous)
-            .ok_or("managed Wallet release requires current signed autonomous Genesis")?;
-        let release = managed_wallet::ManagedWalletRelease::load(configuration, verified, pins)?;
-        Arc::make_mut(verified).managed_wallet_release = Some(Arc::new(release));
-    }
+    let origin = load_managed_origin(configuration)?;
     if origin.as_ref().is_some_and(|authority| authority.genesis_autonomous)
         && configuration.consensus.autonomous_epoch_activation.is_some()
     {
@@ -871,6 +867,20 @@ pub fn load(configuration: &NodeConfiguration) -> Result<Option<Arc<VerifiedAuth
         )
         .map(Some),
     }
+}
+
+/// The observer starts its independent proof cursor at signed Genesis. A
+/// locally selected release may authenticate a future certified successor,
+/// while the origin remains E1 and carries no activated Wallet policy.
+pub(super) fn load_managed_origin(configuration: &NodeConfiguration) -> Result<Option<Arc<VerifiedAuthority>>, String> {
+    let mut origin = load_signed(configuration)?;
+    if let Some(pins) = &configuration.consensus.managed_wallet_dispatch_release {
+        let verified = origin.as_mut().filter(|authority| authority.genesis_autonomous)
+            .ok_or("managed Wallet release requires current signed autonomous Genesis")?;
+        let release = managed_wallet::ManagedWalletRelease::load(configuration, verified, pins)?;
+        Arc::make_mut(verified).managed_wallet_release = Some(Arc::new(release));
+    }
+    Ok(origin)
 }
 
 /// Authenticate the original transport trust document independently of the

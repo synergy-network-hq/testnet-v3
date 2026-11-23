@@ -387,13 +387,11 @@ fn run_verified(
             {
                 return Err("gateway enrollment does not match signed admission".into());
             }
-            let envelope = encrypted(custody_path)?;
-            let unlock = apqe_rpc::unlock(custody_unlock_path)?;
             let provider = config
                 .aegis_provider
                 .as_ref()
                 .ok_or("missing pinned APQE provider")?;
-            let origin = authority::load_signed(&config)?
+            let origin = authority::load_managed_origin(&config)?
                 .ok_or("gateway requires a verified signed authority origin")?;
             let genesis_autonomous = origin.autonomous_epochs_enabled();
             let epoch_inputs = if genesis_autonomous || autonomous_bootstrap_sha256.is_some() {
@@ -417,6 +415,8 @@ fn run_verified(
             } else {
                 None
             };
+            let envelope = encrypted(custody_path)?;
+            let unlock = apqe_rpc::unlock(custody_unlock_path)?;
             for _ in 0..WORKERS {
                 let epoch_trust = epoch_inputs
                     .as_ref()

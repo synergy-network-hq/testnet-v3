@@ -76,6 +76,25 @@ fn lookup(world: &WorldState, envelope: &EtdagDigest) -> Result<Option<Outcome>,
     Ok(Some(index))
 }
 
+pub(in crate::services::protected_accounts) fn validate_public_record(
+    world: &WorldState, key: &str, bytes: &[u8], height: u64,
+) -> Result<bool, String> {
+    let Some(envelope) = key.strip_prefix(PREFIX) else { return Ok(false); };
+    let envelope = EtdagDigest(envelope.to_owned());
+    let record: Outcome = decode(bytes, MAX_INDEX_BYTES)?;
+    for digest in [&envelope, &record.identity, &record.ready, &record.receipt] {
+        digest.validate().map_err(debug)?;
+        if digest.is_zero() { return Err("invalid public protected processing outcome digest".into()); }
+    }
+    if record.height == 0 || record.height > height
+        || record.receipt != receipt_digest(world, &record.receipt_key)?
+        || encode(&record)? != bytes
+    {
+        return Err("invalid public protected processing outcome record".into());
+    }
+    Ok(true)
+}
+
 pub(super) fn record_outcome(
     candidate: &mut BudgetedWorld,
     height: u64,

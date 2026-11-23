@@ -312,9 +312,7 @@ pub fn run(config_path: &Path) -> Result<(), StartError> {
     start_with_services(config_path, Vec::new())?.run()
 }
 
-/// Read-only configuration/public-authority checks. Never registers or starts
-/// services, opens storage, reads private custody, or binds a listener.
-pub fn preflight(config_path: &Path) -> Result<serde_json::Value, String> {
+fn load_preflight_configuration(config_path: &Path) -> Result<NodeConfiguration, String> {
     let metadata = std::fs::symlink_metadata(config_path)
         .map_err(|error| format!("inspect preflight configuration: {error}"))?;
     if !config_path.is_absolute()
@@ -324,7 +322,13 @@ pub fn preflight(config_path: &Path) -> Result<serde_json::Value, String> {
     {
         return Err("preflight requires a bounded regular absolute configuration".into());
     }
-    let configuration = load(config_path).map_err(|error| error.to_string())?;
+    load(config_path).map_err(|error| error.to_string())
+}
+
+/// Read-only configuration/public-authority checks. Never registers or starts
+/// services, opens a database, reads private custody, or binds a listener.
+pub fn preflight(config_path: &Path) -> Result<serde_json::Value, String> {
+    let configuration = load_preflight_configuration(config_path)?;
     if configuration.apqe_transport.is_some() {
         crate::services::apqe_transport::preflight(&configuration)?;
     } else {
@@ -335,6 +339,11 @@ pub fn preflight(config_path: &Path) -> Result<serde_json::Value, String> {
     let genesis_hash = super::selected_network::verify(&configuration)?;
     let verified_authority = authority::load(&configuration)?;
     validate_processing_memory(&configuration, verified_authority.as_deref())?;
+    let wallet_dispatch_release = verified_authority
+        .as_ref()
+        .map(|authority| authority.wallet_release_preflight(&configuration))
+        .transpose()?
+        .flatten();
     let plan = build_startup_plan(&configuration).map_err(|error| error.to_string())?;
     let public_identity =
         identity::load_public_identity(&configuration.public_identity_path, configuration.role)?;
@@ -353,6 +362,7 @@ pub fn preflight(config_path: &Path) -> Result<serde_json::Value, String> {
         "signed_authority_verified": verified_authority.is_some(),
         "authority_epoch": verified_authority.as_ref().map(|a| a.epoch.epoch),
         "authority_context_root": verified_authority.as_ref().map(|a| a.epoch.root()).transpose().map_err(|e| e.to_string())?,
+        "wallet_dispatch_release": wallet_dispatch_release,
         "startup_plan_verified": true,
         "network_id": configuration.network_id,
         "chain_id": configuration.chain_id,
@@ -367,6 +377,24 @@ pub fn preflight(config_path: &Path) -> Result<serde_json::Value, String> {
         "private_keys_verified": false,
         "vpn_service_verified": false,
         "read_only": true
+    }))
+}
+
+/// Check an independently approved staged release before it can be installed.
+/// This uses the native runtime's exact release loader without opening custody
+/// or asserting the candidate's membership or transport readiness.
+pub fn preflight_wallet_release(config_path: &Path) -> Result<serde_json::Value, String> {
+    let configuration = load_preflight_configuration(config_path)?;
+    let genesis_hash = super::selected_network::verify(&configuration)?;
+    let authority = authority::load(&configuration)?.ok_or("signed Wallet release authority is absent")?;
+    let release = authority.wallet_release_preflight(&configuration)?.ok_or("managed Wallet release is absent")?;
+    Ok(serde_json::json!({
+        "schema": "nodenetwork-wallet-release-preflight-v1",
+        "read_only": true,
+        "chain_id": configuration.chain_id,
+        "network_id": configuration.network_id,
+        "genesis_hash": genesis_hash,
+        "wallet_dispatch_release": release,
     }))
 }
 
@@ -674,7 +702,8 @@ fn register_builtin_services(
             .map_err(|reason| StartError::ServiceRegistration {
                 service: "rpc",
                 reason,
-            })?,
+            })?
+            .with_wallet_finalized_authority(verified_genesis_hash, Arc::clone(&channels.live_authority)),
         );
         let websocket_hub = Arc::new(
             WsServer::new(

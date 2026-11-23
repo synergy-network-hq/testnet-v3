@@ -47,6 +47,18 @@ pub struct SignOnceJournal {
 }
 
 impl SignOnceJournal {
+    /// Inspect existing journal bytes without opening or mutating its storage.
+    /// A managed release can use the height only as a refusal boundary. It is
+    /// not a substitute for the authority or the three-QC finality evidence.
+    pub fn highest_reserved_or_finalized_height(bytes: &[u8]) -> Result<u64, JournalError> {
+        if bytes.is_empty() || bytes.len() > 4 * 1024 * 1024 {
+            return Err(JournalError::Corrupt("invalid sign-once journal size".into()));
+        }
+        let state = decode_journal(bytes)?;
+        Ok(state.records.iter().map(|record| record.slot.height)
+            .fold(state.finalized_floor, u64::max))
+    }
+
     pub fn load(path: impl Into<PathBuf>) -> Result<Self, JournalError> {
         let path = path.into();
         let parent = path
@@ -63,13 +75,7 @@ impl SignOnceJournal {
             .read_optional_bounded(&record_name)
             .map_err(storage_error)?;
         let state = if let Some(bytes) = &loaded_bytes {
-            let parsed: DurableJournal = serde_json::from_slice(bytes)
-                .map_err(|error| JournalError::Corrupt(error.to_string()))?;
-            if parsed.format != "synergy-posy-sign-once-v1" {
-                return Err(JournalError::Corrupt("unsupported journal format".into()));
-            }
-            validate_journal(&parsed)?;
-            parsed
+            decode_journal(bytes)?
         } else {
             DurableJournal {
                 format: "synergy-posy-sign-once-v1".into(),
@@ -318,6 +324,16 @@ fn signature_record_name(slot: &SigningSlot) -> Result<String, JournalError> {
 
 fn storage_error(error: synergy_storage::StorageError) -> JournalError {
     JournalError::Io(error.to_string())
+}
+
+fn decode_journal(bytes: &[u8]) -> Result<DurableJournal, JournalError> {
+    let parsed: DurableJournal = serde_json::from_slice(bytes)
+        .map_err(|error| JournalError::Corrupt(error.to_string()))?;
+    if parsed.format != "synergy-posy-sign-once-v1" {
+        return Err(JournalError::Corrupt("unsupported journal format".into()));
+    }
+    validate_journal(&parsed)?;
+    Ok(parsed)
 }
 
 fn validate_journal(journal: &DurableJournal) -> Result<(), JournalError> {

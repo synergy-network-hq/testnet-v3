@@ -102,6 +102,19 @@ pub(super) fn owns_key(key: &str) -> bool {
     key.starts_with(PREFIX)
 }
 
+pub(super) fn validate_public_record(scope: &super::PublicWalletRecords, stored_key: &str, bytes: &[u8]) -> Result<(), String> {
+    let receipt: Receipt = decode(bytes, MAX_BYTES)?;
+    receipt.validate()?;
+    if !scope.matches(&receipt.network, receipt.included_height)
+        || !synergy_address::is_valid_address(&receipt.payer)
+        || stored_key != key(&receipt.opening.envelope_id)
+        || encode(&receipt)? != bytes
+    {
+        return Err("invalid public protected processing disposition".into());
+    }
+    Ok(())
+}
+
 pub(super) struct DispositionSlot<'a> {
     pub(super) source_finalized_height: u64,
     pub(super) finalized: &'a FinalizedSnapshot<'a>,

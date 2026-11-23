@@ -5,11 +5,13 @@ commissioning, or production qualification. No custody is read or generated.
 """
 import hashlib
 import json
+from pathlib import Path
 import stat
+import tempfile
 
 import lifecycle as life
 from controller import SELECT, engineering_effective_selection, require, Refused
-from synergy_linux import native
+from synergy_linux import native, write_new
 
 
 SCHEMA = 'nodenetwork-upgrade-native-preflight-v1'
@@ -71,6 +73,28 @@ def _public_origin(c, policy, receipt, manifest, package):
     return pins, raw, formation, _gateway_request_bytes(config)
 
 
+def _wallet_release_preflight(c, package, config_bytes, origin, selection):
+    from canary_rpc_relay import _unique_fields
+    config = json.loads(config_bytes, object_pairs_hook=_unique_fields)
+    # Only public, approved bytes enter this private temporary native view. The
+    # retained signed epoch history still comes from the installed root.
+    with tempfile.TemporaryDirectory(prefix='wallet-release-preflight-', dir=c.root/'tmp') as directory:
+        source = Path(directory)
+        for name, raw in origin.items():
+            (source/name).write_bytes(raw)
+        config['genesis_path'] = str(source/'genesis.json')
+        config['manifest_path'] = str(source/'network-manifest.json')
+        config['consensus'].update(authority_binding=str(source/'authority.json'),
+            authority_trust_key_path=str(source/'authority-root.pub'),
+            managed_wallet_dispatch_release=selection)
+        config['apqe_transport'].update(registry_path=str(source/'transport-registry.json'),
+            registry_trust_key_path=str(source/'transport-root.pub'))
+        path = source/'node.json'
+        write_new(path, config)
+        return native([package/'bin/synergy-node', 'preflight-wallet-release', '--config', path],
+                      timeout=120, maximum_stdout=8192)
+
+
 FAILURES = {
     'scope_refused': 'Installed runtime probe scope refused',
     'package_refused': 'Authenticated candidate inventory refused',
@@ -92,7 +116,7 @@ def upgrade_native_preflight(c, parameters):
 
 
 def _upgrade_native_preflight(c, parameters, phase):
-    from apqe_layout import require_frozen_tree
+    from apqe_layout import require_frozen_tree, require_wallet_release_preflight, wallet_release_package
     from canary_rpc_relay import _is_digest, _unique_fields
     require(isinstance(parameters, dict) and set(parameters) == SELECT
             and isinstance(parameters.get('release_id'), str)
@@ -115,6 +139,7 @@ def _upgrade_native_preflight(c, parameters, phase):
         require_frozen_tree(package)
         require(approval.get('networks', {}).get(receipt['network_id']) == 99999,
                 'Candidate network is not approved')
+        wallet_inputs = wallet_release_package(package, manifest)
         phase[0] = 'origin_refused'
         pins, raw, formation, config = _public_origin(c, policy, receipt, manifest, package)
         expected = {'schema': 'nodenetwork-gateway-origin-v1',
@@ -135,6 +160,27 @@ def _upgrade_native_preflight(c, parameters, phase):
         require(observed == expected and isinstance(observed, dict)
                 and observed.get('mutation_performed') is False,
                 'Candidate native signed origin differs')
+        if wallet_inputs is not None:
+            selection, base_package_sha256 = wallet_inputs
+            phase[0] = 'execution_refused'
+            wallet_response = _wallet_release_preflight(c, package, config, raw, selection)
+            phase[0] = 'response_refused'
+            wallet = json.loads(wallet_response, object_pairs_hook=_unique_fields)
+            genesis_hash = json.loads(raw['network-manifest.json'],
+                                      object_pairs_hook=_unique_fields)['genesis_hash']
+            require(isinstance(wallet, dict) and set(wallet) == {
+                'schema', 'read_only', 'chain_id', 'network_id', 'genesis_hash', 'wallet_dispatch_release'
+            } and wallet['schema'] == 'nodenetwork-wallet-release-preflight-v1'
+                and wallet['read_only'] is True and type(wallet['chain_id']) is int
+                and wallet['chain_id'] == receipt['chain_id']
+                and wallet['network_id'] == receipt['network_id']
+                and _is_digest(genesis_hash) and wallet['genesis_hash'] == genesis_hash,
+                'Native Wallet release signed origin differs')
+            release = wallet['wallet_dispatch_release']
+            require_wallet_release_preflight(selection, release, base_package_sha256,
+                                             manifest['files']['bin/synergy-node'], pins['provider'])
+            require(release['state'] == 'active' or release['initial_adoption_before_close'] is True,
+                    'Selected Wallet release missed its previously reserved epoch-close slot')
         # Bind the successful execution to the same bytes and scope throughout
         # the read. A drifted package/origin never produces a success response.
         phase[0] = 'changed'
@@ -146,6 +192,8 @@ def _upgrade_native_preflight(c, parameters, phase):
                 'Installation or candidate changed during native verification')
         require(_public_origin(c, policy, receipt, after_manifest, package)
                 == (pins, raw, formation, config), 'Public origin changed during native verification')
+        require(wallet_release_package(package, after_manifest) == wallet_inputs,
+                'Wallet release package changed during native verification')
         out = {'schema': SCHEMA, 'release_id': manifest['release_id'],
                'manifest_sha256': parameters['manifest_sha256'],
                'provider_report_sha256': pins['provider'],

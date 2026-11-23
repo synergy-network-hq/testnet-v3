@@ -156,6 +156,8 @@ def verify_package(package):
               if p.is_file() and not p.name.startswith('._') and p.name != 'package.json'}
     require(actual == set(manifest['files']), 'unexpected package file')
     require(not any((package / p).is_symlink() for p in manifest['files']), 'package symlink refused')
+    from apqe_layout import wallet_release_package
+    wallet_release_package(package, manifest)
     roles = read(package / 'roles/roles.json')
     require(len(roles['roles']) == 20 and len(set(roles['roles'])) == 20
             and (roles['implemented'] == ['validator']
