@@ -147,6 +147,10 @@ struct Queues {
         synergy_etdag::EtdagDigest,
         Arc<super::processing_pipeline::NativeProcessingCompletion>,
     >,
+    processing_wallet_completions: BTreeMap<
+        synergy_etdag::EtdagDigest,
+        Arc<super::protected_accounts::processing_execution::NativeProtectedCompletion>,
+    >,
     processing_proof_refs: Option<(String, Arc<BTreeSet<u64>>, Arc<WorldResourcePermit>)>,
     processing_finalized_world: Option<(u64, Arc<BudgetedWorld>)>,
     finality: VecDeque<FinalizedBlockRecord>,
@@ -194,6 +198,7 @@ pub(super) struct ProcessingInputFrame {
 pub(super) struct ProcessingSnapshot {
     pub members: Vec<Arc<super::processing_pipeline::NativeProcessingMember>>,
     pub completions: Vec<Arc<super::processing_pipeline::NativeProcessingCompletion>>,
+    pub wallet_completions: Vec<Arc<super::protected_accounts::processing_execution::NativeProtectedCompletion>>,
     _permit: WorldResourcePermit,
 }
 
@@ -1687,6 +1692,9 @@ impl AuthenticatedIngress {
             .lock()
             .map_err(|_| "runtime pipeline lock poisoned")?;
         let id = &completion.record.item.envelope_id;
+        if queues.processing_wallet_completions.contains_key(id) {
+            return Err("ordinary completion conflicts with a protected Wallet original".into());
+        }
         if let Some(previous) = queues.processing_completions.get(id) {
             return if previous.record == completion.record {
                 Ok(())
@@ -1694,10 +1702,32 @@ impl AuthenticatedIngress {
                 Err("conflicting native processing completion".into())
             };
         }
-        if queues.processing_completions.len() >= 4096 {
+        if queues.processing_completions.len() + queues.processing_wallet_completions.len() >= 4096 {
             return Err("processing completion index full".into());
         }
         queues.processing_completions.insert(id.clone(), completion);
+        Ok(())
+    }
+    pub(super) fn publish_processing_wallet_completion(
+        &self,
+        completion: Arc<super::protected_accounts::processing_execution::NativeProtectedCompletion>,
+    ) -> Result<(), String> {
+        let mut queues = self.0.lock().map_err(|_| "runtime pipeline lock poisoned")?;
+        let id = &completion.record.item.envelope_id;
+        if queues.processing_completions.contains_key(id) {
+            return Err("protected Wallet completion conflicts with an ordinary original".into());
+        }
+        if let Some(previous) = queues.processing_wallet_completions.get(id) {
+            return if previous.record == completion.record {
+                Ok(())
+            } else {
+                Err("conflicting native Wallet processing completion".into())
+            };
+        }
+        if queues.processing_completions.len() + queues.processing_wallet_completions.len() >= 4096 {
+            return Err("processing completion index full".into());
+        }
+        queues.processing_wallet_completions.insert(id.clone(), completion);
         Ok(())
     }
     pub(super) fn processing_snapshot(&self) -> Result<Option<ProcessingSnapshot>, String> {
@@ -1706,7 +1736,8 @@ impl AuthenticatedIngress {
             .lock()
             .map_err(|_| "runtime pipeline lock poisoned")?;
         let reservation = self.1.reserve(
-            (queues.processing_members.len() + queues.processing_completions.len())
+            (queues.processing_members.len() + queues.processing_completions.len()
+                + queues.processing_wallet_completions.len())
                 .checked_mul(256)
                 .and_then(|n| n.checked_add(4096))
                 .ok_or("processing snapshot size overflow")?,
@@ -1721,6 +1752,7 @@ impl AuthenticatedIngress {
         Ok(Some(ProcessingSnapshot {
             members: queues.processing_members.values().cloned().collect(),
             completions: queues.processing_completions.values().cloned().collect(),
+            wallet_completions: queues.processing_wallet_completions.values().cloned().collect(),
             _permit: permit,
         }))
     }
@@ -1736,6 +1768,7 @@ impl AuthenticatedIngress {
         for identity in proof.identities() {
             queues.processing_members.remove(&identity.envelope_id);
             queues.processing_completions.remove(&identity.envelope_id);
+            queues.processing_wallet_completions.remove(&identity.envelope_id);
         }
         Ok(())
     }
@@ -1983,6 +2016,7 @@ impl AuthenticatedIngress {
         queues.processing_proof_refs = None;
         queues.processing_members.clear();
         queues.processing_completions.clear();
+        queues.processing_wallet_completions.clear();
         queues.processing_input_frames.clear();
         queues.processing_announcements.clear();
         Ok(())

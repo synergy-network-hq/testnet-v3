@@ -16,6 +16,7 @@ use synergy_aegis::{
 pub use synergy_etdag::WalletAdmission;
 use synergy_etdag::{EtdagDigest, ProcessingContext, WalletProcessingAdmission};
 use synergy_identity::authorization::IdentityAuthorizationCarrier;
+use super::etdag_wallet_admission::RuntimeProcessingAdmission;
 
 const MAX_PENDING: usize = 16;
 const MAX_PENDING_BYTES: usize = 8 * 1024 * 1024;
@@ -201,9 +202,9 @@ impl PendingAdmission {
 }
 
 /// Original authorization is passed unchanged to the sole ETDAG owner.
-pub struct PendingProcessingAdmission {
+pub(super) struct PendingProcessingAdmission {
     pub id: String,
-    pub admission: WalletProcessingAdmission,
+    pub(super) admission: RuntimeProcessingAdmission,
     bytes: usize,
 }
 pub(crate) fn processing_admission_owned_byte_charge(bytes: usize) -> usize {
@@ -223,6 +224,13 @@ impl PendingProcessingAdmission {
 struct PublishedProcessingContext {
     context: ProcessingContext,
     response: Value,
+}
+
+struct PublishedWalletProcessingContext {
+    epoch_root: String,
+    authority: synergy_etdag::TargetAdmissionContextV3,
+    source: synergy_posy::FinalizedBlockRecord,
+    state_root: String,
 }
 
 fn bounded_json_bytes(value: &impl Serialize, maximum: usize) -> Result<usize, String> {
@@ -491,6 +499,7 @@ struct State {
     context: Option<Value>,
     context_v2: Option<Value>,
     processing_context: Option<PublishedProcessingContext>,
+    wallet_processing_context: Option<PublishedWalletProcessingContext>,
     journal: Option<Arc<ReceiptJournal>>,
     ingress: Option<super::ingress::AuthenticatedIngress>,
     pending: VecDeque<PendingAdmission>,
@@ -686,6 +695,72 @@ impl AdmissionHandle {
             .ok_or_else(|| "asynchronous processing admission is unavailable".into())
     }
 
+    pub(super) fn publish_wallet_processing_context(
+        &self,
+        authority: &super::authority::VerifiedAuthority,
+        source: Option<(&synergy_posy::FinalizedBlockRecord, &str)>,
+    ) -> Result<(), String> {
+        let published = source.map(|(source, state_root)| -> Result<_, String> {
+            let release = authority.native_wallet_release()?;
+            let policy = release.verified.policy();
+            policy.check_finalized_source(&policy.genesis_hash, source)?;
+            let target = authority.protected_parameters()?.protected_target_height(source.height)
+                .map_err(|error| format!("Wallet processing height: {error:?}"))?;
+            if !authority.epoch.contains_height(target) || !synergy_posy::is_hash(state_root) {
+                return Err("Wallet processing source is outside selected native authority".into());
+            }
+            Ok(PublishedWalletProcessingContext {
+                epoch_root: authority.epoch.root().map_err(|error| error.to_string())?,
+                authority: authority.protected_target(Some(source), target)?.0,
+                source: source.clone(),
+                state_root: state_root.into(),
+            })
+        }).transpose()?;
+        self.0.lock().map_err(|_| "admission lock poisoned")?.wallet_processing_context = published;
+        Ok(())
+    }
+
+    pub(super) fn wallet_processing_context(
+        &self,
+        authority: &super::authority::VerifiedAuthority,
+        genesis: &str,
+        profile: &str,
+    ) -> Result<Value, String> {
+        use synergy_etdag::admission::{PW13_SPONSOR_CANDIDATE_PROFILE_ID, PW13_TRANSFER_CANDIDATE_PROFILE_ID};
+        if !matches!(profile, PW13_SPONSOR_CANDIDATE_PROFILE_ID | PW13_TRANSFER_CANDIDATE_PROFILE_ID) {
+            return Err("unknown protected Wallet processing profile".into());
+        }
+        let release = authority.native_wallet_release()?;
+        let policy = release.verified.policy();
+        let epoch_root = authority.epoch.root().map_err(|error| error.to_string())?;
+        let state = self.0.lock().map_err(|_| "admission lock poisoned")?;
+        let published = state.wallet_processing_context.as_ref()
+            .filter(|published| published.epoch_root == epoch_root)
+            .ok_or("protected Wallet context lacks finalized publication")?;
+        policy.check_finalized_source(genesis, &published.source)?;
+        let result = json!({
+            "context": ProcessingContext {
+                context_version: 1,
+                profile_id: profile.into(),
+                authority: published.authority.clone(),
+            },
+            "profile_id": profile,
+            "genesis_hash": genesis,
+            "source": {
+                "finalized": published.source,
+                "state_root": published.state_root,
+                "consensus_timestamp_unix": authority.autonomous_authority_at(published.source.height)
+                    .ok_or("protected Wallet source lacks certified epoch")?
+                    .consensus_timestamp_unix(published.source.height)?,
+            },
+            "ingress_kem_registry": authority.protected_ingress_registry()?,
+            "parameters": authority.protected_parameters()?,
+            "wallet_dispatch_policy": policy,
+        });
+        bounded_json_bytes(&result, MAX_REQUEST_BYTES)?;
+        Ok(result)
+    }
+
     pub fn enqueue_processing(
         &self,
         admission: WalletProcessingAdmission,
@@ -694,6 +769,29 @@ impl AdmissionHandle {
             .request
             .validate_shape()
             .map_err(|e| format!("invalid processing admission: {e:?}"))?;
+        self.enqueue_runtime_processing(RuntimeProcessingAdmission::Ordinary(admission))
+    }
+
+    /// Native managed caller only. An unactivated authority cannot enqueue
+    /// an envelope even if it matches an advertised or retained context.
+    pub(super) fn enqueue_protected_wallet_processing(
+        &self,
+        authority: &super::authority::VerifiedAuthority,
+        admission: synergy_etdag::admission::ProtectedWalletAdmission,
+    ) -> Result<Value, String> {
+        authority.native_wallet_release()?;
+        let aad = &admission.envelope.aad;
+        if aad.chain_id != authority.epoch.chain_id
+            || aad.network_id != authority.epoch.network_id
+            || aad.epoch != authority.epoch.epoch
+        {
+            return Err("protected Wallet input has a different activated authority".into());
+        }
+        admission.envelope.validate().map_err(|error| format!("protected Wallet envelope: {error:?}"))?;
+        self.enqueue_runtime_processing(RuntimeProcessingAdmission::Protected(admission))
+    }
+
+    fn enqueue_runtime_processing(&self, admission: RuntimeProcessingAdmission) -> Result<Value, String> {
         let bytes = bounded_json_bytes(&admission, MAX_REQUEST_BYTES)?;
         let id = EtdagDigest::from_canonical(
             "SYNERGY_LOCAL_PROCESSING_ADMISSION_RECEIPT_V1",
@@ -702,13 +800,16 @@ impl AdmissionHandle {
         .map_err(|e| format!("derive processing admission receipt: {e:?}"))?
         .0;
         let mut state = self.0.lock().map_err(|_| "admission lock poisoned")?;
-        let published = &state
-            .processing_context
-            .as_ref()
-            .ok_or("asynchronous processing admission is unavailable")?
-            .context
-            .authority;
-        let aad = &admission.request.envelope.aad;
+        let published = match &admission {
+            RuntimeProcessingAdmission::Ordinary(_) => &state.processing_context.as_ref()
+                .ok_or("asynchronous processing admission is unavailable")?
+                .context.authority,
+            RuntimeProcessingAdmission::Protected(_) => &state.wallet_processing_context.as_ref()
+                .ok_or("protected Wallet admission lacks finalized publication")?
+                .authority,
+        };
+        let envelope = admission.outbound_envelope();
+        let aad = &envelope.aad;
         if aad.chain_id != published.chain_id
             || aad.network_id != published.network_id
             || aad.protocol_version != published.protocol_version
@@ -744,9 +845,9 @@ impl AdmissionHandle {
                 .ok_or("protected admission receipt capacity reached")?;
             state.receipts.remove(&oldest);
         }
-        let value = json!({"receipt_id":id,"status":"queued","profile_id":synergy_etdag::PROCESSING_PROFILE_ID,
-            "processing_context_root":admission.request.context_root,
-            "envelope_id":admission.request.envelope.envelope_id,"admitted":false,
+        let value = json!({"receipt_id":id,"status":"queued","profile_id":admission.profile(),
+            "processing_context_root":aad.processing_context_root,
+            "envelope_id":envelope.envelope_id,"admitted":false,
             "lifecycle_status":"queued","durable":false});
         state.receipts.insert(
             id.clone(),
@@ -766,7 +867,7 @@ impl AdmissionHandle {
         Ok(value)
     }
 
-    pub fn take_processing(&self) -> Result<Option<PendingProcessingAdmission>, String> {
+    pub(super) fn take_processing(&self) -> Result<Option<PendingProcessingAdmission>, String> {
         let mut state = self.0.lock().map_err(|_| "admission lock poisoned")?;
         let request = state.processing_pending.pop_front();
         if let Some(request) = &request {
@@ -775,7 +876,7 @@ impl AdmissionHandle {
         Ok(request)
     }
 
-    pub fn return_processing_pending(
+    pub(super) fn return_processing_pending(
         &self,
         request: PendingProcessingAdmission,
     ) -> Result<(), String> {

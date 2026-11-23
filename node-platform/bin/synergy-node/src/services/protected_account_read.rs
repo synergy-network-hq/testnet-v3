@@ -86,7 +86,7 @@ fn digest(text: &str) -> Result<[u8; 32], String> {
     Ok(bytes)
 }
 
-pub(super) fn candidate_wire_profile() -> Result<UnactivatedWireProfile, String> {
+pub(in crate::services) fn candidate_wire_profile() -> Result<UnactivatedWireProfile, String> {
     UnactivatedWireProfile::new(UnactivatedWireAssignments {
         ordinary_roles_key: 0,
         recovery_pairs_key: 1,
@@ -472,17 +472,15 @@ fn inspect_account(
     if record.registered_height > snapshot.position.height {
         return Err("candidate registration height exceeds selected finality".into());
     }
-    let enrollment =
-        CanonicalEnrollment::decode(&record.enrollment, registry.wire).map_err(display)?;
-    let policy = registry.canonical_policy(&record, &enrollment)?;
-    let public = policy.policy();
+    let policy = registry.current_policy(&record)?;
+    let public = policy.terms();
     if !providers.contains(&public.provider_manifest_hash) {
         return Err("candidate current policy provider is not selected".into());
     }
     // Pending state is interpreted only by the canonical transition owner;
     // malformed or unsupported retained state must not become apparent absence.
     let pending_transition = inspect_pending_transition(snapshot, account)?;
-    let roles = public.roles.map(|role| {
+    let roles = public.roles.iter().map(|role| {
         json!({
             "role_id": role.role_id,
             "participant_id": hex_bytes(&role.participant_id),
@@ -490,14 +488,14 @@ fn inspect_account(
             "auth_algorithm": role.auth_algorithm,
             "auth_public_key_base64": BASE64.encode(role.auth_public_key),
         })
-    });
+    }).collect::<Vec<_>>();
     Ok(json!({
         "address": address,
         "account_id": account.lowercase_hex(),
         "status": "enrolled",
         "account_class": "protected_unified_v1",
         "registered_height": record.registered_height,
-        "aggregate_public_point_sec1_hex": hex_bytes(&public.evm_public_key),
+        "aggregate_public_point_sec1_hex": hex_bytes(public.evm_public_key),
         "policy_epoch": record.policy_epoch,
         "policy_hash": hex_bytes(&record.policy_hash),
         "policy_cbor_base64": BASE64.encode(policy.encoded()),

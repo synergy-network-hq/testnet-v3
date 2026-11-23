@@ -1,0 +1,26 @@
+; Candidate dual-enrollment wire extension. The original action IDs, sponsor
+; intent/evidence, commit window, direct DPR and all other frames are unchanged.
+; Original CDDL SHA-256 a80223355b314d20388c51beb6bb6b9b44d509b8d6282694fcf48bfac3dc3324.
+; Original action payload still encloses exact enrollment_cbor and salt.
+dp-sponsored-reveal = [
+  28674, bstr, bstr, bstr, [dp-pop-d, dp-pop-p],
+  bstr .size 65, bstr .size 32
+]
+dp-pop-d = [1, 1, uint, 0, bstr .size 32, bstr .size 64, bstr .size 4627]
+dp-pop-p = [1, 1, uint, 1, bstr .size 32, bstr .size 64, bstr .size 4627]
+dp-role-d = [0, bstr .size 32, uint, 1, bstr .size 2592, null, null]
+dp-role-p = [1, bstr .size 32, uint, 1, bstr .size 2592, null, null]
+dp-policy = {
+  0: 2, 1: bstr .size 32, 2: bstr .size 20, 3: uint,
+  4: {0: [0, 1]}, 5: [dp-role-d, dp-role-p],
+  6: bstr .size 65, 7: bstr .size 32, 8: 7200, 10: 0
+}
+dp-enrollment = {
+  0: 2, 1: bstr .size 32, 2: bstr .size 20, 3: bstr .size 65,
+  4: dp-policy, 5: bstr .size 32, 6: bstr .size 32, 7: uint,
+  8: uint, 9: bstr .size 16
+}
+; D/P pure ML-DSA-87 context AEGIS.ACCOUNT.ENROLL.DP.V1.
+; Digest SHA3-512("AEGIS/ACCOUNT-ENROLL-DP/v1" || DCBOR(dp-enrollment)).
+; EIP-712 ownership binds SHA3-256(same domain || DCBOR(dp-enrollment)).
+; Commit remains SHA3-256(DCBOR(dp-enrollment) || bytes32(salt)).

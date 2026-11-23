@@ -9,16 +9,36 @@ use crate::services::qualification_timing::{
 mod historical_recovery;
 
 use super::*;
+use crate::services::etdag_wallet_admission::{vertex_message, RuntimeProcessingAdmission};
 use crate::services::processing_pipeline::*;
+use crate::services::protected_accounts::processing_execution::{
+    with_native_protected_intake, NativeProtectedCompletion,
+};
 use crate::services::processing_store::{
-    PendingProcessingStore, ProcessingAdmissionAuthenticator, ProcessingStoreError,
+    PendingProcessingStore, ProcessingAdmissionAuthenticator, ProcessingAdmissionRecord, ProcessingStoreError,
     ProcessingStoreLimits, PROCESSING_INTAKE_HEADROOM_BYTES,
 };
-use synergy_etdag::execution::{ProcessingDecryptShare, ProcessingVertex};
-use synergy_etdag::{CertifiedEnvelopeRef, ProcessingContext, WalletProcessingAdmission};
+use synergy_etdag::execution::{ProcessingDecryptShare, ProcessingVertex, ProcessingVertexAdmission};
+use synergy_etdag::{CertifiedEnvelopeRef, ProcessingContext};
 use synergy_execution::{BudgetedCandidateStore, BudgetedExecutionCandidate};
 use synergy_posy::ProposalValidationCertificate;
 use synergy_state::world_resources::{BudgetedWorld, WorldResourceBudget, WorldResourceError};
+
+type RuntimeVertex = ProcessingVertex<RuntimeProcessingAdmission>;
+
+enum NativeCompletion {
+    Ordinary(NativeProcessingCompletion),
+    Wallet(NativeProtectedCompletion),
+}
+
+impl NativeCompletion {
+    fn record(&self) -> &synergy_execution::ProcessingReadyRecord {
+        match self {
+            Self::Ordinary(completion) => &completion.record,
+            Self::Wallet(completion) => &completion.record,
+        }
+    }
+}
 
 struct Frame {
     bytes: Vec<u8>,
@@ -44,7 +64,7 @@ struct LiveItem {
     _permit: WorldResourcePermit,
 }
 pub(super) struct ProcessingWork {
-    pending: PendingProcessingStore,
+    pending: PendingProcessingStore<RuntimeProcessingAdmission>,
     verifier: LiveVerifier,
     items: BTreeMap<EtdagDigest, LiveItem>,
     retry: Option<Instant>,
@@ -57,6 +77,8 @@ pub(super) struct ProcessingWork {
     authorization_root: String,
     requested_source: Option<(ProcessingContext, String)>,
     context_published: bool,
+    wallet_source_awaiting_pin: Option<u64>,
+    wallet_source_published: Option<u64>,
     recovered_order: Option<crate::services::apqe_transport::Stamp>,
 }
 struct LiveVerifier {
@@ -219,7 +241,70 @@ impl LiveVerifier {
             .consensus_timestamp_unix(target)
     }
 
+    fn admission_timestamp(&self, context: &ProcessingContext) -> Result<u64, String> {
+        if is_pw13_context(context) {
+            let height = context.authority.source_finalized_height;
+            return self.authority_for_target(height)?.consensus_timestamp_unix(height);
+        }
+        self.target_timestamp(context.authority.target_height)
+    }
+
+    fn authenticate(
+        &self,
+        source: &NativeProcessingContext<'_>,
+        context: &ProcessingContext,
+        timestamp: u64,
+        admission: &RuntimeProcessingAdmission,
+    ) -> Result<(), String> {
+        admission.validate_context(context).map_err(|error| format!("{error:?}"))?;
+        match admission {
+            RuntimeProcessingAdmission::Ordinary(value) => source.verify(context, timestamp, value),
+            RuntimeProcessingAdmission::Protected(value) => {
+                if source.pw13_finalized_source()?.consensus_time != timestamp {
+                    return Err("protected Wallet original differs from the certified source time".into());
+                }
+                with_native_protected_intake(source, |intake| intake.authorize(value).map(drop))
+            }
+        }
+    }
+
+    fn verify_vertex<'a>(
+        &self,
+        source: &'a NativeProcessingContext<'a>,
+        context: &ProcessingContext,
+        vertex: &'a RuntimeVertex,
+        certificate: Option<&AvailabilityCertificate>,
+        parents: &[&NativeProcessingMember],
+        budget: &Arc<WorldResourceBudget>,
+    ) -> Result<NativeProcessingVertex<'a, RuntimeProcessingAdmission>, String> {
+        self.verify_vertex_fee_class(context, &vertex.admission, &vertex.envelope_ref)?;
+        NativeProcessingVertex::verify_authenticated(
+            source, vertex, certificate, parents, budget, |value| {
+                self.authenticate(source, context, self.admission_timestamp(context)?, value)
+            },
+        )
+    }
+
+    fn verify_vertex_fee_class(
+        &self,
+        context: &ProcessingContext,
+        admission: &RuntimeProcessingAdmission,
+        reference: &CertifiedEnvelopeRef,
+    ) -> Result<(), String> {
+        if matches!(admission, RuntimeProcessingAdmission::Protected(_))
+            && reference.fee_class != self.authority_for_target(context.authority.target_height)?
+                .native_wallet_release()?.verified.policy().fee_class
+        {
+            return Err("protected Wallet vertex differs from the governed fee class".into());
+        }
+        Ok(())
+    }
+
     fn context_for_anchor(&self, target: u64) -> Result<ProcessingContext, String> {
+        self.context_for_profile(target, synergy_etdag::PROCESSING_PROFILE_ID)
+    }
+
+    fn context_for_profile(&self, target: u64, profile: &str) -> Result<ProcessingContext, String> {
         let authority = self.authority_for_target(target)?;
         let source_height = authority.protected_source_height(target)?;
         let record = if source_height == 0 {
@@ -234,7 +319,7 @@ impl LiveVerifier {
         };
         Ok(ProcessingContext {
             context_version: 1,
-            profile_id: synergy_etdag::PROCESSING_PROFILE_ID.into(),
+            profile_id: profile.into(),
             authority: authority.protected_target(record.as_ref(), target)?.0,
         })
     }
@@ -245,12 +330,15 @@ impl LiveVerifier {
     ) -> Result<NativeProcessingContext<'a>, String> {
         // Reconstruct each immutable original anchor from local authenticated
         // history. Publishing a newer source never retargets pending bytes.
-        if *context != self.context_for_anchor(context.authority.target_height)? {
+        if *context != self.context_for_profile(context.authority.target_height, &context.profile_id)? {
             return Err("unknown frozen processing source".into());
         }
         let authority = self.authority_for_target(context.authority.target_height)?;
         let height = context.authority.source_finalized_height;
         if height == 0 {
+            if is_pw13_context(context) {
+                return Err("protected Wallet admission requires finalized activation".into());
+            }
             return NativeProcessingContext::verify_in(
                 authority,
                 context,
@@ -274,9 +362,16 @@ impl LiveVerifier {
             .transition
             .as_ref()
             .filter(|t| t.verify_current(authority).is_ok());
-        NativeProcessingContext::verify_owned_finalized_with_transition(
-            authority, context, candidate, &witness, pool, transition,
-        )?
+        let native = if is_pw13_context(context) {
+            NativeProcessingContext::verify_owned_wallet_source(
+                authority, context, candidate, &witness, pool,
+            )?
+        } else {
+            NativeProcessingContext::verify_owned_finalized_with_transition(
+                authority, context, candidate, &witness, pool, transition,
+            )?
+        };
+        native
         .with_lineage(&self.authority)
     }
     fn parents<'a>(
@@ -293,7 +388,7 @@ impl LiveVerifier {
             .collect()
     }
 }
-impl ProcessingAdmissionAuthenticator for LiveVerifier {
+impl ProcessingAdmissionAuthenticator<RuntimeProcessingAdmission> for LiveVerifier {
     fn verify_finalized(
         &self,
         identity: &crate::services::processing_store::PendingProcessingIdentity,
@@ -322,38 +417,31 @@ impl ProcessingAdmissionAuthenticator for LiveVerifier {
         &self,
         context: &ProcessingContext,
         timestamp: u64,
-        admission: &WalletProcessingAdmission,
+        admission: &RuntimeProcessingAdmission,
     ) -> Result<(), String> {
-        ProcessingAdmissionAuthenticator::verify(
-            &self.source(context, &self.scratch)?,
-            context,
-            timestamp,
-            admission,
-        )
+        self.authenticate(&self.source(context, &self.scratch)?, context, timestamp, admission)
     }
     fn verify_retained(
         &self,
         context: &ProcessingContext,
         timestamp: u64,
-        admission: &WalletProcessingAdmission,
+        admission: &RuntimeProcessingAdmission,
     ) -> Result<(), String> {
         // The store authenticated the immutable original source/request bytes
         // and checks its trusted hash before calling here.
         // New intake and open/recovery always use full native authentication.
-        if *context != self.context_for_anchor(context.authority.target_height)?
-            || timestamp != self.target_timestamp(context.authority.target_height)?
+        if *context != self.context_for_profile(context.authority.target_height, admission.profile())?
+            || timestamp != self.admission_timestamp(context)?
         {
             return Err("retained processing source differs from frozen native authority".into());
         }
-        admission
-            .request
-            .validate_context(context)
+        admission.validate_context(context)
             .map_err(|error| format!("{error:?}"))
     }
     fn verify_retained_progress(
         &self,
         context: &ProcessingContext,
-        admission: &WalletProcessingAdmission,
+        admission: &RuntimeProcessingAdmission,
         _: &ProcessingProgressEvidence,
         _: &Arc<WorldResourceBudget>,
     ) -> Result<(), String> {
@@ -362,17 +450,18 @@ impl ProcessingAdmissionAuthenticator for LiveVerifier {
         ProcessingAdmissionAuthenticator::verify_retained(
             self,
             context,
-            self.target_timestamp(context.authority.target_height)?,
+            self.admission_timestamp(context)?,
             admission,
         )
     }
     fn verify_progress(
         &self,
         context: &ProcessingContext,
-        admission: &WalletProcessingAdmission,
+        admission: &RuntimeProcessingAdmission,
         evidence: &ProcessingProgressEvidence,
         budget: &Arc<WorldResourceBudget>,
     ) -> Result<(), String> {
+        self.verify_vertex_fee_class(context, admission, &evidence.envelope_ref)?;
         let source = self.source(context, budget)?;
         let parent = evidence
             .reveal_validation
@@ -385,30 +474,40 @@ impl ProcessingAdmissionAuthenticator for LiveVerifier {
             reveal_parent: parent.as_ref(),
             dag_parents: &parents,
         }
-        .verify_progress(context, admission, evidence, budget)
+        .verify_authenticated_progress(context, admission, evidence, budget, |admission| {
+            self.authenticate(&source, context, self.admission_timestamp(context)?, admission)
+        })
     }
     fn verify_completion(
         &self,
         context: &ProcessingContext,
-        admission: &WalletProcessingAdmission,
+        admission: &RuntimeProcessingAdmission,
         evidence: &ProcessingCompletionEvidence,
         budget: &Arc<WorldResourceBudget>,
     ) -> Result<(), String> {
+        self.verify_vertex_fee_class(context, admission, &evidence.envelope_ref)?;
         let source = self.source(context, budget)?;
         let parent = parent_at(&self.candidate_root, &evidence.reveal_validation, budget)?;
         let parents = self.parents(&evidence.parents)?;
-        NativeProcessingRecovery {
+        let recovery = NativeProcessingRecovery {
             source: &source,
             reveal_parent: &parent,
             dag_parents: &parents,
+        };
+        match admission {
+            RuntimeProcessingAdmission::Ordinary(value) => recovery.verify_completion(context, value, evidence, budget),
+            RuntimeProcessingAdmission::Protected(value) => {
+                with_native_protected_intake(&source, |intake| {
+                    recovery.recover_pw13(value, evidence, budget, |original| intake.authorize(original)).map(drop)
+                })
+            }
         }
-        .verify_completion(context, admission, evidence, budget)
     }
 }
-fn vertex(
-    admission: &WalletProcessingAdmission,
+fn vertex<A: Clone>(
+    admission: &A,
     evidence: &ProcessingProgressEvidence,
-) -> ProcessingVertex {
+) -> ProcessingVertex<A> {
     ProcessingVertex {
         vertex_version: evidence.vertex_version,
         admission: admission.clone(),
@@ -422,20 +521,27 @@ fn vertex(
 impl EtdagService {
     fn authored_processing_vertex(
         &self,
-        admission: &WalletProcessingAdmission,
-    ) -> Result<ProcessingVertex, ProcessingStoreError> {
-        let r = &admission.request;
+        admission: &RuntimeProcessingAdmission,
+    ) -> Result<RuntimeVertex, ProcessingStoreError> {
+        let envelope = admission.envelope();
+        let (gas_class_units, fee_class) = match admission {
+            RuntimeProcessingAdmission::Ordinary(value) => (value.request.gas_class_units, value.request.fee_class),
+            RuntimeProcessingAdmission::Protected(value) => {
+                let owner = check(self.authority.native_wallet_release())?;
+                (value.gas_limit(), owner.verified.policy().fee_class)
+            }
+        };
         let mut v = ProcessingVertex {
             vertex_version: 1,
             admission: admission.clone(),
             envelope_ref: CertifiedEnvelopeRef {
-                tx_commitment: r.envelope.envelope_id.clone(),
-                sender_id: r.sender_wallet.clone(),
-                nonce_slot: r.sender_nonce,
+                tx_commitment: envelope.envelope_id.clone(),
+                sender_id: envelope.aad.sender_id.clone(),
+                nonce_slot: envelope.aad.nonce_slot,
                 certified_dag_round: 0,
-                gas_class_units: r.gas_class_units,
-                ciphertext_bytes: r.envelope.ciphertext.len() as u64,
-                fee_class: r.fee_class,
+                gas_class_units,
+                ciphertext_bytes: envelope.ciphertext.len() as u64,
+                fee_class,
                 protocol_dependencies: Vec::new(),
             },
             parents: Vec::new(),
@@ -540,6 +646,8 @@ impl EtdagService {
             authorization_root,
             requested_source: None,
             context_published: publish_genesis,
+            wallet_source_awaiting_pin: None,
+            wallet_source_published: None,
             recovered_order: None,
         });
         if let Some(handle) = &self.wallet_admission {
@@ -552,6 +660,7 @@ impl EtdagService {
                 None
             };
             handle.publish_processing_context(&self.authority, response)?;
+            handle.publish_wallet_processing_context(&self.authority, None)?;
         }
         Ok(())
     }
@@ -621,27 +730,29 @@ impl EtdagService {
                     }
                 };
                 let context = check(
-                    work.verifier
-                        .context_for_anchor(admission.request.envelope.aad.authorization_height),
+                    work.verifier.context_for_profile(
+                        admission.envelope().aad.authorization_height,
+                        admission.profile(),
+                    ),
                 )?;
                 let source = check(work.verifier.source(&context, budget))?;
                 let v = vertex(admission, evidence);
                 let parents = check(work.verifier.parents(&evidence.parents))?;
-                check(NativeProcessingVertex::verify_for_availability(
-                    &source, &v, &parents, budget,
+                check(work.verifier.verify_vertex(
+                    &source, &context, &v, None, &parents, budget,
                 ))?;
                 let vertex_id = check(v.id().map_err(|e| format!("{e:?}")))?;
                 let mut frames = BTreeMap::new();
                 frames.insert(
                     0,
                     check(
-                        self.processing_frame(EtdagNetworkMessage::ProcessingVertexV1(v), budget),
+                        self.processing_frame(vertex_message(v), budget),
                     )?,
                 );
                 Ok((
                     LiveItem {
                         vertex_id,
-                        context_root: admission.request.context_root.clone(),
+                        context_root: admission.envelope().aad.processing_context_root.clone(),
                         target_height: context.authority.target_height,
                         evidence: evidence.clone(),
                         votes: BTreeMap::new(),
@@ -671,13 +782,14 @@ impl EtdagService {
     fn accept_processing_vertex(
         &mut self,
         work: &mut ProcessingWork,
-        v: ProcessingVertex,
+        v: RuntimeVertex,
     ) -> Result<(), ProcessingStoreError> {
+        let envelope = v.admission.envelope();
         #[cfg(feature = "qualification-timing")]
         let _diagnostic = diagnostic_span(
             if work
                 .items
-                .contains_key(&v.admission.request.envelope.envelope_id)
+                .contains_key(&envelope.envelope_id)
             {
                 DiagnosticStage::VertexRetained
             } else {
@@ -687,9 +799,9 @@ impl EtdagService {
         if let Some((_, world)) = check(self.ingress.processing_finalized_world())? {
             if world
                 .accounts
-                .get(&v.admission.request.sender_wallet)
+                .get(&envelope.aad.sender_id)
                 .map_or(0, |account| account.nonce)
-                > v.admission.request.sender_nonce
+                > envelope.aad.nonce_slot
             {
                 return Err(ProcessingStoreError::Invalid(
                     "processing nonce already finalized".into(),
@@ -703,7 +815,7 @@ impl EtdagService {
         // Hash scratch comes from the original's retained worker reservation.
         if let Some(item) = work
             .items
-            .get(&v.admission.request.envelope.envelope_id)
+            .get(&envelope.envelope_id)
             .filter(|item| v.author_signature == item.evidence.author_signature)
         {
             let mut scratch = item.workspace.reserve(16 * 1024)?;
@@ -726,12 +838,11 @@ impl EtdagService {
             check(self.ingress.invalidate_processing_proof_references())?;
         }
         let context = check(
-            work.verifier
-                .context_for_anchor(v.admission.request.envelope.aad.authorization_height),
+            work.verifier.context_for_profile(envelope.aad.authorization_height, v.admission.profile()),
         )?;
         let timestamp = check(
             work.verifier
-                .target_timestamp(context.authority.target_height),
+                .admission_timestamp(&context),
         )?;
         let source = check(work.verifier.source(&context, &work.verifier.scratch))?;
         // Incoming transport storage already owns the decode. Reserve native
@@ -742,7 +853,7 @@ impl EtdagService {
         // exact retries cannot be blocked by their own global reservation.
         let existing = work
             .pending
-            .retirement_budget(&v.admission.request.envelope.envelope_id);
+            .retirement_budget(&envelope.envelope_id);
         let workspace = match existing {
             Some(workspace) => workspace,
             None => self
@@ -760,8 +871,8 @@ impl EtdagService {
                 )?
                 .into_budget(),
         };
-        check(NativeProcessingVertex::verify_for_availability(
-            &source, &v, &parents, &workspace,
+        check(work.verifier.verify_vertex(
+            &source, &context, &v, None, &parents, &workspace,
         ))?;
         let _encode = workspace.reserve(
             measure(&v.admission).map_err(ProcessingStoreError::Verification)? * 2 + 64 * 1024,
@@ -800,6 +911,18 @@ impl EtdagService {
         &mut self,
         v: ProcessingVertex,
     ) -> Result<(), String> {
+        self.processing_runtime_vertex(v.map_admission(RuntimeProcessingAdmission::Ordinary))
+    }
+
+    pub(in crate::services::etdag) fn processing_protected_wallet_vertex(
+        &mut self,
+        v: ProcessingVertex<synergy_etdag::admission::ProtectedWalletAdmission>,
+    ) -> Result<(), String> {
+        self.authority.native_wallet_release()?;
+        self.processing_runtime_vertex(v.map_admission(RuntimeProcessingAdmission::Protected))
+    }
+
+    fn processing_runtime_vertex(&mut self, v: RuntimeVertex) -> Result<(), String> {
         self.with_processing_work(
             |owner, work| match owner.accept_processing_vertex(work, v) {
                 Ok(()) => Ok(()),
@@ -976,10 +1099,11 @@ impl EtdagService {
                 let source = check(work.verifier.source(context, budget))?;
                 let v = vertex(admission, evidence);
                 let parents = check(work.verifier.parents(&evidence.parents))?;
-                let verified = check(NativeProcessingVertex::verify(
+                let verified = check(work.verifier.verify_vertex(
                     &source,
+                    context,
                     &v,
-                    certificate,
+                    Some(certificate),
                     &parents,
                     budget,
                 ))?;
@@ -1150,6 +1274,7 @@ impl EtdagService {
         self.recover_historical_member(work)?;
         self.reconcile_finalized_processing(work)?;
         self.refresh_processing_context(work)?;
+        self.refresh_wallet_processing_context(work)?;
         self.retry_finalized_processing_shares(work)?;
         // Finish disseminating locally owned originals before introducing more
         // RPC work into the same bounded pool. Otherwise a single ingress can
@@ -1168,7 +1293,7 @@ impl EtdagService {
                     let result = (|| {
                         let retained = work
                             .pending
-                            .retirement_budget(&request.admission.request.envelope.envelope_id);
+                            .retirement_budget(&request.admission.envelope().envelope_id);
                         let charge = request.owned_byte_charge();
                         let _charge = match retained.as_ref() {
                             Some(workspace) => workspace.reserve(charge),
@@ -1183,7 +1308,7 @@ impl EtdagService {
                     })();
                     match result {
                         Ok(()) => handle.complete(&request.id, Ok(serde_json::json!({ "newly_admitted":true,
-                            "envelope_id": request.admission.request.envelope.envelope_id, "durable_pending":true, "finalized":false })))?,
+                            "envelope_id": request.admission.envelope().envelope_id, "durable_pending":true, "finalized":false })))?,
                         Err(ProcessingStoreError::Resource(WorldResourceError::Capacity { .. }) | ProcessingStoreError::Full) => handle.return_processing_pending(request)?,
                         Err(ProcessingStoreError::Storage(error)) => return Err(format!("processing intake storage failure: {error}")),
                         Err(error) => handle.complete(&request.id, Err(error.to_string()))?,
@@ -1311,7 +1436,10 @@ impl EtdagService {
                 if work.pending.pending_identities().next().is_some()
                     && candidates
                         .commitment(height)?
-                        .is_some_and(|commitment| commitment.transaction_count > 0)
+                        .is_some_and(|commitment| {
+                            commitment.processing_selection_count > 0
+                                || commitment.transaction_count > 0
+                        })
                 {
                     let workspace = work
                         .pending
@@ -1519,6 +1647,7 @@ impl EtdagService {
         if let Some((context, _)) = &work.requested_source {
             heights.insert(context.authority.source_finalized_height);
         }
+        heights.extend([work.wallet_source_awaiting_pin, work.wallet_source_published].into_iter().flatten());
         for (_, height, _) in work.pending.finalized_identities() {
             heights.insert(height);
             heights.insert(
@@ -1602,6 +1731,52 @@ impl EtdagService {
         }
         self.ingress
             .publish_processing_proof_references(&parent.block_id, &heights)?;
+        Ok(())
+    }
+
+    fn refresh_wallet_processing_context(&self, work: &mut ProcessingWork) -> Result<(), String> {
+        let Some(handle) = &self.wallet_admission else {
+            return Ok(());
+        };
+        if self.authority.wallet_dispatch_policy().is_none() {
+            return Ok(());
+        }
+        let release = self.authority.native_wallet_release()?;
+        let Some((tip, _)) = self.ingress.processing_finalized_world()? else {
+            return Ok(());
+        };
+        let policy = release.verified.policy();
+        let height = work.wallet_source_awaiting_pin.unwrap_or(tip);
+        if height < policy.activation_finalized_height
+            || work.wallet_source_published.is_some_and(|old| height <= old)
+        {
+            return Ok(());
+        }
+        let target = self.authority.protected_parameters()?.protected_target_height(height)
+            .map_err(|error| format!("protected Wallet target: {error:?}"))?;
+        if !self.authority.epoch.contains_height(target) {
+            return Ok(());
+        }
+        work.wallet_source_awaiting_pin = Some(height);
+        let candidates = BudgetedCandidateStore::new_budgeted(
+            &work.verifier.candidate_root, self.ingress.world_budget().clone(),
+        )?;
+        if !candidates.pinned_descriptors().iter().any(|pin| pin.height == height) {
+            return Ok(());
+        }
+        let Some((record, _)) = self.ingress.finalized_record_with_witness(height)? else {
+            return Err("pinned Wallet processing source lacks verified finality".into());
+        };
+        let stored = candidates.commitment(height)?
+            .ok_or("pinned Wallet processing source lacks durable execution")?;
+        if stored.block_id != record.block_id
+            || stored.protected_execution_root != record.protected_execution_root
+        {
+            return Err("pinned Wallet processing execution differs from verified finality".into());
+        }
+        handle.publish_wallet_processing_context(&self.authority, Some((&record, &stored.state_root)))?;
+        work.wallet_source_published = Some(height);
+        work.wallet_source_awaiting_pin = None;
         Ok(())
     }
 
@@ -1735,10 +1910,11 @@ impl EtdagService {
                     let source = check(work.verifier.source(context, budget))?;
                     let v = vertex(admission, evidence);
                     let parents = check(work.verifier.parents(&evidence.parents))?;
-                    let native = check(NativeProcessingVertex::verify(
+                    let native = check(work.verifier.verify_vertex(
                         &source,
+                        context,
                         &v,
-                        evidence.availability.as_ref().expect("checked VAC"),
+                        evidence.availability.as_ref(),
                         &parents,
                         budget,
                     ))?;
@@ -1753,10 +1929,8 @@ impl EtdagService {
                         check(work.verifier.authority_for_target(candidate.height))?,
                     ))?;
                     let permission = check(parent.reveal_permission(&native))?;
-                    let capsule = admission
-                        .request
-                        .envelope
-                        .share_capsules
+                    let envelope = admission.envelope();
+                    let capsule = envelope.share_capsules
                         .iter()
                         .find(|c| c.validator_id == self.local_signer.validator_id)
                         .ok_or_else(|| {
@@ -1777,7 +1951,7 @@ impl EtdagService {
                     let result = match self.ingress_custody.kem.as_ref() {
                         Some(kem) => {
                             synergy_etdag::crypto::decrypt_share_capsule_with_kem_diagnostic(
-                                &admission.request.envelope,
+                                envelope,
                                 capsule,
                                 key,
                                 &self.ingress_custody.secret,
@@ -1792,7 +1966,7 @@ impl EtdagService {
                                 synergy_etdag::crypto::decrypt_share_capsule_diagnostic
                             };
                             decrypt(
-                                &admission.request.envelope,
+                                envelope,
                                 capsule,
                                 key,
                                 &self.ingress_custody.secret,
@@ -1877,10 +2051,11 @@ impl EtdagService {
                 let source = check(work.verifier.source(context, budget))?;
                 let v = vertex(admission, evidence);
                 let parents = check(work.verifier.parents(&evidence.parents))?;
-                let native = check(NativeProcessingVertex::verify(
+                let native = check(work.verifier.verify_vertex(
                     &source,
+                    context,
                     &v,
-                    evidence.availability.as_ref().expect("checked VAC"),
+                    evidence.availability.as_ref(),
                     &parents,
                     budget,
                 ))?;
@@ -1891,20 +2066,28 @@ impl EtdagService {
                     vc,
                     check(work.verifier.authority_for_target(candidate.height))?,
                 ))?;
-                let completion = check(NativeProcessingCompletion::decrypt_in(
-                    &parent,
-                    &native,
-                    &evidence.shares,
-                    budget,
-                ))?;
+                let completion = match admission {
+                    RuntimeProcessingAdmission::Ordinary(value) => NativeCompletion::Ordinary(check(
+                        NativeProcessingCompletion::decrypt_ordinary(
+                            &parent, &native, value, &evidence.shares, budget,
+                        )
+                    )?),
+                    RuntimeProcessingAdmission::Protected(value) => NativeCompletion::Wallet(check(
+                        NativeProtectedCompletion::retain(
+                            &source, value, parent.world(),
+                            check(AuthenticatedProcessingOpening::open_in(&parent, &native, &evidence.shares, budget))?,
+                            budget,
+                        )
+                    )?),
+                };
                 let witness = ProcessingCompletionEvidence::from_inputs(
                     &v,
                     evidence.availability.as_ref().expect("checked VAC"),
                     vc,
                     &evidence.shares,
-                    &completion.record,
+                    completion.record(),
                 );
-                Ok((Arc::new(completion), witness))
+                Ok((completion, witness))
             })
             .map_err(|e| e.to_string())?;
         #[cfg(feature = "qualification-timing")]
@@ -1926,7 +2109,10 @@ impl EtdagService {
                 serde_json::json!({"finalized": false}),
             )?;
         }
-        self.ingress.publish_processing_completion(completion)?;
+        match completion {
+            NativeCompletion::Ordinary(value) => self.ingress.publish_processing_completion(Arc::new(value))?,
+            NativeCompletion::Wallet(value) => self.ingress.publish_processing_wallet_completion(Arc::new(value))?,
+        }
         work.items
             .get_mut(envelope)
             .expect("located item")

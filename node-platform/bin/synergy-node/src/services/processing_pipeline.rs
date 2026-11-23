@@ -10,6 +10,7 @@ use crate::services::qualification_timing::{
 
 use super::{
     authority::VerifiedAuthority,
+    protected_accounts::processing_execution::retirement as wallet_retirement,
     protected_admission::verify_wallet_processing_admission_with_authority,
 };
 use serde::{Deserialize, Serialize};
@@ -39,7 +40,7 @@ use synergy_state::{
 fn err(error: impl std::fmt::Debug) -> String {
     format!("native processing: {error:?}")
 }
-fn encoded_len(value: &(impl Serialize + ?Sized)) -> Result<usize, String> {
+pub(super) fn encoded_len(value: &(impl Serialize + ?Sized)) -> Result<usize, String> {
     struct Counter(usize);
     impl std::io::Write for Counter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -167,7 +168,7 @@ impl std::ops::Deref for ProcessingSourceWorld<'_> {
         }
     }
 }
-fn is_pw13_context(context: &ProcessingContext) -> bool {
+pub(super) fn is_pw13_context(context: &ProcessingContext) -> bool {
     use synergy_etdag::admission::{
         PW13_SPONSOR_CANDIDATE_PROFILE_ID, PW13_TRANSFER_CANDIDATE_PROFILE_ID,
     };
@@ -196,6 +197,13 @@ pub(super) struct NativeProcessingContext<'a> {
     _permit: WorldResourcePermit,
 }
 impl<'a> NativeProcessingContext<'a> {
+    pub(super) fn persisted_authorization_timestamp(&self) -> Result<u64, String> {
+        if is_pw13_context(self.context) {
+            return Ok(self.pw13_finalized_source()?.consensus_time);
+        }
+        Ok(self.timestamp)
+    }
+
     pub(super) fn with_lineage(mut self, tip: &'a VerifiedAuthority) -> Result<Self, String> {
         let selected = tip
             .autonomous_authority_at(self.context.authority.target_height)
@@ -245,8 +253,38 @@ impl<'a> NativeProcessingContext<'a> {
         budget: &Arc<WorldResourceBudget>,
         transition: Option<&super::authority::VerifiedTransitionContext>,
     ) -> Result<Self, String> {
+        if context.profile_id != synergy_etdag::PROCESSING_PROFILE_ID {
+            return Err("unsupported live processing profile".into());
+        }
+        Self::verify_owned_source(authority, context, candidate, witness, budget, transition)
+    }
+
+    pub(super) fn verify_owned_wallet_source(
+        authority: &'a VerifiedAuthority,
+        context: &'a ProcessingContext,
+        candidate: BudgetedExecutionCandidate,
+        witness: &[SimplifiedQuorumCertificate; 3],
+        budget: &Arc<WorldResourceBudget>,
+    ) -> Result<Self, String> {
+        if !authority.processing_profile_enabled()
+            || !is_pw13_context(context)
+            || authority.wallet_dispatch_policy().is_none()
+        {
+            return Err("native Wallet source requires a governed protected processing profile".into());
+        }
+        Self::verify_owned_source(authority, context, candidate, witness, budget, None)
+    }
+
+    fn verify_owned_source(
+        authority: &'a VerifiedAuthority,
+        context: &'a ProcessingContext,
+        candidate: BudgetedExecutionCandidate,
+        witness: &[SimplifiedQuorumCertificate; 3],
+        budget: &Arc<WorldResourceBudget>,
+        transition: Option<&super::authority::VerifiedTransitionContext>,
+    ) -> Result<Self, String> {
         let (timestamp, finalized, permit) = {
-            let verified = NativeProcessingContext::verify_in_with_transition(
+            let verified = NativeProcessingContext::verify_bound_source(
                 authority,
                 context,
                 ProcessingSource::Finalized {
@@ -326,6 +364,10 @@ impl<'a> NativeProcessingContext<'a> {
         if !is_pw13_context(self.context) {
             return Err("protected replay requires its original PW13 context".into());
         }
+        self.verified_finalized_source()
+    }
+
+    pub(super) fn verified_finalized_source(&self) -> Result<Pw13FinalizedSource<'_>, String> {
         let record = self
             .finalized
             .as_ref()
@@ -347,6 +389,13 @@ impl<'a> NativeProcessingContext<'a> {
             genesis_hash,
             consensus_time: owner.consensus_timestamp_unix(record.height)?,
         })
+    }
+
+    pub(super) fn retain_finalized_world(&self) -> Result<Arc<BudgetedWorld>, String> {
+        match &self.world {
+            ProcessingSourceWorld::Shared(world) if self.finalized.is_some() => Ok(Arc::clone(world)),
+            _ => Err("native Wallet completion requires a charged, verified finalized World".into()),
+        }
     }
 
     fn verify_bound_source(
@@ -454,8 +503,8 @@ impl<'a> NativeProcessingContext<'a> {
 
 /// This value cannot be deserialized. Every envelope, author, availability vote,
 /// DAG parent and original wallet authorization has passed native verification.
-pub(super) struct NativeProcessingVertex<'a> {
-    vertex: &'a ProcessingVertex,
+pub(super) struct NativeProcessingVertex<'a, A = synergy_etdag::WalletProcessingAdmission> {
+    vertex: &'a ProcessingVertex<A>,
     source: &'a NativeProcessingContext<'a>,
     member: ProcessingGroupMember,
     vertex_id: EtdagDigest,
@@ -505,6 +554,29 @@ impl<'a> NativeProcessingVertex<'a> {
         parents: &[&NativeProcessingMember],
         budget: &Arc<WorldResourceBudget>,
     ) -> Result<Self, String> {
+        Self::verify_authenticated(
+            source, vertex, certificate, parents, budget, |admission| {
+                verify_wallet_processing_admission_with_authority(
+                    admission,
+                    source.context,
+                    &source.world,
+                    source.timestamp,
+                    Some(source.authority),
+                )
+            },
+        )
+    }
+}
+
+impl<'a, A: ProcessingVertexAdmission> NativeProcessingVertex<'a, A> {
+    pub(super) fn verify_authenticated(
+        source: &'a NativeProcessingContext<'a>,
+        vertex: &'a ProcessingVertex<A>,
+        certificate: Option<&AvailabilityCertificate>,
+        parents: &[&NativeProcessingMember],
+        budget: &Arc<WorldResourceBudget>,
+        authenticate: impl FnOnce(&A) -> Result<(), String>,
+    ) -> Result<Self, String> {
         let (member, vertex_id, permit, ()) = verify_processing_vertex(
             ProcessingVertexSource {
                 authority: source.authority,
@@ -515,15 +587,7 @@ impl<'a> NativeProcessingVertex<'a> {
             certificate,
             parents,
             budget,
-            |admission| {
-                verify_wallet_processing_admission_with_authority(
-                    admission,
-                    source.context,
-                    &source.world,
-                    source.timestamp,
-                    Some(source.authority),
-                )
-            },
+            authenticate,
         )?;
         Ok(Self {
             vertex,
@@ -886,13 +950,13 @@ impl<'a> NativeProcessingParent<'a> {
 
     pub(super) fn reveal_permission(
         &self,
-        vertex: &NativeProcessingVertex<'_>,
+        vertex: &NativeProcessingVertex<'_, impl ProcessingVertexAdmission>,
     ) -> Result<ProcessingRevealPermission, String> {
         self.reveal_permission_in(vertex, self.world().budget())
     }
     fn reveal_permission_in(
         &self,
-        vertex: &NativeProcessingVertex<'_>,
+        vertex: &NativeProcessingVertex<'_, impl ProcessingVertexAdmission>,
         budget: &Arc<WorldResourceBudget>,
     ) -> Result<ProcessingRevealPermission, String> {
         self.reveal_member_permission(vertex.source.authority, &vertex.member, budget)
@@ -1025,15 +1089,15 @@ fn ready_record_for_opening(
 
 
 impl AuthenticatedProcessingOpening {
-    fn open_in(
+    pub(super) fn open_in(
         parent: &NativeProcessingParent<'_>,
-        vertex: &NativeProcessingVertex<'_>,
+        vertex: &NativeProcessingVertex<'_, impl ProcessingVertexAdmission>,
         shares: &[ProcessingDecryptShare],
         budget: &Arc<WorldResourceBudget>,
     ) -> Result<Self, String> {
         let authority = parent.authority;
         let permission = parent.reveal_permission_in(vertex, budget)?;
-        let envelope = &vertex.vertex.admission.request.envelope;
+        let envelope = vertex.vertex.admission.envelope();
         Self::open_signed_shares(authority, envelope, &permission, shares, budget)
     }
 
@@ -1160,6 +1224,10 @@ impl AuthenticatedProcessingOpening {
         })
     }
 
+    pub(super) fn retain_plaintext(&mut self) -> Result<(), String> {
+        self.permit.shrink(self.plaintext_capacity + 128 * 1024).map_err(err)
+    }
+
     #[cfg(test)]
     pub(super) fn open_qualification_shares(
         authority: &VerifiedAuthority,
@@ -1201,12 +1269,27 @@ impl NativeProcessingCompletion {
         shares: &[ProcessingDecryptShare],
         budget: &Arc<WorldResourceBudget>,
     ) -> Result<Self, String> {
+        Self::decrypt_ordinary(parent, vertex, &vertex.vertex.admission, shares, budget)
+    }
+
+    pub(super) fn decrypt_ordinary(
+        parent: &NativeProcessingParent<'_>,
+        vertex: &NativeProcessingVertex<'_, impl ProcessingVertexAdmission>,
+        admission: &synergy_etdag::WalletProcessingAdmission,
+        shares: &[ProcessingDecryptShare],
+        budget: &Arc<WorldResourceBudget>,
+    ) -> Result<Self, String> {
         let mut opened = AuthenticatedProcessingOpening::open_in(parent, vertex, shares, budget)?;
         let plaintext = opened.plaintext.as_bytes();
         let transaction: synergy_transaction::SignedTransaction =
             serde_json::from_slice(plaintext).map_err(err)?;
         transaction.validate_structure().map_err(err)?;
-        let request = &vertex.vertex.admission.request;
+        let request = &admission.request;
+        if vertex.vertex.authorization_root().map_err(err)?
+            != synergy_etdag::execution::processing_admission_authorization_root(admission).map_err(err)?
+        {
+            return Err("ordinary Wallet completion changed its authenticated carrier".into());
+        }
         if transaction.unsigned.class != synergy_transaction::TransactionClass::User
             || transaction.unsigned.sender != request.sender_wallet
             || transaction.unsigned.nonce != request.sender_nonce
@@ -1215,7 +1298,7 @@ impl NativeProcessingCompletion {
             || transaction.unsigned.fee_limit.gas_limit != request.gas_class_units
             || transaction.signer_public_key != request.signer_public_key
             || transaction.identity_authorization.as_ref()
-                != Some(&vertex.vertex.admission.identity_authorization)
+                != Some(&admission.identity_authorization)
         {
             return Err(
                 "processing plaintext differs from original native wallet admission".into(),
@@ -1224,7 +1307,7 @@ impl NativeProcessingCompletion {
         let binding = synergy_identity::authorization::resolve_transaction_binding_with_verifier(
             &vertex.source.world.protocol,
             &request.sender_wallet,
-            &vertex.vertex.admission.identity_authorization,
+            &admission.identity_authorization,
             &request.signer_public_key,
             vertex.source.context.authority.chain_id,
             &vertex.source.context.authority.network_id,
@@ -1253,7 +1336,7 @@ impl NativeProcessingCompletion {
         let retained = opened
             .plaintext_capacity
             .checked_add(
-                encoded_len(&vertex.vertex.admission.identity_authorization)?
+                encoded_len(&admission.identity_authorization)?
                     .checked_mul(16)
                     .ok_or("processing completion size overflow")?,
             )
@@ -1265,7 +1348,7 @@ impl NativeProcessingCompletion {
         opened.permit.shrink(retained).map_err(err)?;
         Ok(Self {
             source_binding: binding,
-            identity_authorization: vertex.vertex.admission.identity_authorization.clone(),
+            identity_authorization: admission.identity_authorization.clone(),
             signer_public_key: request.signer_public_key.clone(),
             chain_id: vertex.source.context.authority.chain_id,
             network_id: vertex.source.context.authority.network_id.clone(),
@@ -1282,6 +1365,7 @@ pub(super) struct NativeProcessingPipeline<'a> {
     parent: &'a NativeProcessingParent<'a>,
     vertices: BTreeMap<EtdagDigest, (EtdagDigest, ProcessingGroupMember)>,
     completions: BTreeMap<EtdagDigest, &'a NativeProcessingCompletion>,
+    wallet_journal: Option<&'a super::protected_accounts::processing_execution::native::NativeProtectedJournal<'a>>,
     _permit: WorldResourcePermit,
 }
 impl<'a> NativeProcessingPipeline<'a> {
@@ -1364,8 +1448,22 @@ impl<'a> NativeProcessingPipeline<'a> {
             parent,
             vertices: vertex_map,
             completions: completion_map,
+            wallet_journal: None,
             _permit: permit,
         })
+    }
+
+    pub(super) fn has_completion(&self, id: &EtdagDigest) -> bool {
+        self.completions.contains_key(id)
+    }
+
+    pub(super) fn with_wallet_journal(mut self, journal: &'a super::protected_accounts::processing_execution::native::NativeProtectedJournal<'a>) -> Self {
+        self.wallet_journal = Some(journal);
+        self
+    }
+
+    pub(super) fn wallet_journal(&self) -> Option<&super::protected_accounts::processing_execution::native::NativeProtectedJournal<'a>> {
+        self.wallet_journal
     }
     fn check_parent(&self, world: &WorldState) -> Result<(), String> {
         if !std::ptr::eq(world, self.parent.world().as_ref()) {
@@ -1567,7 +1665,7 @@ pub(crate) struct ProcessingProgressEvidence {
     pub(super) shares: Vec<ProcessingDecryptShare>,
 }
 impl ProcessingProgressEvidence {
-    pub(super) fn from_vertex(vertex: &ProcessingVertex) -> Self {
+    pub(super) fn from_vertex<A: ProcessingVertexAdmission>(vertex: &ProcessingVertex<A>) -> Self {
         Self {
             version: 1,
             vertex_version: vertex.vertex_version,
@@ -1629,6 +1727,37 @@ impl super::processing_store::ProcessingAdmissionAuthenticator
         evidence: &ProcessingProgressEvidence,
         budget: &Arc<WorldResourceBudget>,
     ) -> Result<(), String> {
+        self.verify_authenticated_progress(context, admission, evidence, budget, |admission| {
+            self.verify(context, self.source.timestamp, admission)
+        })
+    }
+    fn verify_completion(
+        &self,
+        context: &ProcessingContext,
+        admission: &synergy_etdag::WalletProcessingAdmission,
+        evidence: &ProcessingCompletionEvidence,
+        budget: &Arc<WorldResourceBudget>,
+    ) -> Result<(), String> {
+        let recovery = NativeProcessingRecovery {
+            source: self.source,
+            reveal_parent: self.reveal_parent.ok_or("completion lacks reveal World")?,
+            dag_parents: self.dag_parents,
+        };
+        super::processing_store::ProcessingAdmissionAuthenticator::verify_completion(
+            &recovery, context, admission, evidence, budget,
+        )
+    }
+}
+
+impl NativeProcessingProgressRecovery<'_> {
+    pub(super) fn verify_authenticated_progress<A: ProcessingVertexAdmission + Clone>(
+        &self,
+        context: &ProcessingContext,
+        admission: &A,
+        evidence: &ProcessingProgressEvidence,
+        budget: &Arc<WorldResourceBudget>,
+        authenticate: impl FnOnce(&A) -> Result<(), String>,
+    ) -> Result<(), String> {
         #[cfg(feature = "qualification-timing")]
         let _diagnostic = diagnostic_span(DiagnosticStage::ProgressVerification);
         if evidence.version != 1
@@ -1647,26 +1776,25 @@ impl super::processing_store::ProcessingAdmissionAuthenticator
             key_id: evidence.key_id.clone(),
             author_signature: evidence.author_signature.clone(),
         };
-        let Some(certificate) = evidence.availability.as_ref() else {
-            NativeProcessingVertex::verify_for_availability(
-                self.source,
-                &vertex,
-                self.dag_parents,
-                budget,
-            )?;
+        let (member, _, _proof, ()) = verify_processing_vertex(
+            ProcessingVertexSource {
+                authority: self.source.authority,
+                context: self.source.context,
+                registry: self.source.authority.protected_ingress_registry()?,
+            },
+            &vertex,
+            evidence.availability.as_ref(),
+            self.dag_parents,
+            budget,
+            authenticate,
+        )?;
+        if evidence.availability.is_none() {
             return if evidence.reveal_validation.is_none() && evidence.shares.is_empty() {
                 Ok(())
             } else {
                 Err("processing reveal lacks native availability".into())
             };
-        };
-        let verified = NativeProcessingVertex::verify(
-            self.source,
-            &vertex,
-            certificate,
-            self.dag_parents,
-            budget,
-        )?;
+        }
         let Some(vc) = evidence.reveal_validation.as_ref() else {
             return if evidence.shares.is_empty() {
                 Ok(())
@@ -1681,8 +1809,8 @@ impl super::processing_store::ProcessingAdmissionAuthenticator
             self.source.reveal_authority(vc.context.height)?,
             budget,
         )?;
-        let permission = parent.reveal_permission_in(&verified, budget)?;
-        let envelope = &admission.request.envelope;
+        let permission = parent.reveal_member_permission(self.source.authority, &member, budget)?;
+        let envelope = admission.envelope();
         let mut validators = BTreeSet::new();
         let mut indices = BTreeSet::new();
         for message in &evidence.shares {
@@ -1729,22 +1857,6 @@ impl super::processing_store::ProcessingAdmissionAuthenticator
             }
         }
         Ok(())
-    }
-    fn verify_completion(
-        &self,
-        context: &ProcessingContext,
-        admission: &synergy_etdag::WalletProcessingAdmission,
-        evidence: &ProcessingCompletionEvidence,
-        budget: &Arc<WorldResourceBudget>,
-    ) -> Result<(), String> {
-        let recovery = NativeProcessingRecovery {
-            source: self.source,
-            reveal_parent: self.reveal_parent.ok_or("completion lacks reveal World")?,
-            dag_parents: self.dag_parents,
-        };
-        super::processing_store::ProcessingAdmissionAuthenticator::verify_completion(
-            &recovery, context, admission, evidence, budget,
-        )
     }
 }
 
@@ -2015,7 +2127,7 @@ impl NativeProcessingRetirement {
         candidate_root: &std::path::Path,
         state_root: &std::path::Path,
         consensus_root: &std::path::Path,
-        mut pending: impl Iterator<Item = &'a super::processing_store::PendingProcessingIdentity>,
+        pending: impl Iterator<Item = &'a super::processing_store::PendingProcessingIdentity>,
         budget: &Arc<WorldResourceBudget>,
     ) -> Result<Option<Self>, String> {
         let candidates = synergy_execution::BudgetedCandidateStore::new_budgeted(
@@ -2029,12 +2141,17 @@ impl NativeProcessingRetirement {
         if candidate.block_id != block_id {
             return Err("finalized processing subject mismatch".into());
         }
-        if !pending.any(|identity| {
-            candidate.transactions.iter().any(|transaction| {
+        let mut matches = false;
+        for identity in pending {
+            matches = candidate.transactions.iter().any(|transaction| {
                 transaction.unsigned.sender == identity.sender_wallet
                     && transaction.unsigned.nonce == identity.sender_nonce
-            })
-        }) {
+            }) || wallet_retirement::matches_pending(&candidate.state, height, identity)?;
+            if matches {
+                break;
+            }
+        }
+        if !matches {
             return Ok(None);
         }
         drop(candidate);
@@ -2138,10 +2255,10 @@ impl NativeProcessingRetirement {
             ),
             budget,
         )?;
-        authority
+        let candidate_authority = authority
             .autonomous_authority_at(candidate.height)
-            .ok_or("processing retirement candidate lacks its authenticated authority")?
-            .verify_processing_candidate(candidate)?;
+            .ok_or("processing retirement candidate lacks its authenticated authority")?;
+        candidate_authority.verify_processing_candidate(candidate)?;
         if let Some(selected) = authority.autonomous_authority_at(parent.height) {
             selected.verify_processing_candidate(parent)?;
         } else {
@@ -2233,22 +2350,32 @@ impl NativeProcessingRetirement {
             .grow(material.selection.item_indices.len() * 4096)
             .map_err(err)?;
         let mut consumed = BTreeMap::new();
-        for (position, index) in material.selection.item_indices.iter().enumerate() {
+        let mut transactions = candidate.transactions.iter();
+        for index in &material.selection.item_indices {
             let record = registry
                 .records()
                 .get(*index as usize)
                 .ok_or("processing retirement selection index missing")?;
-            let transaction = candidate
-                .transactions
-                .get(position)
-                .ok_or("processing retirement transaction missing")?;
-            if transaction.unsigned.sender != record.sender_wallet
-                || transaction.unsigned.nonce != record.sender_nonce
-            {
-                return Err(
-                    "processing retirement transaction differs from selected replay identity"
-                        .into(),
-                );
+            let wallet = wallet_retirement::verify_selected(
+                &parent.state,
+                &candidate.state,
+                candidate.height,
+                record,
+            )?;
+            if wallet {
+                candidate_authority.native_wallet_release()?;
+            } else {
+                let transaction = transactions
+                    .next()
+                    .ok_or("processing retirement transaction or Wallet receipt missing")?;
+                if transaction.unsigned.sender != record.sender_wallet
+                    || transaction.unsigned.nonce != record.sender_nonce
+                {
+                    return Err(
+                        "processing retirement transaction differs from selected replay identity"
+                            .into(),
+                    );
+                }
             }
             consumed.insert(
                 record.item.envelope_id.clone(),
@@ -2259,6 +2386,9 @@ impl NativeProcessingRetirement {
                     sender_nonce: record.sender_nonce,
                 },
             );
+        }
+        if transactions.next().is_some() {
+            return Err("processing retirement has an unselected ordinary transaction".into());
         }
         Ok(Self {
             height: candidate.height,

@@ -29,6 +29,9 @@ const MAX_SIGNATURE_CACHE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SIGNATURE_CACHE_ENTRY_BYTES: usize = 64 * 1024;
 use synergy_genesis::authority::{ProtectedEpochPolicy, SignedAuthorityBinding};
 
+#[path = "authority_managed_wallet_release.rs"]
+pub(super) mod managed_wallet;
+
 pub(super) fn processing_finality_root(
     record: &FinalizedBlockRecord,
 ) -> Result<synergy_etdag::EtdagDigest, String> {
@@ -138,6 +141,7 @@ pub(crate) fn qualification_authority_for_network(
         timeout_predecessor: None,
         autonomous_closure: None,
         genesis_autonomous: false,
+        managed_wallet_release: None,
         anchor_parent: SimplifiedFinalityParent::Genesis {
             genesis_hash: "c".repeat(64),
             block_id: "qualification-genesis".into(),
@@ -202,6 +206,7 @@ pub struct VerifiedAuthority {
     autonomous_closure: Option<Arc<VerifiedAutonomousClosure>>,
     // Derived only from authenticated signed Genesis, never deserialized authority/config.
     genesis_autonomous: bool,
+    managed_wallet_release: Option<Arc<managed_wallet::ManagedWalletRelease>>,
     verifier: PqvmVerifier,
     wallet_verifier: PqvmVerifier,
     identity_verifier: Option<synergy_aegis::ApqeIdentityVerifier>,
@@ -408,6 +413,7 @@ impl Clone for VerifiedAuthority {
             timeout_predecessor: self.timeout_predecessor.clone(),
             autonomous_closure: self.autonomous_closure.clone(),
             genesis_autonomous: self.genesis_autonomous,
+            managed_wallet_release: self.managed_wallet_release.clone(),
             verifier: self.verifier.clone(),
             wallet_verifier: self.wallet_verifier.clone(),
             identity_verifier: self.identity_verifier.clone(),
@@ -459,6 +465,7 @@ impl VerifiedAuthority {
             cluster_map_root: "f".repeat(64),
             assigned_cluster_id: 0,
             assigned_cluster_membership_root: self.epoch.active_validator_set_root.clone(),
+            wallet_dispatch: None,
         }));
         authority
     }
@@ -528,6 +535,34 @@ impl VerifiedAuthority {
                 && policy.cutoff_relationship
                     == synergy_genesis::authority::ProtectedCutoffRelationship::ProcessingGroupsV1
         })
+    }
+
+    /// Read the exact signed Wallet dispatch policy. A launcher or request
+    /// cannot supply this component from a mutable runtime setting.
+    pub(super) fn wallet_dispatch_policy(
+        &self,
+    ) -> Option<&synergy_genesis::authority::ProtectedWalletDispatchPolicy> {
+        self.protected.as_ref()?.wallet_dispatch.as_ref()
+    }
+
+    pub(super) fn matches_wallet_dispatch_release(
+        &self,
+        release: &synergy_genesis::authority::VerifiedWalletDispatchRelease,
+    ) -> Result<(), String> {
+        let policy = release.policy();
+        let activation = self.autonomous_authority_at(policy.activation_finalized_height)
+            .filter(|authority| authority.epoch.epoch_start_height == policy.activation_finalized_height)
+            .ok_or("Wallet release lacks its authenticated activation epoch")?;
+        let predecessor = activation.timeout_predecessor.as_deref()
+            .ok_or("Wallet release activation has no authenticated predecessor")?;
+        if activation.autonomous_closure.is_none()
+            || activation.wallet_dispatch_policy() != Some(policy)
+            || predecessor.epoch.root().map_err(|error| error.to_string())?
+                != release.predecessor_context_root()
+        {
+            return Err("Wallet release differs from the certified authority transition".into());
+        }
+        Ok(())
     }
 
     pub fn protected_ingress_registry(
@@ -812,7 +847,13 @@ fn read_bounded(path: &std::path::Path, maximum: u64, label: &str) -> Result<Vec
 }
 
 pub fn load(configuration: &NodeConfiguration) -> Result<Option<Arc<VerifiedAuthority>>, String> {
-    let origin = load_signed(configuration)?;
+    let mut origin = load_signed(configuration)?;
+    if let Some(pins) = &configuration.consensus.managed_wallet_dispatch_release {
+        let verified = origin.as_mut().filter(|authority| authority.genesis_autonomous)
+            .ok_or("managed Wallet release requires current signed autonomous Genesis")?;
+        let release = managed_wallet::ManagedWalletRelease::load(configuration, verified, pins)?;
+        Arc::make_mut(verified).managed_wallet_release = Some(Arc::new(release));
+    }
     if origin.as_ref().is_some_and(|authority| authority.genesis_autonomous)
         && configuration.consensus.autonomous_epoch_activation.is_some()
     {
@@ -1003,6 +1044,7 @@ fn verify_binding_with_explicit_key(
         timeout_predecessor: None,
         autonomous_closure: None,
         genesis_autonomous: false,
+        managed_wallet_release: None,
         anchor_parent: binding.payload.anchor_parent,
         verifier,
         wallet_verifier: super::apqe_provider::verifier(

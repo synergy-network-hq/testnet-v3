@@ -3,8 +3,9 @@
 #![cfg(test)]
 use super::super::processing_pipeline::{
     processing_namespace, qualify_processing_vertex, AuthenticatedProcessingOpening,
-    NativeProcessingContext, NativeProcessingRecovery, ProcessingCompletionEvidence,
-    ProcessingSource, RevealedProcessingPayload,
+    NativeProcessingContext, NativeProcessingParent, NativeProcessingPipeline,
+    NativeProcessingRecovery, ProcessingCompletionEvidence, ProcessingProgressEvidence, ProcessingSource,
+    RevealedProcessingPayload,
 };
 use super::{
     processing_admission::{CandidateAdmission, CandidateAuthorization},
@@ -13,7 +14,8 @@ use super::{
         execute_protected_candidate, execute_protected_journal_candidate,
         replay_protected_candidate, replay_protected_journal_candidate, CandidateActionOutcome,
         CandidateDispatch, CandidateSlot, PreparedProtectedAction, ProtectedAdmissionRecovery,
-        ProtectedCandidateContext, ProtectedIntake, ProtectedJournalRecovery, ProtectedRecoveryTerms,
+        native::NativeProtectedJournal, ProtectedCandidateContext, ProtectedIntake,
+        ProtectedJournalRecovery, ProtectedRecoveryTerms,
     },
     tests::Scratch,
     FinalizedSnapshot, Position, WorldState,
@@ -51,8 +53,9 @@ use synergy_etdag::{
 };
 use synergy_execution::{
     decode_budgeted_candidate, processing_group_state, processing_group_transition,
-    processing_member_claim, processing_member_claim_optional, BudgetedExecutionCandidate,
-    ParentProcessingRegistry, ProcessingReadinessVerifier, ProcessingReadyRecord,
+    processing_member_claim, processing_member_claim_optional, BlockExecutionScheduler,
+    BudgetedExecutionCandidate, NativeTransferDispatcher, ParentProcessingRegistry,
+    ProcessingCandidateContext, ProcessingReadinessVerifier, ProcessingReadyRecord,
 };
 use synergy_posy::{
     block_vote_signing_bytes, BlockVote, CertifiedCandidateSubject, ConsensusObjectContext,
@@ -542,6 +545,16 @@ impl CandidateOrderFixture<'_> {
                 .clone(),
         };
         let candidate = proof_candidate(world, namespace, height, &parent)?;
+        let validation = self.certify_candidate_validation(&candidate, parent)?;
+        Ok((candidate, validation, latest))
+    }
+
+    fn certify_candidate_validation(
+        &self,
+        candidate: &BudgetedExecutionCandidate,
+        parent: SimplifiedFinalityParent,
+    ) -> Result<ProposalValidationCertificate, String> {
+        let height = candidate.height;
         let context =
             ConsensusObjectContext::for_height(&self.authority.epoch, height, 0).map_err(err)?;
         let subject = CertifiedCandidateSubject::new(
@@ -571,12 +584,11 @@ impl CandidateOrderFixture<'_> {
                 Ok(echo)
             })
             .collect::<Result<Vec<_>, String>>()?;
-        let validation = ProposalValidationCertificate {
+        Ok(ProposalValidationCertificate {
             context,
             candidate: subject,
             echoes,
-        };
-        Ok((candidate, validation, latest))
+        })
     }
 
     pub(super) fn native_snapshot<'a>(
@@ -958,6 +970,7 @@ fn qualify_retained_replay(
             .map_err(err)
     };
     let request_bytes = serde_json::to_vec(&retained.vertex.admission).map_err(err)?;
+    qualify_runtime_wallet_carrier(authority, context, &retained.vertex, &request_bytes)?;
     let mut pending = open()?;
     let identity = match &retained.vertex.admission.authorization {
         CandidateAuthorization::SponsoredEnrollment(_) => {
@@ -971,6 +984,26 @@ fn qualify_retained_replay(
             pending.admit(context, snapshot.consensus_time, &request_bytes, &recovery).map_err(err)?
         }
     };
+    let mut progress = ProcessingProgressEvidence::from_vertex(&retained.vertex);
+    let mut substituted_vote = progress.clone();
+    substituted_vote.author_signature[0] ^= 1;
+    assert!(matches!(
+        pending.update_progress(&identity.envelope_id, &substituted_vote, &recovery),
+        Err(ProcessingStoreError::Verification(_))
+    ));
+    pending.update_progress(&identity.envelope_id, &progress, &recovery).map_err(err)?;
+    progress.availability = Some(retained.availability.clone());
+    pending.update_progress(&identity.envelope_id, &progress, &recovery).map_err(err)?;
+    progress.reveal_validation = Some(retained.validation.clone());
+    pending.update_progress(&identity.envelope_id, &progress, &recovery).map_err(err)?;
+    drop(pending);
+    let mut pending = open()?;
+    assert_eq!(
+        pending.with_progress(&identity.envelope_id, &recovery, |_, reopened, _| {
+            Ok(reopened.cloned())
+        }).map_err(err)?,
+        Some(progress),
+    );
     let mut changed = evidence.clone();
     changed.reveal_validation.echoes[0].signature[0] ^= 1;
     assert!(matches!(
@@ -1013,6 +1046,30 @@ fn qualify_retained_replay(
         execute_protected_journal_candidate(parent, publication, records, &pending, &recovery)?;
     assert!(outcomes.is_empty());
     assert_eq!(published.state.accounts, parent.accounts);
+    let shared = SharedWalletReplay {
+        authority,
+        finalized: &latest_native,
+        registry: terms.source.registry,
+        recovery: &recovery,
+        namespace,
+        parameters: &parameters,
+        fee_schedule: terms.recovery.fee_schedule,
+    };
+    let canonical_publication = shared.build(&retained.parent, &retained.validation, &pending, records)?;
+    assert_eq!(canonical_publication.state, published.state);
+    assert!(canonical_publication.transactions.is_empty());
+    assert!(canonical_publication.receipts.is_empty());
+    let previous_qc = certify_fixture_qc(
+        &retained.parent,
+        &retained.validation.candidate.parent,
+        authority,
+        fixture.engine,
+        fixture.signers,
+    )?;
+    let canonical_validation = fixture.certify_candidate_validation(
+        &canonical_publication,
+        next_fixture_parent(&previous_qc)?,
+    )?;
     let publication_bytes = serde_json::to_vec(&published).map_err(err)?;
     let mut substituted_record = evidence.record.clone();
     substituted_record.item.payload_root =
@@ -1047,6 +1104,44 @@ fn qualify_retained_replay(
     };
     let (settled, outcomes) =
         execute_protected_journal_candidate(&published.state, execution, &[], &pending, &recovery)?;
+    let canonical_execution =
+        shared.build(&canonical_publication, &canonical_validation, &pending, &[])?;
+    assert_eq!(canonical_execution.state, settled.state);
+    assert!(canonical_execution.transactions.is_empty());
+    assert!(canonical_execution.receipts.is_empty());
+    let standard_archive = serde_json::to_vec(&canonical_execution).map_err(err)?;
+    let decoded = decode_budgeted_candidate(&standard_archive, parent.budget()).map_err(err)?;
+    assert_eq!(decoded, canonical_execution);
+    use super::processing_execution::retirement;
+    let height = canonical_execution.height;
+    assert!(retirement::matches_pending(&decoded.state, height, &identity)?);
+    assert!(!retirement::matches_pending(&decoded.state, height + 1, &identity)?);
+    let mut substituted = identity.clone();
+    substituted.context_root = EtdagDigest::from_domain_bytes("TEST", b"another policy scope");
+    assert!(!retirement::matches_pending(&decoded.state, height, &substituted)?);
+    assert!(retirement::verify_selected(
+        &canonical_publication.state, &decoded.state, height, &evidence.record,
+    )?);
+    let receipt_key = retirement::selected_receipt_key(&decoded.state, &identity.envelope_id)
+        .ok_or("selected Wallet outcome has no receipt key")?;
+    let mut altered_world = BudgetedWorld::try_clone_world(&decoded.state, parent.budget()).map_err(err)?;
+    let original_receipt = altered_world.protocol[&receipt_key].clone();
+    let mut altered_receipt = original_receipt.clone();
+    altered_receipt[0] ^= 1;
+    altered_world.try_apply(&StateDiff {
+        protocol_changes: vec![synergy_state::ProtocolChange {
+            key: receipt_key,
+            expected_value: Some(original_receipt),
+            value: Some(altered_receipt),
+        }],
+        ..StateDiff::default()
+    }).map_err(err)?;
+    assert!(retirement::verify_selected(
+        &canonical_publication.state, &altered_world, height, &evidence.record,
+    ).is_err());
+    assert!(retirement::verify_selected(
+        &decoded.state, &decoded.state, height, &evidence.record,
+    ).is_err());
     let [outcome] =
         <[_; 1]>::try_from(outcomes).map_err(|_| "expected one native proof settlement")?;
     let original = serde_json::to_vec(&settled).map_err(err)?;
@@ -1063,6 +1158,7 @@ fn qualify_retained_replay(
     let empty =
         PendingProcessingStore::open(&missing.0, namespace.clone(), limits, &budget, &recovery)
             .map_err(err)?;
+    assert!(shared.build(&canonical_publication, &canonical_validation, &empty, &[]).is_err());
     assert!(replay_protected_journal_candidate(
         &original,
         &published.state,
@@ -1074,6 +1170,9 @@ fn qualify_retained_replay(
     .is_err());
     drop(pending);
     let reopened = open()?;
+    let replayed_canonical =
+        shared.build(&canonical_publication, &canonical_validation, &reopened, &[])?;
+    assert_eq!(replayed_canonical, canonical_execution);
     let replayed = replay_protected_journal_candidate(
         &original,
         &published.state,
@@ -1097,6 +1196,105 @@ fn qualify_retained_replay(
         )?;
     }
     Ok((replayed.state, outcome))
+}
+
+fn qualify_runtime_wallet_carrier(
+    authority: &crate::services::authority::VerifiedAuthority,
+    context: &ProcessingContext,
+    vertex: &ProcessingVertex<CandidateAdmission>,
+    original: &[u8],
+) -> Result<(), String> {
+    use crate::services::{
+        etdag_wallet_admission::{vertex_message, RuntimeProcessingAdmission},
+        processing_store::ProcessingAdmissionRecord,
+        protected_admission::AdmissionHandle,
+    };
+    use synergy_etdag::EtdagNetworkMessage;
+
+    let runtime = RuntimeProcessingAdmission::decode_original(
+        std::str::from_utf8(original).map_err(err)?,
+        context,
+    ).map_err(err)?;
+    assert!(!runtime.allows_legacy_kem_recovery());
+    assert_eq!(serde_json::to_vec(&runtime).map_err(err)?, original);
+    assert!(RuntimeProcessingAdmission::decode_original(
+        std::str::from_utf8(original).map_err(err)?,
+        &ProcessingContext { profile_id: synergy_etdag::PROCESSING_PROFILE_ID.into(), ..context.clone() },
+    ).is_err());
+    let live = vertex.clone().map_admission(|_| runtime);
+    assert_eq!(live.signing_bytes().map_err(err)?, vertex.signing_bytes().map_err(err)?);
+    assert_eq!(live.authorization_root().map_err(err)?, vertex.authorization_root().map_err(err)?);
+    let encoded = serde_json::to_vec(&vertex_message(live)).map_err(err)?;
+    let decoded = serde_json::from_slice::<EtdagNetworkMessage>(&encoded).map_err(err)?;
+    let EtdagNetworkMessage::ProcessingProtectedWalletVertexV1(decoded) = decoded else {
+        return Err("protected native carrier was published on the ordinary vertex route".into());
+    };
+    assert_eq!(&decoded, vertex);
+    let queue = AdmissionHandle::default();
+    assert!(queue.enqueue_protected_wallet_processing(authority, decoded.admission).is_err());
+    assert!(queue.take_processing()?.is_none());
+    Ok(())
+}
+
+struct SharedWalletReplay<'a> {
+    authority: &'a crate::services::authority::VerifiedAuthority,
+    finalized: &'a NativeProcessingContext<'a>,
+    registry: &'a super::CandidateProtectedAccounts<'a>,
+    recovery: &'a ProtectedJournalRecovery<'a>,
+    namespace: &'a EtdagDigest,
+    parameters: &'a EtdagParameters,
+    fee_schedule: &'a synergy_execution::FeeSchedule,
+}
+
+impl SharedWalletReplay<'_> {
+    fn build(
+        &self,
+        previous: &BudgetedExecutionCandidate,
+        certificate: &ProposalValidationCertificate,
+        pending: &PendingProcessingStore<CandidateAdmission>,
+        publications: &[ProcessingReadyRecord],
+    ) -> Result<BudgetedExecutionCandidate, String> {
+        use crate::services::execution::{processing::execute_native_processing, TransactionPqvmVerifier};
+
+        let authority = self.authority;
+        let finalized = self.finalized.verified_finalized_source()?;
+        let chain = synergy_transaction::NetworkBinding {
+            chain_id: authority.epoch.chain_id,
+            network_id: authority.epoch.network_id.clone(),
+        };
+        let scheduler = BlockExecutionScheduler::new(
+            NativeTransferDispatcher,
+            TransactionPqvmVerifier::from_authority(authority, chain.chain_id),
+            self.fee_schedule.clone(),
+        )
+        .map_err(err)?;
+        let parent = NativeProcessingParent::verify(previous, certificate, authority)?;
+        let journal = NativeProtectedJournal::qualification(
+            authority, self.finalized, self.registry, pending, self.recovery,
+        )?;
+        let pipeline = NativeProcessingPipeline::from_members(&parent, &[], &[])?
+            .with_wallet_journal(&journal);
+        let height = previous.height + 1;
+        execute_native_processing(
+            &scheduler,
+            authority,
+            ProcessingCandidateContext {
+                ordered_group: None,
+                height,
+                parent_block_id: &previous.block_id,
+                network: &chain,
+                consensus_timestamp_unix: authority.consensus_timestamp_unix(height)?,
+                namespace_root: self.namespace,
+                maximum_gas: self.parameters.max_protected_gas,
+                maximum_bytes: self.parameters.max_protected_bytes,
+                finalized_authorization_state: finalized.world,
+            },
+            &parent,
+            publications,
+            &pipeline,
+        )
+        .map_err(err)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

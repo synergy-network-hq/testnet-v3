@@ -31,6 +31,7 @@ const MAX_PROCESSING_PLAINTEXT_BYTES: usize = 4 * 1024 * 1024;
 
 /// Every field is supplied by the sole native PoSy/execution owner, never by a
 /// wallet's requested inclusion height or an unauthenticated worker message.
+#[derive(Clone, Copy)]
 pub struct ProcessingCandidateContext<'a> {
     pub ordered_group: Option<&'a ProcessingOrderGroup>,
     pub height: u64,
@@ -59,6 +60,20 @@ pub trait ProcessingPayloadProvider {
         &'a self,
         record: &ProcessingReadyRecord,
     ) -> Result<&'a [u8], ProcessingPayloadError>;
+}
+
+/// The native validator supplies this dispatcher only with an authenticated
+/// protected Wallet policy. Classification is by a verified original carrier,
+/// never by interpreting application plaintext as an ordinary signed transfer.
+pub trait ProcessingNativeWalletActions {
+    fn owns(&self, record: &ProcessingReadyRecord) -> bool;
+
+    fn execute(
+        &self,
+        record: &ProcessingReadyRecord,
+        parent: &BudgetedWorld,
+        candidate: &mut BudgetedWorld,
+    ) -> Result<(), BlockExecutionError>;
 }
 
 #[derive(Debug)]
@@ -369,14 +384,31 @@ impl<D: TransactionExecutor, V: AegisTransactionVerifier> BlockExecutionSchedule
         readiness: &impl ProcessingReadinessVerifier,
         payloads: &impl ProcessingPayloadProvider,
     ) -> Result<BudgetedExecutionCandidate, ProcessingCandidateError> {
+        self.execute_processing_epoch_close_with_wallet_actions(
+            close, context, parent, publications, readiness, payloads, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_processing_epoch_close_with_wallet_actions(
+        &self,
+        close: ProcessingEpochClose<'_>,
+        context: ProcessingCandidateContext<'_>,
+        parent: &BudgetedWorld,
+        publications: &[ProcessingReadyRecord],
+        readiness: &impl ProcessingReadinessVerifier,
+        payloads: &impl ProcessingPayloadProvider,
+        wallet: Option<&dyn ProcessingNativeWalletActions>,
+    ) -> Result<BudgetedExecutionCandidate, ProcessingCandidateError> {
         let height = context.height;
         if height == 0 || height.checked_add(2) != Some(close.epoch_end_height) {
             return Err(ProcessingCandidateError::Invalid(
                 "epoch-close subject must be included exactly at E-2".into(),
             ));
         }
-        let mut candidate =
-            self.execute_processing_candidate(context, parent, publications, readiness, payloads)?;
+        let mut candidate = self.execute_processing_candidate_with_wallet_actions(
+            context, parent, publications, readiness, payloads, None, wallet,
+        )?;
         let synergy_etdag::execution::CandidateProtectedMaterial::Processing(material) =
             candidate.protected_material
         else {
@@ -438,6 +470,25 @@ impl<D: TransactionExecutor, V: AegisTransactionVerifier> BlockExecutionSchedule
         payloads: &impl ProcessingPayloadProvider,
         epoch_transition: Option<&crate::ProcessingEpochTransition>,
     ) -> Result<BudgetedExecutionCandidate, ProcessingCandidateError> {
+        self.execute_processing_candidate_with_wallet_actions(
+            context, parent, publications, readiness, payloads, epoch_transition, None,
+        )
+    }
+
+    /// Both ordinary and protected carriers share one sorted parent selection,
+    /// nonce progression and World overlay. The normal candidate archive still
+    /// commits the resulting World and existing ordinary transaction receipts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_processing_candidate_with_wallet_actions(
+        &self,
+        context: ProcessingCandidateContext<'_>,
+        parent: &BudgetedWorld,
+        publications: &[ProcessingReadyRecord],
+        readiness: &impl ProcessingReadinessVerifier,
+        payloads: &impl ProcessingPayloadProvider,
+        epoch_transition: Option<&crate::ProcessingEpochTransition>,
+        wallet: Option<&dyn ProcessingNativeWalletActions>,
+    ) -> Result<BudgetedExecutionCandidate, ProcessingCandidateError> {
         if let Some(transition) = epoch_transition {
             transition.verify_prepared_parent(parent.as_ref())?;
         }
@@ -468,7 +519,12 @@ impl<D: TransactionExecutor, V: AegisTransactionVerifier> BlockExecutionSchedule
                 .ok_or(WorldResourceError::ArithmeticOverflow)?,
         )?;
         let mut plaintexts = Vec::with_capacity(count);
+        let mut protected = Vec::new();
         for record in selected.records() {
+            if let Some(dispatch) = wallet.filter(|dispatch| dispatch.owns(record)) {
+                protected.push((plaintexts.len(), dispatch, record));
+                continue;
+            }
             let plaintext = payloads.plaintext(record)?;
             if plaintext.is_empty()
                 || plaintext.len() > MAX_PROCESSING_PLAINTEXT_BYTES
@@ -478,11 +534,11 @@ impl<D: TransactionExecutor, V: AegisTransactionVerifier> BlockExecutionSchedule
                     "processing payload length differs from committed ready record".into(),
                 ));
             }
-            plaintexts.push(plaintext);
+            plaintexts.push((record, plaintext));
         }
         // Native graphs, receipts and material are reserved before decoding or
         // cloning. The guard moves into the returned candidate, not a queue.
-        let mut metadata = reserve_execution_metadata(plaintexts.iter().copied(), budget)?;
+        let mut metadata = reserve_execution_metadata(plaintexts.iter().map(|(_, bytes)| *bytes), budget)?;
         metadata.grow(
             count
                 .checked_mul(32)
@@ -491,7 +547,7 @@ impl<D: TransactionExecutor, V: AegisTransactionVerifier> BlockExecutionSchedule
         )?;
         let mut transactions = Vec::with_capacity(count);
         let mut expected_nonces = BTreeMap::new();
-        for (record, plaintext) in selected.records().zip(plaintexts) {
+        for (record, plaintext) in plaintexts {
             verify_processing_payload(record, plaintext, budget)?;
             let transaction: SignedTransaction =
                 serde_json::from_slice(plaintext).map_err(|e| {
@@ -510,6 +566,9 @@ impl<D: TransactionExecutor, V: AegisTransactionVerifier> BlockExecutionSchedule
                     "processing plaintext differs from signed ready metadata".into(),
                 ));
             }
+            transactions.push(transaction);
+        }
+        for record in selected.records() {
             let nonce = expected_nonces
                 .entry(record.sender_wallet.as_str())
                 .or_insert_with(|| {
@@ -518,27 +577,27 @@ impl<D: TransactionExecutor, V: AegisTransactionVerifier> BlockExecutionSchedule
                         .get(&record.sender_wallet)
                         .map_or(0, |a| a.nonce)
                 });
-            if record.sender_nonce > *nonce {
+            let retires_without_nonce = wallet.is_some_and(|dispatch| dispatch.owns(record))
+                && readiness.retires_without_nonce(record);
+            if record.sender_nonce > *nonce && !retires_without_nonce {
                 return Err(ProcessingCandidateError::Invalid(
                     "future nonce escaped canonical processing selection".into(),
                 ));
             }
-            if record.sender_nonce == *nonce {
+            if record.sender_nonce == *nonce && !retires_without_nonce {
                 *nonce = nonce.checked_add(1).ok_or_else(|| {
                     ProcessingCandidateError::Invalid("processing nonce overflow".into())
                 })?;
             }
-            transactions.push(transaction);
         }
         let body = BlockBody { transactions };
-        let outcome = self.execute_async_at_budgeted(
-            &body,
-            context.network,
-            context.height,
-            context.consensus_timestamp_unix,
-            parent,
-            context.finalized_authorization_state,
-        )?;
+        let mut protected = protected.into_iter().peekable();
+        let outcome = self.execute_budgeted_processing_with_native_actions(&body, &context, parent, |index, working| {
+            while let Some((_, dispatch, record)) = protected.next_if(|(before, _, _)| *before == index) {
+                dispatch.execute(record, parent, working)?;
+            }
+            Ok(())
+        })?;
         for (sender, expected) in expected_nonces {
             if outcome.state.accounts.get(sender).map_or(0, |a| a.nonce) != expected {
                 return Err(ProcessingCandidateError::Invalid(

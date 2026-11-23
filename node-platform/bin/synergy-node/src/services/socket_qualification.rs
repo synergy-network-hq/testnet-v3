@@ -2879,7 +2879,11 @@ fn processing_async_native_order_reveal_ready_and_execution_use_existing_posy_pr
         queued
     );
     let taken = admission_handle.take_processing().unwrap().unwrap();
-    assert_eq!(taken.admission, admission);
+    assert!(matches!(
+        &taken.admission,
+        super::etdag_wallet_admission::RuntimeProcessingAdmission::Ordinary(original)
+            if original == &admission
+    ));
     assert!(taken.owned_byte_charge() >= queued_bytes as usize);
     admission_handle.return_processing_pending(taken).unwrap();
     assert_eq!(
@@ -10435,6 +10439,7 @@ fn prepare_socket_fixture_profile_mode_endpoints(
         cluster_map_root: "f".repeat(64),
         assigned_cluster_id: 0,
         assigned_cluster_membership_root: preliminary.active_validator_set_root,
+        wallet_dispatch: None,
     };
     let mut payload = AuthorityPayload {
         version: 1,

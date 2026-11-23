@@ -1,7 +1,7 @@
 //! Offline candidate for resource authorization before ETDAG reveals PW13
 //! content. Production dispatch requires the approved profile and fee policy.
 use super::{
-    debug, display, AccountIdentifier, CandidateProtectedAccounts, CanonicalEnrollment,
+    debug, display, AccountIdentifier, CandidateProtectedAccounts,
     CanonicalNativeIntent, ChainId, FinalizedSnapshot, Mldsa87, PqProvider, Primitives, PublicKey,
     SignOptions, Signature,
 };
@@ -100,9 +100,7 @@ impl CandidateProtectedAccounts<'_> {
         let account = AccountIdentifier::from_bytes(resources.account);
         let sender = account.to_native(&Primitives).map_err(display)?;
         let record = self.read_policy(finalized.world, account)?;
-        let enrollment =
-            CanonicalEnrollment::decode(&record.enrollment, self.wire).map_err(display)?;
-        let policy = self.canonical_policy(&record, &enrollment)?;
+        let policy = self.current_policy(&record)?;
         if resources.genesis != self.network.genesis
             || resources.policy_epoch != record.policy_epoch
             || resources.policy_hash != record.policy_hash
@@ -125,7 +123,7 @@ impl CandidateProtectedAccounts<'_> {
         )?;
 
         // Exact D then P. The request carries no replacement verification keys.
-        for (registered, proof) in policy.policy().roles[..2].iter().zip(&admission.proofs) {
+        for (registered, proof) in policy.terms().roles[..2].iter().zip(&admission.proofs) {
             if proof.participant_id != registered.participant_id
                 || proof.key_version != registered.key_version
             {

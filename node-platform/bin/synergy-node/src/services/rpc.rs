@@ -1012,20 +1012,49 @@ impl RuntimeDispatcher {
         serde_json::to_value(service)
             .map_err(|_| RpcError::unavailable("runtime service observation is not serializable"))
     }
+
+    fn native_wallet_authority(
+        &self,
+    ) -> Result<(&str, Arc<super::authority::VerifiedAuthority>), RpcError> {
+        let selected = self.network_identity.as_ref().ok_or_else(|| {
+            RpcError::unavailable("managed protected Wallet dispatch is unavailable")
+        })?;
+        let authority = selected.live_authority.as_ref()
+            .and_then(|owner| owner.read().ok().and_then(|authority| authority.clone()))
+            .ok_or_else(|| RpcError::unavailable("managed protected Wallet authority is unavailable"))?;
+        let release = authority.native_wallet_release().map_err(RpcError::unavailable)?;
+        if release.verified.policy().genesis_hash != selected.genesis_hash {
+            return Err(RpcError::unavailable("managed protected Wallet authority differs from selected Genesis"));
+        }
+        Ok((&selected.genesis_hash, authority))
+    }
 }
 
 impl RpcDispatcher for RuntimeDispatcher {
     fn dispatch(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         match method {
             PROCESSING_CONTEXT_V1 => {
-                let mut result = self
+                let handle = self
                     .admission
                     .as_ref()
                     .ok_or_else(|| {
                         RpcError::unavailable("asynchronous processing admission is not enabled")
-                    })?
-                    .processing_context()
-                    .map_err(RpcError::unavailable)?;
+                    })?;
+                if let Some(profile) = params.get("profile_id") {
+                    let profile = profile.as_str().ok_or_else(|| RpcError::invalid_params("invalid processing profile"))?;
+                    if profile != synergy_etdag::PROCESSING_PROFILE_ID {
+                        if !matches!(profile,
+                            synergy_etdag::admission::PW13_SPONSOR_CANDIDATE_PROFILE_ID
+                            | synergy_etdag::admission::PW13_TRANSFER_CANDIDATE_PROFILE_ID)
+                        {
+                            return Err(RpcError::invalid_params("unknown processing profile"));
+                        }
+                        let (genesis, authority) = self.native_wallet_authority()?;
+                        return handle.wallet_processing_context(&authority, genesis, profile)
+                            .map_err(RpcError::unavailable);
+                    }
+                }
+                let mut result = handle.processing_context().map_err(RpcError::unavailable)?;
                 // Report the same fee schedule used by native execution. This
                 // observation never changes the selected network identity.
                 result["fee_policy"] = serde_json::json!({
@@ -1035,14 +1064,18 @@ impl RpcDispatcher for RuntimeDispatcher {
                 });
                 Ok(result)
             }
-            PROCESSING_TRANSACTION_SUBMIT_V1 => self
-                .admission
-                .as_ref()
-                .ok_or_else(|| {
+            PROCESSING_TRANSACTION_SUBMIT_V1 => {
+                let admission = self.admission.as_ref().ok_or_else(|| {
                     RpcError::unavailable("asynchronous processing admission is not enabled")
-                })?
-                .enqueue_processing(decode_params(params)?)
-                .map_err(RpcError::invalid_params),
+                })?;
+                if params.get("authorization").is_none() && params.get("envelope").is_none() {
+                    return admission.enqueue_processing(decode_params(params)?)
+                        .map_err(RpcError::invalid_params);
+                }
+                let (_, authority) = self.native_wallet_authority()?;
+                admission.enqueue_protected_wallet_processing(&authority, decode_params(params)?)
+                    .map_err(RpcError::invalid_params)
+            }
             PROTECTED_ADMISSION_CONTEXT_V2 => self
                 .admission
                 .as_ref()

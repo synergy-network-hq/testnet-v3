@@ -1,10 +1,9 @@
 //! Protected admission exercises the canonical durable processing store.
 //! The engineering format is local to this candidate qualification.
-use serde::{Deserialize, Serialize};
-use synergy_etdag::{
-    admission::{Pw13SponsoredAdmission, Pw13TransferAdmission},
-    execution::ProcessingVertexAdmission,
-    CertifiedEnvelopeRef, EtdagError, ProcessingContext, ProcessingEnvelope,
+use synergy_etdag::{EtdagError, ProcessingContext};
+pub(in crate::services) use synergy_etdag::admission::{
+    ProtectedWalletAdmission as CandidateAdmission,
+    ProtectedWalletAuthorization as CandidateAuthorization,
 };
 #[cfg(test)]
 use synergy_etdag::EtdagDigest;
@@ -25,61 +24,13 @@ use crate::services::processing_store::{
     ProcessingStoreLimits, PROCESSING_INTAKE_HEADROOM_BYTES,
 };
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(
-    tag = "kind",
-    content = "authorization",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-pub(super) enum CandidateAuthorization {
-    Transfer(Pw13TransferAdmission),
-    SponsoredEnrollment(Pw13SponsoredAdmission),
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct CandidateAdmission {
-    pub(super) envelope: ProcessingEnvelope,
-    pub(super) authorization: CandidateAuthorization,
-}
-
-impl CandidateAdmission {
-    pub(super) fn gas_limit(&self) -> u64 {
-        match &self.authorization {
-            CandidateAuthorization::Transfer(proof) => proof.resources.gas_limit,
-            CandidateAuthorization::SponsoredEnrollment(proof) => proof.resources.gas_limit,
-        }
-    }
-}
-
-impl ProcessingVertexAdmission for CandidateAdmission {
-    fn envelope(&self) -> &ProcessingEnvelope {
-        &self.envelope
-    }
-
-    fn validate_vertex_resources(
-        &self,
-        reference: &CertifiedEnvelopeRef,
-    ) -> Result<(), EtdagError> {
-        self.envelope.validate()?;
-        if self.gas_limit() != reference.gas_class_units {
-            return Err(EtdagError::InvalidExecutionInput);
-        }
-        Ok(())
-    }
-}
-
 impl ProcessingAdmissionRecord for CandidateAdmission {
+    fn decode_original(value: &str, _: &ProcessingContext) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(value)
+    }
+
     fn validate_context(&self, context: &ProcessingContext) -> Result<(), EtdagError> {
-        match &self.authorization {
-            CandidateAuthorization::Transfer(proof) => {
-                proof.validate_context(&self.envelope, context)
-            }
-            CandidateAuthorization::SponsoredEnrollment(proof) => {
-                proof.validate_context(&self.envelope, context)
-            }
-        }
+        self.validate_context(context)
     }
 
     fn identity(&self) -> PendingProcessingIdentity {

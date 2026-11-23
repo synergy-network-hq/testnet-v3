@@ -43,6 +43,21 @@ pub struct ProcessingVertex<A = WalletProcessingAdmission> {
     pub key_id: String,
     pub author_signature: Vec<u8>,
 }
+
+impl<A> ProcessingVertex<A> {
+    pub fn map_admission<B>(self, map: impl FnOnce(A) -> B) -> ProcessingVertex<B> {
+        ProcessingVertex {
+            vertex_version: self.vertex_version,
+            admission: map(self.admission),
+            envelope_ref: self.envelope_ref,
+            parents: self.parents,
+            author_id: self.author_id,
+            key_id: self.key_id,
+            author_signature: self.author_signature,
+        }
+    }
+}
+
 pub fn processing_admission_authorization_root(
     admission: &impl ProcessingVertexAdmission,
 ) -> Result<EtdagDigest, EtdagError> {

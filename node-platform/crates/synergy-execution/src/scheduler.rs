@@ -374,6 +374,35 @@ where
         make_overlay: impl FnOnce() -> Result<O, BlockExecutionError>,
         async_mode: bool,
     ) -> Result<BlockExecutionOutcome<O::State>, BlockExecutionError> {
+        self.execute_interleaved(body, network, block_height, admission, make_overlay, async_mode, |_, _| Ok(()))
+    }
+
+    pub(crate) fn execute_budgeted_processing_with_native_actions(
+        &self,
+        body: &BlockBody,
+        context: &crate::ProcessingCandidateContext<'_>,
+        parent: &BudgetedWorld,
+        before: impl FnMut(usize, &mut BudgetedWorld) -> Result<(), BlockExecutionError>,
+    ) -> Result<crate::BudgetedBlockExecutionOutcome, BlockExecutionError> {
+        self.execute_interleaved(
+            body, context.network, context.height,
+            Some((context.consensus_timestamp_unix, context.finalized_authorization_state)),
+            || parent.try_clone().map_err(|error| BlockExecutionError::StateRoot(resource_state_error(error))),
+            true, before,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_interleaved<O: ExecutionOverlay>(
+        &self,
+        body: &BlockBody,
+        network: &NetworkBinding,
+        block_height: u64,
+        admission: Option<(u64, &WorldState)>,
+        make_overlay: impl FnOnce() -> Result<O, BlockExecutionError>,
+        async_mode: bool,
+        mut before: impl FnMut(usize, &mut O) -> Result<(), BlockExecutionError>,
+    ) -> Result<BlockExecutionOutcome<O::State>, BlockExecutionError> {
         if block_height == 0 {
             return Err(BlockExecutionError::InvalidHeight);
         }
@@ -392,6 +421,7 @@ where
         let mut total_fees_nwei = 0_u128;
 
         for (transaction_index, transaction) in body.transactions.iter().enumerate() {
+            before(transaction_index, &mut overlay)?;
             transaction.validate_structure().map_err(|source| {
                 BlockExecutionError::Transaction {
                     transaction_index,
@@ -613,6 +643,7 @@ where
             receipts.push(receipt);
         }
 
+        before(body.transactions.len(), &mut overlay)?;
         let state_root = state_root(overlay.staged()).map_err(BlockExecutionError::StateRoot)?;
         Ok(BlockExecutionOutcome {
             block_height,

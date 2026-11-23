@@ -4031,6 +4031,9 @@ impl EtdagService {
                 }
             }
             EtdagNetworkMessage::ProcessingVertexV1(vertex) => self.processing_vertex(vertex)?,
+            EtdagNetworkMessage::ProcessingProtectedWalletVertexV1(vertex) => {
+                self.processing_protected_wallet_vertex(vertex)?
+            }
             EtdagNetworkMessage::ProcessingAvailabilityVoteV1(vote) => {
                 if vote.validator_id != message.sender_id || vote.key_id != message.key_id {
                     return Err(
@@ -4388,6 +4391,7 @@ impl EtdagMessageSink for EtdagService {
                 | EtdagNetworkMessage::DecryptShare(_)
                 | EtdagNetworkMessage::CutoffMarker(_)
                 | EtdagNetworkMessage::ProcessingVertexV1(_)
+                | EtdagNetworkMessage::ProcessingProtectedWalletVertexV1(_)
                 | EtdagNetworkMessage::ProcessingAvailabilityVoteV1(_)
                 | EtdagNetworkMessage::ProcessingAvailabilityCertificateV1(_)
                 | EtdagNetworkMessage::ProcessingDecryptShareV1(_)

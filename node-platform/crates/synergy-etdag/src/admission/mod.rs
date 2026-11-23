@@ -10,6 +10,7 @@ mod sponsored_enrollment;
 mod target_height;
 mod validator;
 mod verifier;
+mod wallet_protected;
 
 pub use certificate::{AdmissionCertificate, AdmissionVote};
 pub use context::{TargetAdmissionContext, TargetAdmissionContextV3};
@@ -41,3 +42,4 @@ pub use validator::AdmissionValidator;
 pub use verifier::{
     verify_admission_request, verify_processing_admission_request, AdmissionSignatureVerifier,
 };
+pub use wallet_protected::{ProtectedWalletAdmission, ProtectedWalletAuthorization};

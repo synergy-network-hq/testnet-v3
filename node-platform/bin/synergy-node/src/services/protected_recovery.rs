@@ -104,13 +104,11 @@ impl CandidateProtectedAccounts<'_> {
             return Err("recovery continuity reference absent".into());
         };
         let record = self.read_policy(world, body.account)?;
-        let enrollment =
-            CanonicalEnrollment::decode(&record.enrollment, self.wire).map_err(display)?;
-        let current = self.canonical_policy(&record, &enrollment)?;
+        let current = self.current_policy(&record)?;
         let proposed = CanonicalPublicPolicy::decode(new_policy, self.wire).map_err(display)?;
         let replacement = if role == 0 { Role::D } else { Role::P };
         let checked = check_policy_replacement(
-            &current,
+            current.with_recovery()?,
             &proposed,
             PolicyReplacementRequest {
                 mode: ReplacementMode::Recovery,
@@ -256,12 +254,10 @@ impl CandidateProtectedAccounts<'_> {
             1 => Role::P,
             _ => return Err("invalid recorded recovery replacement role".into()),
         };
-        let enrollment =
-            CanonicalEnrollment::decode(&record.enrollment, self.wire).map_err(display)?;
-        let current = self.canonical_policy(&record, &enrollment)?;
+        let current = self.current_policy(&record)?;
         let proposed = CanonicalPublicPolicy::decode(&change.policy, self.wire).map_err(display)?;
         let _checked = check_policy_replacement(
-            &current,
+            current.with_recovery()?,
             &proposed,
             PolicyReplacementRequest {
                 mode: ReplacementMode::Recovery,

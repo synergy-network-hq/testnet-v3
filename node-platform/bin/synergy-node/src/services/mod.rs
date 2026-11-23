@@ -9,6 +9,7 @@ pub(crate) mod checkpoint;
 pub(crate) mod delivery_stage;
 mod cut_recovery;
 pub mod etdag;
+mod etdag_wallet_admission;
 #[cfg(test)]
 mod etdag_qualification;
 pub mod execution;

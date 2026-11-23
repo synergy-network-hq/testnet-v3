@@ -72,6 +72,7 @@ pub fn verify_binding_with_verifier(
             != Some(policy.epoch_start_timestamp_ms)
         || genesis.etdag.parameters != policy.parameters
         || genesis.etdag.cryptographic_profile_root != policy.cryptographic_profile_root
+        || policy.wallet_dispatch.is_some()
         || genesis.etdag.ingress_kem_registry_root
             != policy
                 .ingress_kem_registry

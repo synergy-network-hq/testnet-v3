@@ -81,7 +81,7 @@ fn canonical_digest(digest: &str) -> Result<(), String> {
     }
     Ok(())
 }
-fn receipt_key(payer: &str, nonce_before: u64) -> String {
+pub(super) fn receipt_key(payer: &str, nonce_before: u64) -> String {
     format!("{SPONSOR_PREFIX}{payer}/{nonce_before}")
 }
 fn validate(record: &SponsorSettlement) -> Result<(), String> {

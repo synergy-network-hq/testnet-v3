@@ -13,30 +13,48 @@ use crate::services::processing_pipeline::{
 use crate::services::processing_proposals::{
     ProcessingProposalError, ProcessingProposalInputs, ProcessingProposalStore,
 };
+use crate::services::protected_accounts::processing_execution::native::{
+    with_live_wallet_dispatch, NativeProtectedDispatch,
+};
 use std::sync::Mutex;
 use synergy_etdag::execution::ProcessingOrderGroup;
 use synergy_execution::{
     ProcessingCandidateContext, ProcessingCandidateError, ProcessingEpochClose,
 };
 
-fn execute_native_processing(
-    scheduler: &BlockExecutionScheduler<CanonicalExecutionDispatcher, TransactionPqvmVerifier>,
+pub(in crate::services) fn execute_native_processing<D, V>(
+    scheduler: &BlockExecutionScheduler<D, V>,
     authority: &VerifiedAuthority,
     context: ProcessingCandidateContext<'_>,
     parent: &NativeProcessingParent<'_>,
     publications: &[synergy_execution::ProcessingReadyRecord],
     pipeline: &NativeProcessingPipeline<'_>,
-) -> Result<ExecutionCandidate, ProcessingCandidateError> {
+) -> Result<ExecutionCandidate, ProcessingCandidateError>
+where
+    D: synergy_execution::TransactionExecutor,
+    V: synergy_transaction::AegisTransactionVerifier,
+{
     let subject = authority
         .epoch_close_subject_at(context.height)
         .map_err(ProcessingCandidateError::Invalid)?;
+    if subject.is_some() && parent.epoch_transition().is_some() {
+        return Err(ProcessingCandidateError::Invalid(
+            "closing subject cannot apply an opening processing transition".into(),
+        ));
+    }
+    if let Some(journal) = pipeline.wallet_journal() {
+        let wallet = journal.prepare(authority, pipeline, &context, parent.world())?;
+        return execute_wallet_processing(
+            scheduler, authority, context, parent, publications, pipeline, &wallet, subject,
+        );
+    }
+    if authority.wallet_dispatch_policy().is_some() {
+        return Err(ProcessingCandidateError::Invalid(
+            "signed Wallet action policy requires an activated native journal".into(),
+        ));
+    }
     match subject {
         Some(subject_root) => {
-            if parent.epoch_transition().is_some() {
-                return Err(ProcessingCandidateError::Invalid(
-                    "closing subject cannot apply an opening processing transition".into(),
-                ));
-            }
             scheduler.execute_processing_epoch_close(
                 ProcessingEpochClose {
                     epoch_end_height: authority.epoch.epoch_end_height,
@@ -56,6 +74,32 @@ fn execute_native_processing(
             pipeline,
             pipeline,
             parent.epoch_transition(),
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_wallet_processing<D, V>(
+    scheduler: &BlockExecutionScheduler<D, V>,
+    authority: &VerifiedAuthority,
+    context: ProcessingCandidateContext<'_>,
+    parent: &NativeProcessingParent<'_>,
+    publications: &[synergy_execution::ProcessingReadyRecord],
+    pipeline: &NativeProcessingPipeline<'_>,
+    wallet: &NativeProtectedDispatch<'_>,
+    subject: Option<String>,
+) -> Result<ExecutionCandidate, ProcessingCandidateError>
+where
+    D: synergy_execution::TransactionExecutor,
+    V: synergy_transaction::AegisTransactionVerifier,
+{
+    match subject {
+        Some(subject_root) => scheduler.execute_processing_epoch_close_with_wallet_actions(
+            ProcessingEpochClose { epoch_end_height: authority.epoch.epoch_end_height, subject_root: &subject_root },
+            context, parent.world(), publications, wallet, pipeline, Some(wallet),
+        ),
+        None => scheduler.execute_processing_candidate_with_wallet_actions(
+            context, parent.world(), publications, wallet, pipeline, parent.epoch_transition(), Some(wallet),
         ),
     }
 }
@@ -240,6 +284,121 @@ mod slot_regression {
 }
 
 impl ExecutionService {
+    #[allow(clippy::too_many_arguments)]
+    fn execute_live_processing(
+        &self,
+        authority: &VerifiedAuthority,
+        context: ProcessingCandidateContext<'_>,
+        parent: &NativeProcessingParent<'_>,
+        mut publications: Vec<synergy_execution::ProcessingReadyRecord>,
+        pipeline: &NativeProcessingPipeline<'_>,
+        snapshot: &ProcessingSnapshot,
+        proposing: bool,
+    ) -> Result<Option<(ExecutionCandidate, Vec<synergy_execution::ProcessingReadyRecord>)>, ProcessingCandidateError> {
+        use super::super::processing_pipeline::NativeProcessingContext;
+        use ProcessingCandidateError::{Invalid, Payload};
+        use synergy_execution::{ParentProcessingRegistry, ProcessingPayloadError};
+
+        let Some(policy) = authority.wallet_dispatch_policy() else {
+            return execute_native_processing(&self.scheduler, authority, context, parent, &publications, pipeline)
+                .map(|candidate| Some((candidate, publications)));
+        };
+        let registry = ParentProcessingRegistry::read(parent.world().as_ref(), context.namespace_root, self.ingress.world_budget())?;
+        // A previously published Wallet READY record must wait for its exact
+        // durable original after process restart. Missing material is retryable.
+        for record in registry.records() {
+            if !pipeline.has_completion(&record.item.envelope_id)
+                && !snapshot.wallet_completions.iter().any(|original| original.record.item.envelope_id == record.item.envelope_id)
+            {
+                return Err(Payload(ProcessingPayloadError::Unavailable(record.item.envelope_id.clone())));
+            }
+        }
+        // The certified proposal parent H-1 fixes the exact three-QC
+        // finalized source at H-3, independently of each worker's observed tip.
+        let finalized_height = context.height.saturating_sub(3);
+        if finalized_height < policy.activation_finalized_height {
+            // Settlement cannot be present before the first certified
+            // activation height. Ordinary processing still advances PoSy.
+            return self.execute_before_wallet_finality(authority, context, parent, &publications, pipeline)
+                .map(|candidate| Some((candidate, publications)));
+        }
+        let Some((record, witness)) = self.ingress.finalized_record_with_witness(finalized_height).map_err(Invalid)? else {
+            return Ok(None);
+        };
+        if witness[2].context.height.checked_add(1) != Some(context.height)
+            || witness[2].block_id != context.parent_block_id
+        {
+            return Err(Invalid("Wallet finality witness does not end at the certified proposal parent".into()));
+        }
+        let Some(candidate) = self.candidate_store.get_budgeted(finalized_height).map_err(|error| Invalid(error.to_string()))? else {
+            return Ok(None);
+        };
+        if candidate.block_id != record.block_id {
+            return Err(Invalid("Wallet dispatch finalized World mismatches native history".into()));
+        }
+        let target = authority.protected_parameters().map_err(Invalid)?.protected_target_height(record.height)
+            .map_err(|error| Invalid(format!("{error:?}")))?;
+        let Some(source_authority) = self.authority.autonomous_authority_at(target) else {
+            return Ok(None);
+        };
+        let source_context = synergy_etdag::ProcessingContext {
+            context_version: 1,
+            profile_id: synergy_etdag::PROCESSING_PROFILE_ID.into(),
+            authority: source_authority.protected_target(Some(&record), target).map_err(Invalid)?.0,
+        };
+        let source = NativeProcessingContext::verify_owned_finalized(
+            source_authority, &source_context, candidate, &witness, self.ingress.world_budget(),
+        ).map_err(Invalid)?.with_lineage(&self.authority).map_err(Invalid)?;
+        let context = ProcessingCandidateContext {
+            finalized_authorization_state: source.verified_finalized_source().map_err(Invalid)?.world,
+            ..context
+        };
+        let subject = authority.epoch_close_subject_at(context.height).map_err(Invalid)?;
+        if subject.is_some() && parent.epoch_transition().is_some() {
+            return Err(Invalid("closing subject cannot apply an opening processing transition".into()));
+        }
+        with_live_wallet_dispatch(
+            authority, pipeline, &context, parent.world(), &source, &snapshot.wallet_completions,
+            |dispatch| {
+                if proposing {
+                    for original in &snapshot.wallet_completions {
+                        let record = &original.record;
+                        if registry.records().iter().any(|ready| ready.item.envelope_id == record.item.envelope_id)
+                            || synergy_execution::verify_processing_record_assignment(parent.world(), context.namespace_root, record).is_err()
+                            || !dispatch.can_publish(record).map_err(Invalid)?
+                        {
+                            continue;
+                        }
+                        publications.push(record.clone());
+                    }
+                }
+                execute_wallet_processing(
+                    &self.scheduler, authority, context, parent, &publications, pipeline, dispatch, subject,
+                ).map(|candidate| Some((candidate, publications)))
+            },
+        )
+    }
+
+    fn execute_before_wallet_finality(
+        &self,
+        authority: &VerifiedAuthority,
+        context: ProcessingCandidateContext<'_>,
+        parent: &NativeProcessingParent<'_>,
+        publications: &[synergy_execution::ProcessingReadyRecord],
+        pipeline: &NativeProcessingPipeline<'_>,
+    ) -> Result<ExecutionCandidate, ProcessingCandidateError> {
+        let subject = authority.epoch_close_subject_at(context.height).map_err(ProcessingCandidateError::Invalid)?;
+        match subject {
+            Some(subject_root) if parent.epoch_transition().is_none() => self.scheduler.execute_processing_epoch_close(
+                ProcessingEpochClose { epoch_end_height: authority.epoch.epoch_end_height, subject_root: &subject_root },
+                context, parent.world(), publications, pipeline, pipeline,
+            ),
+            Some(_) => Err(ProcessingCandidateError::Invalid("closing subject cannot apply an opening processing transition".into())),
+            None => self.scheduler.execute_processing_candidate_with_epoch_transition(
+                context, parent.world(), publications, pipeline, pipeline, parent.epoch_transition(),
+            ),
+        }
+    }
     pub(super) fn processing_authority_at(
         &self,
         height: u64,
@@ -358,6 +517,7 @@ impl ExecutionService {
                 .completions
                 .iter()
                 .any(|available| available.record == *record)
+                && !snapshot.wallet_completions.iter().any(|available| available.record == *record)
         }) {
             return Ok(None); // Missing verified material is retryable, never an empty substitution.
         }
@@ -383,8 +543,7 @@ impl ExecutionService {
             return Ok(None);
         };
         let limits = authority.protected_parameters()?;
-        let result = execute_native_processing(
-            &self.scheduler,
+        let result = self.execute_live_processing(
             authority,
             ProcessingCandidateContext {
                 ordered_group: inputs.ordered_group.as_ref(),
@@ -399,11 +558,14 @@ impl ExecutionService {
                 finalized_authorization_state: &self.finalized_state,
             },
             &parent,
-            &inputs.publications,
+            inputs.publications.clone(),
             &pipeline,
+            snapshot,
+            false,
         );
         let candidate = match result {
-            Ok(c) => c,
+            Ok(Some((candidate, _))) => candidate,
+            Ok(None) => return Ok(None),
             Err(e) if retryable(&e) => return Ok(None),
             Err(e) => return Err(e.to_string()),
         };
@@ -940,8 +1102,7 @@ impl ExecutionService {
                 );
             }
             let group = (!group.members.is_empty() || open).then_some(group);
-            let candidate = match execute_native_processing(
-                &self.scheduler,
+            let (candidate, publications) = match self.execute_live_processing(
                 self.authority.as_ref(),
                 ProcessingCandidateContext {
                     ordered_group: group.as_ref(),
@@ -957,10 +1118,13 @@ impl ExecutionService {
                     finalized_authorization_state: &self.finalized_state,
                 },
                 &parent,
-                &publications,
+                publications,
                 &pipeline,
+                snapshot,
+                true,
             ) {
-                Ok(c) => Arc::new(c),
+                Ok(Some((candidate, publications))) => (Arc::new(candidate), publications),
+                Ok(None) => return Ok(()),
                 Err(e) if retryable(&e) => return Ok(()),
                 Err(e) => return Err(e.to_string()),
             };

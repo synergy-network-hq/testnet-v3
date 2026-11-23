@@ -141,6 +141,7 @@ pub struct CandidateCommitment {
     pub protected_execution_root: String,
     pub state_root: String,
     pub transaction_count: usize,
+    pub processing_selection_count: usize,
 }
 
 #[derive(Deserialize)]
@@ -613,6 +614,12 @@ impl<W: CandidateWorldStorage> CandidateStore<W> {
                     protected_execution_root: metadata.protected_execution_root,
                     state_root: metadata.state_root,
                     transaction_count: metadata.transactions.len(),
+                    processing_selection_count: match metadata.protected_material {
+                        synergy_etdag::execution::CandidateProtectedMaterial::Processing(material) => {
+                            material.selection.item_indices.len()
+                        }
+                        _ => 0,
+                    },
                 }))
             })
             .map_err(storage_error)?

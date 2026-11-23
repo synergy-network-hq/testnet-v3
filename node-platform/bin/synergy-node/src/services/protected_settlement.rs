@@ -91,7 +91,7 @@ pub(super) fn owns_key(key: &str) -> bool {
     key.starts_with(INTENT_PREFIX)
 }
 
-fn receipt_key(account: AccountIdentifier, intent: &[u8; 32]) -> String {
+pub(super) fn receipt_key(account: AccountIdentifier, intent: &[u8; 32]) -> String {
     format!(
         "{INTENT_PREFIX}{}/{}",
         account.lowercase_hex(),

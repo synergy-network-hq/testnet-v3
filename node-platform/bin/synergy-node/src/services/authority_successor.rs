@@ -9,7 +9,12 @@ use crate::services::{
     processing_proposals::{epoch_store_path, ProcessingProposalStore},
 };
 use std::path::PathBuf;
+use synergy_genesis::authority::VerifiedWalletDispatchRelease;
 use synergy_posy::persistence::{FinalityStore, VerifiedQuorumCertificateStore};
+
+#[cfg(test)]
+#[path = "authority_wallet_dispatch_tests.rs"]
+mod wallet_dispatch_tests;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -195,6 +200,17 @@ pub(crate) fn verify_next_derived_bytes(
     previous: Arc<VerifiedAuthority>,
     bytes: &[u8],
 ) -> Result<Arc<VerifiedAuthority>, String> {
+    verify_next_derived_with_wallet_release(previous, bytes, None)
+}
+
+/// The same proof verifier accepts an independently authenticated release
+/// capability when the platform's managed release owner supplies it. Proof
+/// bytes alone and ordinary startup cannot nominate the release.
+pub(super) fn verify_next_derived_with_wallet_release(
+    previous: Arc<VerifiedAuthority>,
+    bytes: &[u8],
+    release: Option<&VerifiedWalletDispatchRelease>,
+) -> Result<Arc<VerifiedAuthority>, String> {
     if !previous.autonomous_epochs_enabled() || bytes.is_empty() || bytes.len() > 4 * 1024 * 1024 {
         return Err(
             "derived proof lacks an autonomous predecessor or exceeds its size bound".into(),
@@ -202,7 +218,7 @@ pub(crate) fn verify_next_derived_bytes(
     }
     let proof =
         serde_json::from_slice(bytes).map_err(|e| format!("decode successor proof: {e}"))?;
-    verify_native_successor(previous, proof)
+    verify_native_successor(previous, proof, release)
 }
 
 fn verify_autonomous_bootstrap(
@@ -263,7 +279,19 @@ fn verify_autonomous_bootstrap(
 fn verify_native_successor(
     previous: Arc<VerifiedAuthority>,
     proof: DerivedEpochProof,
+    wallet_release: Option<&VerifiedWalletDispatchRelease>,
 ) -> Result<Arc<VerifiedAuthority>, String> {
+    let wallet_release = wallet_release.or_else(|| previous.pending_wallet_release(&previous.epoch));
+    if let Some(release) = wallet_release {
+        let SimplifiedFinalityParent::Genesis { genesis_hash, .. } =
+            &previous.autonomous_processing_origin().anchor_parent
+        else {
+            return Err("Wallet release requires the authenticated original Genesis".into());
+        };
+        if release.policy().genesis_hash != *genesis_hash {
+            return Err("Wallet release does not select the successor's original Genesis".into());
+        }
+    }
     let policy = previous
         .protected
         .as_ref()
@@ -274,6 +302,7 @@ fn verify_native_successor(
         policy,
         previous.as_ref(),
         &proof,
+        wallet_release,
     )?;
     let subject_root = proof
         .authorization
@@ -313,8 +342,9 @@ pub(crate) fn persist_native_successor(
         .protected
         .as_ref()
         .ok_or("active processing policy missing")?;
-    let (authorization, _) =
-        unchanged_successor_subject(&current.epoch, &current.registry, policy)?;
+    let (authorization, _) = governed_successor_subject(
+        &current.epoch, &current.registry, policy, current.pending_wallet_release(&current.epoch),
+    )?;
     let epoch = authorization.next_epoch;
     let proof = DerivedEpochProof {
         authorization,
@@ -324,13 +354,13 @@ pub(crate) fn persist_native_successor(
         next_validators: current.registry.active().cloned().collect(),
     };
     let bytes = serde_json::to_vec(&proof).map_err(|e| e.to_string())?;
-    let expected = verify_native_successor(Arc::clone(current), proof)?;
+    let expected = verify_native_successor(Arc::clone(current), proof, None)?;
     let store = AtomicStore::new(root, 4 * 1024 * 1024).map_err(|e| e.to_string())?;
     let name = format!("epoch-{epoch:020}.json");
     if store.exists(&name).map_err(|e| e.to_string())? {
         let stored = store.read_bounded(&name).map_err(|e| e.to_string())?;
         let decoded = serde_json::from_slice(&stored).map_err(|e| e.to_string())?;
-        let existing = verify_native_successor(Arc::clone(current), decoded)?;
+        let existing = verify_native_successor(Arc::clone(current), decoded, None)?;
         if existing.epoch != expected.epoch || existing.anchor_parent != expected.anchor_parent {
             return Err("durable autonomous successor conflicts with the current closure".into());
         }
@@ -371,6 +401,7 @@ impl<'a> DerivedEpochVerifier<'a> {
             &self.policy,
             self,
             proof,
+            self.origin.pending_wallet_release(&self.context),
         )?;
         self.context = verified.context;
         self.registry = verified.registry;
@@ -432,6 +463,7 @@ fn verify_derived_epoch_in_scope(
     policy: &ProtectedEpochPolicy,
     verifier: &impl ConsensusSignatureVerifier,
     proof: &DerivedEpochProof,
+    wallet_release: Option<&VerifiedWalletDispatchRelease>,
 ) -> Result<VerifiedDerivedEpoch, String> {
     if proof
         .next_validators
@@ -445,10 +477,8 @@ fn verify_derived_epoch_in_scope(
         proof.next_validators.clone(),
     )
     .map_err(|e| e.to_string())?;
-    // Until this consumer can reconstruct an on-chain membership or policy
-    // change, qualify only the unchanged governed set. A proof is not an
-    // independent source of validator eligibility or consensus parameters.
-    let (expected, next_policy) = unchanged_successor_subject(previous, previous_registry, policy)?;
+    let (expected, next_policy) =
+        governed_successor_subject(previous, previous_registry, policy, wallet_release)?;
     if proof.authorization != expected {
         return Err("epoch subject differs from independently derived rollover policy".into());
     }
@@ -550,17 +580,25 @@ fn verify(
 
 const CANARY_EPOCH_BLOCKS: u64 = 1_000;
 
+fn governed_successor_subject(
+    previous: &SimplifiedEpochContext,
+    previous_registry: &FrozenValidatorRegistry,
+    policy: &ProtectedEpochPolicy,
+    wallet_release: Option<&VerifiedWalletDispatchRelease>,
+) -> Result<(EpochTransitionAuthorization, ProtectedEpochPolicy), String> {
+    match wallet_release {
+        Some(release) => release.prepare_successor(previous, policy, previous_registry),
+        None => unchanged_successor_subject(previous, previous_registry, policy),
+    }
+}
+
 fn unchanged_successor_subject(
     previous: &SimplifiedEpochContext,
     previous_registry: &FrozenValidatorRegistry,
     policy: &ProtectedEpochPolicy,
 ) -> Result<(EpochTransitionAuthorization, ProtectedEpochPolicy), String> {
     let next_epoch = previous.epoch.checked_add(1).ok_or("epoch overflow")?;
-    let next_policy = successor_time_policy(
-        policy,
-        previous.epoch_start_height,
-        previous.epoch_end_height,
-    )?;
+    let next_policy = policy.successor_clock(previous.epoch_start_height, previous.epoch_end_height)?;
     let registry =
         FrozenValidatorRegistry::new(next_epoch, previous_registry.active().cloned().collect())
             .map_err(|e| e.to_string())?;
@@ -584,7 +622,9 @@ impl VerifiedAuthority {
             .protected
             .as_ref()
             .ok_or("active processing policy missing")?;
-        let (subject, _) = unchanged_successor_subject(&self.epoch, &self.registry, policy)?;
+        let (subject, _) = governed_successor_subject(
+            &self.epoch, &self.registry, policy, self.pending_wallet_release(&self.epoch),
+        )?;
         subject
             .subject_root_v2()
             .map(Some)
@@ -603,19 +643,6 @@ impl VerifiedAuthority {
             Some(root) => candidate.validate_epoch_close(candidate.height, &root),
         }
     }
-}
-
-fn successor_time_policy(
-    policy: &ProtectedEpochPolicy,
-    first: u64,
-    last: u64,
-) -> Result<ProtectedEpochPolicy, String> {
-    let mut next = policy.clone();
-    next.epoch_start_timestamp_ms = policy
-        .timestamp_for_height_ms(first, last, last)?
-        .checked_add(policy.target_block_time_ms)
-        .ok_or("successor epoch clock overflow")?;
-    Ok(next)
 }
 
 // A spending client may use a retained immutable processing snapshot. Select its
@@ -757,8 +784,7 @@ fn successor_payload(
         .protected
         .as_ref()
         .ok_or("predecessor lacks ETDAG policy")?;
-    let next_policy =
-        successor_time_policy(policy, payload.epoch_start_height, payload.epoch_end_height)?;
+    let next_policy = policy.successor_clock(payload.epoch_start_height, payload.epoch_end_height)?;
     payload.consensus_parameter_root = next_policy.commitment()?;
     payload.protected = Some(next_policy);
     payload.epoch = epoch;
@@ -1719,6 +1745,7 @@ pub(super) fn qualify_offline_successor(
     let active = verify_native_successor(
         Arc::new(previous.clone()),
         serde_json::from_slice(&serde_json::to_vec(&derived).unwrap()).unwrap(),
+        None,
     )
     .unwrap();
     crate::services::rpc::proofs::qualify_first_epoch_timeout(
@@ -1905,6 +1932,7 @@ pub(super) fn qualify_fresh_genesis_autonomous(
     origin: Arc<VerifiedAuthority>,
     keys: &[synergy_address_engine::apqe::crypto_engine::EncodedKeyPair],
     engine: &Arc<Mutex<synergy_address_engine::apqe::crypto_engine::CryptoEngine>>,
+    origin_signer: &impl synergy_aegis::AegisSigner,
 ) {
     assert!(origin.genesis_autonomous);
     assert!(origin.autonomous_closure.is_none()); // E1 has no fabricated prior QC.
@@ -1930,6 +1958,7 @@ pub(super) fn qualify_fresh_genesis_autonomous(
     let binding: SignedAuthorityBinding = serde_json::from_slice(origin.binding_bytes()).unwrap();
     // Match the fixture's independently generated key array, not BTree iteration order.
     let validators = binding.payload.validators.iter().map(|v| v.record.clone()).collect::<Vec<_>>();
+    wallet_dispatch_tests::qualify_signed_release(config, &origin, &validators, keys, engine, origin_signer);
     let mut current = origin.clone();
     for expected_epoch in [2, 3] {
         let (subject, _) = unchanged_successor_subject(&current.epoch, &current.registry, current.protected.as_ref().unwrap()).unwrap();

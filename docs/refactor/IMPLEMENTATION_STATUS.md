@@ -1,3 +1,28 @@
+## Protected Wallet source integration — 2026-11-23
+
+**Implemented and callers migrated in source.** The native ETDAG owner verifies
+and persists typed D/P Wallet submissions and supplies the original evidence
+to the validator's proposal and replay scheduler. The same scheduler orders
+ordinary transactions and protected actions. Exact finalized receipts and
+durable World and three-QC evidence govern retirement. The existing processing
+context RPC accepts an explicit protected profile only when the managed release
+is active and its exact finalized source is durably pinned.
+
+**Verified offline.** The isolated two-party cb-mpc and APQE enrollment proof
+was registered only after its exact finalized commit. A World reopen preserved
+the original point, balance, nonce and two-role policy. Direct D/P/R replay and
+legacy wire fixtures passed. The native startup test verified a scoped release
+signature, per-platform artifact qualification and a certified epoch transition.
+The five-peer ordinary native APQE test passed encrypted transaction finality
+and restart in 133.60 seconds.
+
+**Production selection remains open.** The current public Canary trust package
+authenticates its existing Genesis and authority. The managed release requires
+the original Genesis root to delegate the exact signed Wallet release, the
+authorized release issuer to qualify the installed native verifier, and a
+certified epoch closure to select the same policy. No live activation or fleet
+qualification is established by these source tests.
+
 <!-- Current replacement qualification scope: 2026-11-19 -->
 ## Current four-validator PoSy replacement qualification
 

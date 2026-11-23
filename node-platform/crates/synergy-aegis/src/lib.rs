@@ -40,3 +40,11 @@ pub use pqvm::{PqvmSigner, PqvmVerifier};
 pub use primitives::{AegisProtectedPrimitives, PrimitiveError};
 pub use signer::{AegisSigner, Signature, SigningContext, SigningError};
 pub use verifier::{AegisVerifier, VerificationError};
+pub use synergy_address_engine::apqe::{
+    crypto_engine::CryptoEngine,
+    enrollment_registry::{
+        EnrollmentRegistryRelease, EnrollmentRegistryReleaseIssuer,
+        VerifiedEnrollmentRegistryRelease, ENROLLMENT_REGISTRY_RELEASE_DOMAIN,
+    },
+    identity::{ChainId, NativeGenesisHash},
+};

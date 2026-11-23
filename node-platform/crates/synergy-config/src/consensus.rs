@@ -23,6 +23,20 @@ pub struct AutonomousEpochActivation {
     pub sha256: String,
 }
 
+/// Independently pinned native inputs shipped by the managed release owner.
+/// The two attachment files reside with the selected authenticated Genesis.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedWalletDispatchReleaseConfiguration {
+    pub attachment_sha256: String,
+    pub issuer_key_id: String,
+    pub issuer_sha256: String,
+    pub release_verifier_artifact_sha256: String,
+    pub managed_release_manifest_sha256: String,
+    pub off_chain_approval_sha256: String,
+    pub release_attestation_sha256: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConsensusConfiguration {
@@ -35,6 +49,8 @@ pub struct ConsensusConfiguration {
     pub authority_recovery_certificate_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autonomous_epoch_activation: Option<AutonomousEpochActivation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_wallet_dispatch_release: Option<ManagedWalletDispatchReleaseConfiguration>,
     /// Provisioned ML-DSA-65 consensus key; voting still requires frozen authority.
     #[serde(default)]
     pub signing_key_path: Option<PathBuf>,
@@ -51,6 +67,7 @@ impl Default for ConsensusConfiguration {
             authority_trust_key_path: None,
             authority_recovery_certificate_path: None,
             autonomous_epoch_activation: None,
+            managed_wallet_dispatch_release: None,
             signing_key_path: None,
             proposal_timeout_ms: 2_000,
             round_timeout_ms: 5_000,

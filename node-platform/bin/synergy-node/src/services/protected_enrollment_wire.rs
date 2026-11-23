@@ -24,7 +24,7 @@ pub(super) enum EnrollmentContent<'a> {
 pub(super) struct EnrollmentReveal<'a> {
     pub(super) opaque: [&'a [u8]; 3],
     pub(super) ordinary: [EnrollmentSignature; 2],
-    pub(super) recovery: EnrollmentSignature,
+    pub(super) recovery: Option<EnrollmentSignature>,
     pub(super) ownership: [u8; 65],
     pub(super) salt: [u8; 32],
 }
@@ -93,13 +93,13 @@ pub(super) fn decode(bytes: &[u8]) -> Result<EnrollmentContent<'_>, &'static str
     }
     let mut reader = Reader::new(bytes);
     let head = *bytes.first().ok_or("NONCANONICAL_PROTECTED_PAYLOAD")?;
-    if !matches!(head, 0x84 | 0x88) {
+    if !matches!(head, 0x84 | 0x87 | 0x88) {
         return Err("NONCANONICAL_PROTECTED_PAYLOAD");
     }
     reader.byte(head)?;
     let action = reader.uint()?;
     if !matches!((head, action), (0x84, x) if x == u64::from(ENROLL_COMMIT))
-        && !matches!((head, action), (0x88, x) if x == u64::from(ENROLL_REVEAL))
+        && !matches!((head, action), (0x87 | 0x88, x) if x == u64::from(ENROLL_REVEAL))
     {
         return Err("INVALID_ENROLLMENT_CONTENT_ACTION");
     }
@@ -113,7 +113,11 @@ pub(super) fn decode(bytes: &[u8]) -> Result<EnrollmentContent<'_>, &'static str
     } else {
         reader.byte(0x82)?;
         let ordinary = [role(&mut reader, 0)?, role(&mut reader, 1)?];
-        let recovery = role(&mut reader, 2)?;
+        let recovery = if head == 0x88 {
+            Some(role(&mut reader, 2)?)
+        } else {
+            None
+        };
         let ownership = reader.fixed()?;
         let salt = reader.fixed()?;
         EnrollmentContent::Reveal(Box::new(EnrollmentReveal {
@@ -266,7 +270,7 @@ mod tests {
         } = *reveal;
         assert_eq!(opaque[0], b"opaque sponsor?");
         assert!(opaque[2].is_empty());
-        for (i, proof) in ordinary.iter().chain([&recovery]).enumerate() {
+        for (i, proof) in ordinary.iter().chain(recovery.as_ref()).enumerate() {
             assert_eq!(proof.role_id, i as u8);
             assert_eq!(proof.key_version, 1);
             assert_eq!(proof.schema_version, 1);
@@ -301,6 +305,29 @@ mod tests {
                 assert!(decode(&bad).is_err())
             }
         }
+    }
+
+    #[test]
+    fn two_role_reveal_has_no_recovery_slot_and_preserves_direct_three_roles() {
+        let vectors: serde_json::Value = serde_json::from_str(include_str!("protected_quick_setup_vectors.json")).unwrap();
+        let (dpr, offsets) = reveal([0,1,2], 4627, 65, 32);
+        let mut dp = dpr.clone();
+        dp[0] = 0x87;
+        dp.drain(offsets[2]..offsets[2] + (offsets[2] - offsets[1]));
+        for (named, bytes, recovery) in [
+            ("dp_sponsored_reveal", &dp, false),
+            ("dpr_sponsored_reveal", &dpr, true),
+        ] {
+            let EnrollmentContent::Reveal(reveal) = decode(bytes).unwrap() else {
+                panic!("expected strict reveal frame");
+            };
+            assert_eq!(reveal.recovery.is_some(), recovery);
+            assert_eq!(reveal.ordinary.map(|item| item.role_id), [0, 1]);
+            assert_eq!(vectors[named]["encoded_bytes"].as_u64().unwrap() as usize, bytes.len());
+            assert_eq!(vectors[named]["sha256"].as_str().unwrap(), crate::services::apqe_transport::sha256(bytes));
+        }
+        dp[0] = 0x88;
+        assert!(decode(&dp).is_err());
     }
     #[test]
     fn canonical_framing_rejects_trailing_truncation_tags_and_overlong_encodings() {

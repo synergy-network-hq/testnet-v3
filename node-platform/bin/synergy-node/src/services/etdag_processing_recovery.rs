@@ -34,8 +34,8 @@ fn original_context(bytes: &[u8]) -> Result<ProcessingContext, String> {
 /// The protected material binds the complete member group, rather than merely
 /// accepting an uncommitted group attached to otherwise valid donor QCs.
 #[allow(clippy::too_many_arguments)] // Explicit independently authenticated inputs.
-fn recover(
-    pending: &mut PendingProcessingStore,
+fn recover_with<A: ProcessingAdmissionRecord + ProcessingVertexAdmission + Clone>(
+    pending: &mut PendingProcessingStore<A>,
     source: &NativeProcessingContext<'_>,
     authority: &VerifiedAuthority,
     original: &[u8],
@@ -43,6 +43,7 @@ fn recover(
     order: &[u8],
     material: &CandidateProtectedMaterial,
     expected: &SimplifiedQuorumCertificate,
+    verifier: &impl ProcessingAdmissionAuthenticator<A>,
 ) -> Result<PendingProcessingIdentity, String> {
     if order.is_empty() || order.len() as u64 > MAX_INPUT {
         return Err("historical order exceeds bound".into());
@@ -86,26 +87,22 @@ fn recover(
         .recover_ordered_member(
             original,
             progress,
-            source,
+            verifier,
             |context, admission, evidence, budget| {
-                let verifier = NativeProcessingProgressRecovery {
-                    source,
-                    reveal_parent: None,
-                    dag_parents: &[],
-                };
                 verifier.verify_progress(context, admission, evidence, budget)?;
                 let v = vertex(admission, evidence);
                 // Parentless records are handled here; dependent DAG records require
                 // actual native retained parents, never donor-provided replacements.
-                let verified = NativeProcessingVertex::verify(
+                let verified = NativeProcessingVertex::verify_authenticated(
                     source,
                     &v,
-                    evidence
+                    Some(evidence
                         .availability
                         .as_ref()
-                        .ok_or("historical member lacks availability")?,
+                        .ok_or("historical member lacks availability")?),
                     &[],
                     budget,
+                    |original| verifier.verify(context, source.persisted_authorization_timestamp()?, original),
                 )?;
                 if group
                     .members
@@ -122,6 +119,22 @@ fn recover(
             },
         )
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn recover(
+    pending: &mut PendingProcessingStore,
+    source: &NativeProcessingContext<'_>,
+    authority: &VerifiedAuthority,
+    original: &[u8],
+    progress: &[u8],
+    order: &[u8],
+    material: &CandidateProtectedMaterial,
+    expected: &SimplifiedQuorumCertificate,
+) -> Result<PendingProcessingIdentity, String> {
+    let verifier = NativeProcessingProgressRecovery { source, reveal_parent: None, dag_parents: &[] };
+    recover_with(pending, source, authority, original, progress, order, material, expected, &verifier)
 }
 
 impl EtdagService {
@@ -171,7 +184,7 @@ impl EtdagService {
             .verifier
             .source(&context, self.ingress.world_budget())?;
         let material = serde_json::from_slice(&material).map_err(|e| e.to_string())?;
-        recover(
+        recover_with(
             &mut work.pending,
             &source,
             &self.authority,
@@ -180,6 +193,7 @@ impl EtdagService {
             &order,
             &material,
             &witness[0],
+            &work.verifier,
         )?;
         // If a concurrent operator replaces a file, recovery still admitted
         // only fully authenticated facts. Do not mark a changed inbox complete.

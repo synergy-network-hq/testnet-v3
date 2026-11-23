@@ -1,5 +1,5 @@
 //! Candidate-only adapter from APQE enrollment proofs to Core's committed World.
-//! No RPC, ETDAG action dispatch, or genesis path may activate these assignments.
+//! The signed Wallet action policy governs dispatch independently of intake and finality.
 #![allow(dead_code)] // A governed wire/action/fee profile is required before runtime dispatch.
 
 #[path = "protected_account_read.rs"]
@@ -17,7 +17,9 @@ mod processing_admission;
 #[path = "protected_processing_disposition.rs"]
 mod processing_disposition;
 #[path = "protected_processing_execution.rs"]
-mod processing_execution;
+pub(super) mod processing_execution;
+#[path = "protected_policy_variant.rs"]
+mod policy_variant;
 #[path = "protected_transfer_admission.rs"]
 mod transfer_admission;
 #[path = "protected_sponsored_admission.rs"]
@@ -40,12 +42,16 @@ use synergy_address_engine::apqe::{
     },
     enrollment::{
         CanonicalEnrollment, CanonicalPublicPolicy, EnrollmentSignature, UnactivatedWireProfile,
+        VerifiedAccountEnrollment,
     },
     enrollment_commit::{
         EnrollmentCommitment, PendingEnrollmentCommitment, UnactivatedCommitmentProfile,
         REVEAL_WINDOW_SECONDS,
     },
-    enrollment_registry::{CandidateEnrollmentVerifier, FinalizedEnrollmentContext, RegistryError},
+    enrollment_registry::{
+        ActivatedEnrollmentVerifier, CandidateEnrollmentVerifier, EnrollmentRegistryActivation,
+        FinalizedEnrollmentContext, RegistryError,
+    },
     identity::{ChainId, NativeAccountCoordinate, NativeGenesisHash},
     native_intent::{CanonicalNativeIntent, NativeIntentBody},
     provider::{variants::Mldsa87, PqProvider, PublicKey, SignOptions, Signature},
@@ -277,6 +283,24 @@ pub(super) struct EnrollmentProofs<'a> {
     pub(super) salt: &'a [u8; 32],
 }
 
+pub(super) struct InitialEnrollmentProofs<'a> {
+    pub(super) ordinary: &'a [EnrollmentSignature; 2],
+    pub(super) recovery: Option<&'a EnrollmentSignature>,
+    pub(super) ownership: &'a [u8; 65],
+    pub(super) salt: &'a [u8; 32],
+}
+
+impl<'a> From<EnrollmentProofs<'a>> for InitialEnrollmentProofs<'a> {
+    fn from(proofs: EnrollmentProofs<'a>) -> Self {
+        Self {
+            ordinary: proofs.ordinary,
+            recovery: Some(proofs.recovery),
+            ownership: proofs.ownership,
+            salt: proofs.salt,
+        }
+    }
+}
+
 enum TransferCandidateContent<'a> {
     #[cfg(test)]
     PlaintextFixture(&'a [u8]),
@@ -290,6 +314,7 @@ enum TransferCandidateContent<'a> {
 struct CandidateTransferExecution {
     fee_nwei: u128,
     revert_reason: Option<settlement::TransferRevertReason>,
+    settlement_key: String,
 }
 
 /// Construct only with the exact PoSy-verified finality record and its
@@ -342,7 +367,24 @@ pub(super) struct CandidateProtectedAccounts<'a> {
     network: Network,
     chain: ExternalChainPolicy,
     wire: &'a UnactivatedWireProfile,
-    verifier: CandidateEnrollmentVerifier,
+    verifier: EnrollmentVerifier,
+}
+
+enum EnrollmentVerifier {
+    Candidate(CandidateEnrollmentVerifier),
+    Activated {
+        verifier: ActivatedEnrollmentVerifier,
+        policy_commitment: String,
+    },
+}
+
+impl EnrollmentVerifier {
+    fn admits_primary_companion(&self) -> bool {
+        match self {
+            Self::Candidate(verifier) => verifier.admits_primary_companion(),
+            Self::Activated { verifier, .. } => verifier.admits_primary_companion(),
+        }
+    }
 }
 
 impl<'a> CandidateProtectedAccounts<'a> {
@@ -375,12 +417,71 @@ impl<'a> CandidateProtectedAccounts<'a> {
             network,
             chain,
             wire,
-            verifier,
+            verifier: EnrollmentVerifier::Candidate(verifier),
         })
     }
 
-    pub(super) fn require_activation(&self) -> Result<(), RegistryError> {
-        self.verifier.require_activation()
+    pub(super) fn from_verified_release(
+        release: &synergy_genesis::authority::VerifiedWalletDispatchRelease,
+        source: &crate::services::processing_pipeline::Pw13FinalizedSource<'_>,
+        wire: &'a UnactivatedWireProfile,
+        proof_provider: &PqProvider<Mldsa87>,
+    ) -> Result<Self, String> {
+        processing_execution::native::require_dispatch_policy(
+            source.authority, source.genesis_hash, source.record, release.policy(),
+        )?;
+        source.authority.matches_wallet_dispatch_release(release)?;
+        let enrollment = release.enrollment();
+        let statement = enrollment.statement();
+        let chain = ExternalChainPolicy::new(statement.ownership_chain, statement.genesis)
+            .map_err(display)?;
+        let native_chain = ChainId::from_u64(source.context.authority.chain_id);
+        let verifier = enrollment.activate(EnrollmentRegistryActivation {
+            native_chain,
+            network_id: &source.context.authority.network_id,
+            release_context: statement.release_context,
+            finalized: FinalizedEnrollmentContext {
+                genesis: chain.native_genesis(),
+                external_chain: chain.chain_id(),
+                height: source.record.height,
+                consensus_time: source.consensus_time,
+            },
+            wire_profile: wire,
+            commitment_profile: UnactivatedCommitmentProfile::candidate_concat_v1(),
+            proof_provider,
+        }).map_err(display)?;
+        Ok(Self {
+            network: Network {
+                native_chain: *native_chain.as_be_bytes(),
+                genesis: *chain.native_genesis().as_bytes(),
+                ownership_chain: *chain.chain_id().as_be_bytes(),
+            },
+            chain,
+            wire,
+            verifier: EnrollmentVerifier::Activated {
+                verifier,
+                policy_commitment: release.policy().commitment()?,
+            },
+        })
+    }
+
+    fn activated_enrollment(
+        &self,
+        policy: &synergy_genesis::authority::ProtectedWalletDispatchPolicy,
+    ) -> Result<&ActivatedEnrollmentVerifier, String> {
+        match &self.verifier {
+            EnrollmentVerifier::Activated { verifier, policy_commitment }
+                if *policy_commitment == policy.commitment()? => Ok(verifier),
+            _ => Err("protected enrollment registry does not select this Wallet release".into()),
+        }
+    }
+
+    #[cfg(test)]
+    fn require_activation(&self) -> Result<(), RegistryError> {
+        match &self.verifier {
+            EnrollmentVerifier::Candidate(verifier) => verifier.require_activation(),
+            EnrollmentVerifier::Activated { .. } => Ok(()),
+        }
     }
 
     pub(super) fn finalized_snapshot<'s>(
@@ -656,7 +757,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
     /// its finalized parent before classifying an exact earlier reveal as a
     /// paid revert. Any other failed write leaves both parties unchanged.
     #[allow(clippy::too_many_arguments)]
-    fn execute_sponsored_reveal(
+    fn execute_sponsored_reveal<'p>(
         &self,
         provider: &PqProvider<Mldsa87>,
         identity_verifier: &ApqeIdentityVerifier,
@@ -666,11 +767,12 @@ impl<'a> CandidateProtectedAccounts<'a> {
         inclusion: Position,
         payload: &[u8],
         sponsor: &SponsorProof<'_>,
-        proofs: EnrollmentProofs<'_>,
+        proofs: impl Into<InitialEnrollmentProofs<'p>>,
         fee_schedule: &synergy_execution::FeeSchedule,
         gas_used: u64,
         opening: Option<&settlement::EngineeringEtdagOpening>,
     ) -> Result<(sponsor_settlement::SponsoredOutcome, u128), String> {
+        let proofs = proofs.into();
         let state = world.state();
         use super::protected_action_wire::{decode, Payload, ENROLL_REVEAL};
         use sponsor_settlement::{prepare_sponsor_settlement, SponsoredOutcome};
@@ -742,14 +844,14 @@ impl<'a> CandidateProtectedAccounts<'a> {
 
     /// The finalized snapshot is independent of the working proposal overlay:
     /// an unfinalized or same-block commitment cannot authorize a reveal.
-    pub(super) fn prepare_reveal(
+    pub(super) fn prepare_reveal<'p>(
         &self,
         provider: &PqProvider<Mldsa87>,
         finalized: &FinalizedSnapshot<'_>,
         world: &WorldState,
         inclusion: Position,
         enrollment_bytes: &[u8],
-        proofs: EnrollmentProofs<'_>,
+        proofs: impl Into<InitialEnrollmentProofs<'p>>,
     ) -> Result<CandidateEnrollmentWrite, String> {
         if !std::ptr::eq(self, finalized.registry)
             || inclusion.height <= finalized.position.height
@@ -757,23 +859,43 @@ impl<'a> CandidateProtectedAccounts<'a> {
         {
             return Err("protected reveal requires the selected finalized parent".into());
         }
+        let proofs = proofs.into();
+        use policy_variant::InitialEnrollment;
+        match (InitialEnrollment::decode(enrollment_bytes, self.wire)?, proofs.recovery) {
+            (InitialEnrollment::WithRecovery(enrollment), Some(recovery)) => {
+                let verified = enrollment.verify_candidate_for_selected_chain(
+                    provider, proofs.ordinary, recovery, &self.chain, proofs.ownership,
+                    inclusion.consensus_time,
+                ).map_err(display)?;
+                self.prepare_verified_reveal(finalized, world, inclusion, &verified, proofs.salt)
+            }
+            (InitialEnrollment::PrimaryCompanion(enrollment), None) => {
+                if !self.verifier.admits_primary_companion() {
+                    return Err("selected enrollment registry does not admit two-role accounts".into());
+                }
+                let verified = enrollment.verify_candidate_for_selected_chain(
+                    provider, proofs.ordinary, &self.chain, proofs.ownership,
+                    inclusion.consensus_time,
+                ).map_err(display)?;
+                self.prepare_verified_reveal(finalized, world, inclusion, &verified, proofs.salt)
+            }
+            _ => Err("enrollment proofs differ from the exact initial role set".into()),
+        }
+    }
+
+    fn prepare_verified_reveal<const N: usize>(
+        &self,
+        finalized: &FinalizedSnapshot<'_>,
+        world: &WorldState,
+        inclusion: Position,
+        verified: &VerifiedAccountEnrollment<'_, '_, N>,
+        salt: &[u8; 32],
+    ) -> Result<CandidateEnrollmentWrite, String> {
         let context = finalized.context();
-        let enrollment =
-            CanonicalEnrollment::decode(enrollment_bytes, self.wire).map_err(display)?;
-        let verified = enrollment
-            .verify_candidate_for_selected_chain(
-                provider,
-                proofs.ordinary,
-                proofs.recovery,
-                &self.chain,
-                proofs.ownership,
-                inclusion.consensus_time,
-            )
-            .map_err(display)?;
-        let commitment = self
-            .verifier
-            .reveal_commitment(&verified, proofs.salt, context)
-            .map_err(display)?;
+        let commitment = match &self.verifier {
+            EnrollmentVerifier::Candidate(verifier) => verifier.reveal_commitment(verified, salt, context),
+            EnrollmentVerifier::Activated { verifier, .. } => verifier.reveal_commitment(verified, salt, context),
+        }.map_err(display)?;
         let (expected, commit) = self.pending_commit(finalized.world, commitment)?;
         if inclusion
             .consensus_time
@@ -788,11 +910,11 @@ impl<'a> CandidateProtectedAccounts<'a> {
             commit.included_height,
             commit.consensus_time,
         );
-        let (checked_pending, checked_context, record) = self
-            .verifier
-            .prepare_registration(&verified, proofs.salt, pending, context)
-            .map_err(display)?
-            .into_parts();
+        let registration = match &self.verifier {
+            EnrollmentVerifier::Candidate(verifier) => verifier.prepare_registration(verified, salt, pending, context),
+            EnrollmentVerifier::Activated { verifier, .. } => verifier.prepare_registration(verified, salt, pending, context),
+        }.map_err(display)?;
+        let (checked_pending, checked_context, record) = registration.into_parts();
         if checked_pending != pending
             || checked_context != context
             || record.genesis() != context.genesis
@@ -919,34 +1041,6 @@ impl<'a> CandidateProtectedAccounts<'a> {
         Ok(record)
     }
 
-    fn canonical_policy<'p>(
-        &self,
-        record: &'p PolicyRecord,
-        enrollment: &'p CanonicalEnrollment<'_>,
-    ) -> Result<CanonicalPublicPolicy<'p>, String> {
-        let bytes = match &record.replacement_policy {
-            Some(policy) if record.policy_epoch > enrollment.policy().policy_epoch => {
-                policy.as_slice()
-            }
-            None if record.policy_epoch == enrollment.policy().policy_epoch => {
-                enrollment.canonical_policy()
-            }
-            _ => return Err("protected policy epoch has no matching policy source".into()),
-        };
-        let policy = CanonicalPublicPolicy::decode(bytes, self.wire).map_err(display)?;
-        if enrollment.genesis() != self.chain.native_genesis()
-            || enrollment.account().as_bytes() != &record.account
-            || policy.policy().genesis != enrollment.genesis()
-            || policy.policy().account != enrollment.account()
-            || &policy.policy().evm_public_key != enrollment.evm_public_key()
-            || policy.policy().policy_epoch != record.policy_epoch
-            || policy.hash().map_err(display)? != record.policy_hash
-        {
-            return Err("protected account policy does not match its canonical state".into());
-        }
-        Ok(policy)
-    }
-
     /// Verifies only a candidate spend's signatures and current nonce/policy.
     /// The caller must supply the selected action decoder; no action assignment
     /// or fee semantics are inferred from an unsigned label. A returned quorum
@@ -1032,9 +1126,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
         {
             return Err("protected policy changed or is not finalized".into());
         }
-        let enrollment =
-            CanonicalEnrollment::decode(&record.enrollment, self.wire).map_err(display)?;
-        let current = self.canonical_policy(&record, &enrollment)?;
+        let current = self.current_policy(&record)?;
         let address = account.to_native(&Primitives).map_err(display)?;
         let ledger = world
             .accounts
@@ -1055,26 +1147,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
             consensus_time,
             recovery_vetoed: false, // External-share recovery remains disabled.
         };
-        let [d, p, r] = current.policy().roles;
-        let enrolled =
-            |role, registered: synergy_address_engine::apqe::enrollment::RoleRecord<'_>| {
-                Ok::<_, String>(EnrolledRole {
-                    role,
-                    participant_id: registered.participant_id,
-                    public_key: PublicKey::from_bytes(registered.auth_public_key).map_err(debug)?,
-                })
-            };
-        let policy = NativePolicy::from_authenticated_enrollment(
-            state.network_account,
-            record.policy_epoch,
-            record.policy_hash,
-            [
-                enrolled(Role::D, d)?,
-                enrolled(Role::P, p)?,
-                enrolled(Role::R, r)?,
-            ],
-        )
-        .map_err(display)?;
+        let policy = current.native(state.network_account, record.policy_epoch, record.policy_hash)?;
         Ok((state, policy))
     }
 
@@ -1135,13 +1208,11 @@ impl<'a> CandidateProtectedAccounts<'a> {
             return Err("invalid policy schedule".into());
         };
         let record = self.read_policy(world, body.account)?;
-        let enrollment =
-            CanonicalEnrollment::decode(&record.enrollment, self.wire).map_err(display)?;
-        let current = self.canonical_policy(&record, &enrollment)?;
+        let current = self.current_policy(&record)?;
         let proposed = CanonicalPublicPolicy::decode(new_policy, self.wire).map_err(display)?;
         let replace = if role == 0 { Role::D } else { Role::P };
         let checked = check_policy_replacement(
-            &current,
+            current.with_recovery()?,
             &proposed,
             PolicyReplacementRequest {
                 mode: ReplacementMode::Ordinary,
@@ -1335,16 +1406,14 @@ impl<'a> CandidateProtectedAccounts<'a> {
         }
         let policy = CanonicalPublicPolicy::decode(&pending.policy, self.wire).map_err(display)?;
         {
-            let enrollment =
-                CanonicalEnrollment::decode(&record.enrollment, self.wire).map_err(display)?;
-            let current = self.canonical_policy(&record, &enrollment)?;
+            let current = self.current_policy(&record)?;
             let replace = match pending.replace {
                 0 => Role::D,
                 1 => Role::P,
                 _ => return Err("invalid recorded replacement role".into()),
             };
             let _checked = check_policy_replacement(
-                &current,
+                current.with_recovery()?,
                 &policy,
                 PolicyReplacementRequest {
                     mode: ReplacementMode::Ordinary,
@@ -1467,9 +1536,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
         {
             return Err("invalid or unfinalized protected recipient".into());
         }
-        let enrollment = CanonicalEnrollment::decode(&record.enrollment, self.wire)
-            .map_err(display)?;
-        self.canonical_policy(&record, &enrollment)?;
+        self.current_policy(&record)?;
         let address = recipient.to_native(&Primitives).map_err(display)?;
         for source in [finalized.world, world] {
             if !source
@@ -1513,12 +1580,10 @@ impl<'a> CandidateProtectedAccounts<'a> {
         let body = intent.body();
         let digest = intent.digest().map_err(display)?;
         let sender_record = self.read_policy(finalized.world, body.account)?;
-        let sender_enrollment =
-            CanonicalEnrollment::decode(&sender_record.enrollment, self.wire).map_err(display)?;
-        let sender_policy = self.canonical_policy(&sender_record, &sender_enrollment)?;
+        let sender_policy = self.current_policy(&sender_record)?;
         let build_proof = |index: usize, role: Role| -> Result<RoleSignature, String> {
             let supplied = &content.proofs[index];
-            let registered = sender_policy.policy().roles[index];
+            let registered = sender_policy.terms().roles[index];
             if supplied.participant_id != registered.participant_id
                 || supplied.key_version != registered.key_version
                 || &supplied.digest != digest.as_bytes()
@@ -1642,6 +1707,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
                 code_hash: None,
             });
         }
+        let settlement_key = settlement.key.clone();
         let diff = StateDiff {
             changes,
             protocol_changes: vec![settlement],
@@ -1650,6 +1716,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
         Ok(CandidateTransferExecution {
             fee_nwei: fee,
             revert_reason,
+            settlement_key,
         })
     }
 }
@@ -1771,12 +1838,10 @@ fn inspect_pending_transition(
         1 => Role::P,
         _ => return Err("pending transition replacement role is invalid".into()),
     };
-    let enrollment =
-        CanonicalEnrollment::decode(&active.enrollment, registry.wire).map_err(display)?;
-    let current = registry.canonical_policy(&active, &enrollment)?;
+    let current = registry.current_policy(&active)?;
     let proposed = CanonicalPublicPolicy::decode(&change.policy, registry.wire).map_err(display)?;
     let _validated = check_policy_replacement(
-        &current,
+        current.with_recovery()?,
         &proposed,
         PolicyReplacementRequest {
             mode: replacement_mode,
@@ -1949,6 +2014,120 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires isolated two-party APQE and threshold qualification output"]
+    fn quick_setup_native_two_party_binding_registers_only_after_finalized_commit() {
+        use serde_json::json;
+        use synergy_address_engine::apqe::enrollment::CanonicalPrimaryCompanionEnrollment;
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct QualificationFixture {
+            enrollment_dcbor_hex: String,
+            native_signatures_hex: [String; 2],
+            ownership_signature_hex: String,
+            commit_salt_hex: String,
+            ownership_chain_id: String,
+        }
+        let path = PathBuf::from(std::env::var_os("CORE_APQE_DP_ENROLLMENT_FIXTURE").unwrap());
+        let fixture: QualificationFixture = decode(
+            &std::fs::read(path).unwrap(), 96 * 1024,
+        ).unwrap();
+        let wire = wire();
+        let bytes = hex(&fixture.enrollment_dcbor_hex);
+        let enrollment = CanonicalPrimaryCompanionEnrollment::decode(&bytes, &wire).unwrap();
+        let genesis = enrollment.genesis();
+        let chain = ChainId::from_be_bytes(hex(&fixture.ownership_chain_id).try_into().unwrap());
+        let manifest = enrollment.policy().provider_manifest_hash;
+        let rule = UnactivatedCommitmentProfile::candidate_concat_v1();
+        let mut registry = CandidateProtectedAccounts::new(
+            ChainId::from_u64(99_999),
+            ExternalChainPolicy::new(chain, genesis).unwrap(),
+            &wire, rule, vec![manifest],
+        ).unwrap();
+        let salt = hex(&fixture.commit_salt_hex).try_into().unwrap();
+        let ownership = hex(&fixture.ownership_signature_hex).try_into().unwrap();
+        let digest = enrollment.native_digest().unwrap();
+        let native_signatures: [EnrollmentSignature; 2] = enrollment.policy().roles
+            .into_iter().zip(fixture.native_signatures_hex)
+            .map(|(role, signature)| EnrollmentSignature {
+                schema_version: 1,
+                role_id: role.role_id,
+                participant_id: role.participant_id,
+                key_version: role.key_version,
+                auth_algorithm: role.auth_algorithm,
+                signed_digest: digest,
+                signature: Signature::from_bytes(&hex(&signature)).unwrap(),
+            }).collect::<Vec<_>>().try_into().ok().unwrap();
+        let proofs = || InitialEnrollmentProofs {
+            ordinary: &native_signatures,
+            recovery: None,
+            ownership: &ownership,
+            salt: &salt,
+        };
+        let provider = unsafe {
+            PqProvider::<Mldsa87>::open_verified(
+                PathBuf::from(std::env::var_os("CORE_APQE_MLDSA87_LIBRARY").unwrap()),
+                hex(&std::env::var("CORE_APQE_MLDSA87_SHA256").unwrap()).try_into().unwrap(),
+                Profile::Validation,
+            )
+        }.unwrap();
+        let first = enrollment.issued_at();
+        let include = position(3, first + 2);
+        let account = enrollment.account();
+        let address = account.to_native(&Primitives).unwrap();
+        let mut world = WorldState::default();
+        world.accounts.insert(address.clone(), AccountState {
+            nonce: 0, balance_nwei: 75, code_hash: None,
+        });
+        let commitment = rule.commitment(&enrollment, &salt).unwrap();
+        let (commit_pointer, commit_proof) = finalized(1, &world);
+        let missing = registry.finalized_snapshot(&world, &commit_pointer, &commit_proof, first).unwrap();
+        assert_eq!(
+            registry.prepare_reveal(&provider,&missing,&world,include,&bytes,proofs()).err().unwrap(),
+            "selected enrollment registry does not admit two-role accounts",
+        );
+        registry.verifier = EnrollmentVerifier::Candidate(
+            CandidateEnrollmentVerifier::new_with_primary_companion(genesis,chain,&wire,rule,vec![manifest]).unwrap(),
+        );
+        let missing = registry.finalized_snapshot(&world, &commit_pointer, &commit_proof, first).unwrap();
+        assert!(registry.prepare_reveal(&provider,&missing,&world,include,&bytes,proofs()).is_err());
+        assert!(!world.protocol.contains_key(&account_key(account)));
+        registry.prepare_commit(&world, commitment, position(1, first)).unwrap().apply(&mut world).unwrap();
+        let (pointer, proof) = finalized(2, &world);
+        let committed = world.clone();
+        let selected = registry.finalized_snapshot(&committed,&pointer,&proof,first+1).unwrap();
+        let mut changed = [0x55;32];
+        if changed == salt { changed[0] ^= 1; }
+        assert!(registry.prepare_reveal(&provider,&selected,&committed,include,&bytes,
+            InitialEnrollmentProofs { salt: &changed, ..proofs() }).is_err());
+        let write = registry.prepare_reveal(&provider,&selected,&committed,include,&bytes,proofs()).unwrap();
+        write.apply_with_fee(&mut world,&StateDiff::default()).unwrap();
+        assert!(registry.decode_commitment(&world.protocol[&commit_key(commitment)],commitment).unwrap().consumed);
+        assert_eq!(world.accounts[&address].balance_nwei, 75);
+        assert_eq!(world.accounts[&address].nonce, 0);
+        let (pointer, finality) = finalized(3, &world);
+        let scratch = Scratch::new();
+        let mut store = FinalizedStateStore::load(&scratch.0).unwrap();
+        store.commit_verified_world_state(pointer.clone(),&world).unwrap();
+        drop(store);
+        let reopened = FinalizedStateStore::load(&scratch.0).unwrap().current_world_state().unwrap().unwrap();
+        let verified = registry.finalized_snapshot(&reopened,&pointer,&finality,include.consensus_time).unwrap();
+        let (_, native_policy) = registry.current_native_authority(&verified,&reopened,account,include.consensus_time).unwrap();
+        assert!(!native_policy.has_recovery_role());
+        assert!(registry.prepare_reveal(&provider,&verified,&reopened,position(4,first+3),&bytes,proofs()).is_err());
+        let body = inspection::inspect(&reopened,&finality,&pointer.state_root,include.consensus_time,
+            99_999, &inspection::hex_bytes(genesis.as_bytes()), serde_json::from_value(json!({
+                "height":finality.height, "block_id":finality.block_id, "state_root":pointer.state_root,
+                "ownership_chain_id":fixture.ownership_chain_id, "provider_manifests":[inspection::hex_bytes(&manifest)],
+                "addresses":[address],
+            })).unwrap()).unwrap();
+        let account_read = &body["accounts"][0];
+        assert_eq!(account_read["roles"].as_array().unwrap().len(), 2);
+        assert_eq!(account_read["aggregate_public_point_sec1_hex"], inspection::hex_bytes(enrollment.evm_public_key()));
+        assert_eq!(account_read["balance_nwei"], "75");
+        assert_eq!(account_read["next_nonce"],0);
+    }
+
+    #[test]
     #[ignore = "requires independently authenticated engineering and validation APQE artifacts"]
     fn protected_sponsor_commit_and_reveal_settle_once_with_exact_native_proofs() {
         use super::super::protected_action_wire::{decode_sponsor, ENROLL_COMMIT, ENROLL_REVEAL};
@@ -2108,7 +2287,7 @@ mod tests {
                         provider: &provider,
                         sponsor_verifier: Some(&verifier),
                         fee_schedule: &schedule,
-                        metered_gas: 5,
+                        metering: super::processing_execution::ProtectedMetering::Fixture(5),
                     },
                 }),
                 |envelope, context, ordering| {
@@ -2459,7 +2638,7 @@ mod tests {
                 },
                 EnrollmentProofs {
                     ordinary: &opened.ordinary,
-                    recovery: &opened.recovery,
+                    recovery: opened.recovery.as_ref().expect("direct three-role fixture"),
                     ownership: &opened.ownership,
                     salt: &opened.salt,
                 },
@@ -3631,7 +3810,7 @@ mod tests {
                         provider: &provider,
                         sponsor_verifier: None,
                         fee_schedule: &schedule,
-                        metered_gas: 21_000,
+                        metering: super::processing_execution::ProtectedMetering::Fixture(21_000),
                     },
                 }),
                 |envelope, context, ordering| {
@@ -3713,6 +3892,7 @@ mod tests {
             CandidateActionOutcome::Transfer(CandidateTransferExecution {
                 fee_nwei: 840_000,
                 revert_reason: None,
+                settlement_key: settlement::receipt_key(body.account, &body.intent_id),
             })
         );
         assert_eq!(native_world.accounts[&address].nonce, 1);
@@ -3825,6 +4005,7 @@ mod tests {
             CandidateActionOutcome::Transfer(CandidateTransferExecution {
                 fee_nwei: 840_000,
                 revert_reason: None,
+                settlement_key: settlement::receipt_key(body.account, &body.intent_id),
             }),
         );
         assert!(invalid
@@ -3912,6 +4093,7 @@ mod tests {
             CandidateTransferExecution {
                 fee_nwei: 840_000,
                 revert_reason: None,
+                settlement_key: settlement::receipt_key(body.account, &body.intent_id),
             }
         );
         assert_eq!(world.accounts[&address].balance_nwei, 59_993);
@@ -4117,6 +4299,7 @@ mod tests {
             CandidateTransferExecution {
                 fee_nwei: 840_000,
                 revert_reason: Some(settlement::TransferRevertReason::InsufficientTransferBalance),
+                settlement_key: settlement::receipt_key(second_body.account, &second_body.intent_id),
             }
         );
         assert_eq!(ordered.accounts[&address].balance_nwei, 10_093);

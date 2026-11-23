@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use synergy_data_availability::{AvailabilityProof, DataShard};
 
 use crate::{
+    admission::ProtectedWalletAdmission,
     certificates::{BatchValidationCertificate, CanonicalCertificate},
     execution::{PreparedProtectedBatch, ProcessingDecryptShare, ProcessingVertex},
     AvailabilityCertificate, AvailabilityVote, DecryptShareMessage, EtdagDigest, EtdagError,
@@ -122,6 +123,7 @@ pub enum EtdagNetworkMessage {
     CertifiedExecutionHandoff(CertifiedExecutionHandoff),
     RequestMissingArtifact(MissingArtifactRequest),
     RecoveredShardCustody(RecoveredShardCustody),
+    ProcessingProtectedWalletVertexV1(ProcessingVertex<ProtectedWalletAdmission>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

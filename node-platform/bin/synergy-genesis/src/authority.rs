@@ -8,6 +8,13 @@ use synergy_posy::{
 pub const AUTHORITY_SIGNING_DOMAIN: &str = "SYNERGY-POSY-AUTHORITY-BINDING-V1";
 pub use synergy_posy::SimplifiedFinalityParent as AuthorityParent;
 
+#[path = "wallet_dispatch.rs"]
+mod wallet_dispatch;
+pub use wallet_dispatch::{
+    ProtectedWalletDispatchPolicy, SignedWalletDispatchRelease, VerifiedWalletDispatchRelease,
+    WalletDispatchReleasePayload, WalletDispatchReleaseTrust, WALLET_DISPATCH_RELEASE_DOMAIN,
+};
+
 impl AuthorityPayload {
     pub fn signing_bytes(&self) -> Result<Vec<u8>, String> {
         let bytes = serde_json::to_vec(self).map_err(|e| format!("encode authority: {e}"))?;
@@ -114,9 +121,25 @@ pub struct ProtectedEpochPolicy {
     pub cluster_map_root: String,
     pub assigned_cluster_id: u64,
     pub assigned_cluster_membership_root: String,
+    /// The Wallet action contract is separate from the original transport
+    /// cryptography descriptor. Absent policy preserves the signed bytes of
+    /// an epoch which predates protected Wallet dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallet_dispatch: Option<ProtectedWalletDispatchPolicy>,
 }
 
 impl ProtectedEpochPolicy {
+    /// The next clock continues the certified schedule without changing any
+    /// other governed inputs.
+    pub fn successor_clock(&self, first: u64, last: u64) -> Result<Self, String> {
+        let mut next = self.clone();
+        next.epoch_start_timestamp_ms = self
+            .timestamp_for_height_ms(first, last, last)?
+            .checked_add(self.target_block_time_ms)
+            .ok_or("successor epoch clock overflow")?;
+        Ok(next)
+    }
+
     /// Derives the exact consensus time; height is confined to this signed epoch.
     pub fn timestamp_for_height_ms(
         &self,
@@ -199,6 +222,12 @@ impl ProtectedEpochPolicy {
             epoch.epoch_start_height.max(3),
             epoch.epoch_end_height,
         )?;
+        if let Some(dispatch) = &self.wallet_dispatch {
+            if self.cutoff_relationship != ProtectedCutoffRelationship::ProcessingGroupsV1 {
+                return Err("protected Wallet dispatch requires governed asynchronous ETDAG".into());
+            }
+            dispatch.validate(epoch, &self.parameters)?;
+        }
         synergy_state::state_root(&self.initial_world_state)
             .map_err(|e| format!("initial state: {e:?}"))?;
         Ok(())
@@ -298,6 +327,7 @@ mod protected_key_schedule_tests {
             cluster_map_root: "c".repeat(64),
             assigned_cluster_id: 0,
             assigned_cluster_membership_root: "d".repeat(64),
+            wallet_dispatch: None,
         };
         assert_eq!(
             policy.timestamp_for_height_ms(1, 100, 1).unwrap(),

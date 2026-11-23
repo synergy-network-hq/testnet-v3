@@ -1,5 +1,5 @@
 #[path = "execution_processing.rs"]
-mod processing;
+pub(super) mod processing;
 #[path = "execution_processing_retirement.rs"]
 mod processing_retirement;
 use std::collections::BTreeMap;

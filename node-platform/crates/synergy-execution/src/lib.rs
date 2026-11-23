@@ -40,6 +40,7 @@ pub use dispatcher::{
 pub use executor::DeterministicExecutor;
 pub use fees::{FeeSchedule, FeeSettlement};
 pub use processing_candidate::{
+    ProcessingNativeWalletActions,
     processing_payload_root, verify_processing_payload, ProcessingCandidateContext,
     ProcessingCandidateError, ProcessingEpochClose, ProcessingPayloadError,
     ProcessingPayloadProvider,

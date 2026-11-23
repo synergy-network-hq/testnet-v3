@@ -458,10 +458,16 @@ fn read_reservation(bytes: usize) -> Result<usize, ProcessingStoreError> {
         .ok_or_else(|| WorldResourceError::ArithmeticOverflow.into())
 }
 
-pub(crate) trait ProcessingAdmissionRecord: serde::de::DeserializeOwned {
+pub(crate) trait ProcessingAdmissionRecord: Sized {
     // Version one predates the corrected ML-KEM link. New formats start at
     // version two and must never acquire legacy decapsulation on recovery.
     const ALLOW_LEGACY_KEM_RECOVERY: bool = false;
+
+    fn decode_original(value: &str, context: &ProcessingContext) -> Result<Self, serde_json::Error>;
+
+    fn allows_legacy_kem_recovery(&self) -> bool {
+        Self::ALLOW_LEGACY_KEM_RECOVERY
+    }
 
     fn validate_context(&self, context: &ProcessingContext) -> Result<(), synergy_etdag::EtdagError>;
     fn identity(&self) -> PendingProcessingIdentity;
@@ -469,6 +475,10 @@ pub(crate) trait ProcessingAdmissionRecord: serde::de::DeserializeOwned {
 
 impl ProcessingAdmissionRecord for WalletProcessingAdmission {
     const ALLOW_LEGACY_KEM_RECOVERY: bool = true;
+
+    fn decode_original(value: &str, _: &ProcessingContext) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(value)
+    }
 
     fn validate_context(&self, context: &ProcessingContext) -> Result<(), synergy_etdag::EtdagError> {
         self.request.validate_context(context)
@@ -520,7 +530,7 @@ fn decode_stored<A: ProcessingAdmissionRecord>(
     record: &StoredPending,
     namespace: &EtdagDigest,
 ) -> Result<A, ProcessingStoreError> {
-    if !(record.version == 2 || (record.version == 1 && A::ALLOW_LEGACY_KEM_RECOVERY))
+    if !matches!(record.version, 1 | 2)
         || &record.namespace_root != namespace
         || record.authorization_timestamp_unix == 0
     {
@@ -529,8 +539,11 @@ fn decode_stored<A: ProcessingAdmissionRecord>(
     if record.admission_json.is_empty() || record.admission_json.len() > MAX_REQUEST_BYTES {
         return Err(invalid("invalid stored processing request length"));
     }
-    let admission: A = serde_json::from_str(&record.admission_json)
+    let admission = A::decode_original(&record.admission_json, &record.context)
         .map_err(|e| invalid(format!("stored processing request: {e}")))?;
+    if record.version == 1 && !admission.allows_legacy_kem_recovery() {
+        return Err(invalid("pending carrier does not permit legacy KEM recovery"));
+    }
     admission
         .validate_context(&record.context)
         .map_err(|e| invalid(format!("pending processing context: {e:?}")))?;
@@ -1217,7 +1230,7 @@ impl<A: ProcessingAdmissionRecord> PendingProcessingStore<A> {
         let mut permit = self
             .budget
             .reserve_with_headroom(reservation(measured_length, self.limits)?, headroom)?;
-        let admission: A = serde_json::from_slice(admission_bytes)
+        let admission = A::decode_original(admission_json, context)
             .map_err(|e| invalid(format!("processing request: {e}")))?;
         admission
             .validate_context(context)

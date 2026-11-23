@@ -203,7 +203,7 @@ fn exercise_native_recovery(read_only_transport: bool, long_boundary: bool, fres
         let previous = load(&config).unwrap().unwrap();
         if fresh {
             assert!(config.consensus.autonomous_epoch_activation.is_none());
-            successor::qualify_fresh_genesis_autonomous(&config, previous, &keys, &engine);
+            successor::qualify_fresh_genesis_autonomous(&config, previous, &keys, &engine, &old_signer);
             continue;
         }
 

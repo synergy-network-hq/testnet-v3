@@ -11,9 +11,11 @@ use super::{
     FinalizedSnapshot, Position, TransferCandidateContent,
 };
 use crate::services::processing_pipeline::{
-    AuthenticatedProcessingOpening, NativeProcessingContext, NativeProcessingRecovery,
-    ProcessingCompletionEvidence, Pw13FinalizedSource, RevealedProcessingPayload,
+    AuthenticatedProcessingOpening, NativeProcessingContext, NativeProcessingProgressRecovery,
+    NativeProcessingRecovery, ProcessingCompletionEvidence, ProcessingProgressEvidence,
+    Pw13FinalizedSource, RevealedProcessingPayload,
 };
+use crate::services::authority::VerifiedAuthority;
 use crate::services::processing_store::{
     PendingProcessingIdentity, PendingProcessingStore, ProcessingAdmissionAuthenticator,
     ProcessingStoreError,
@@ -29,9 +31,16 @@ use synergy_etdag::{
 };
 use synergy_execution::{
     decode_budgeted_pw13_engineering_candidate, processing_group_state, verify_processing_payload,
-    BudgetedExecutionCandidate, FeeSchedule, ParentProcessingRegistry, ProcessingReadinessVerifier,
+    BlockExecutionError, BudgetedExecutionCandidate, FeeSchedule, ParentProcessingRegistry,
+    ProcessingNativeWalletActions, ProcessingReadinessVerifier,
     ProcessingReadyRecord,
 };
+use synergy_genesis::authority::ProtectedWalletDispatchPolicy;
+
+#[path = "protected_processing_native.rs"]
+pub(in crate::services) mod native;
+#[path = "protected_processing_retirement.rs"]
+pub(in crate::services) mod retirement;
 use synergy_state::{
     state_root,
     world_resources::{BudgetedWorld, WorldResourceBudget, WorldResourcePermit},
@@ -103,10 +112,7 @@ impl IntentTerms<'_> {
                 return Err("protected READY policy disagrees with finalized history".into());
             }
             if current.policy_epoch > signed.policy_epoch {
-                let enrollment =
-                    super::CanonicalEnrollment::decode(&current.enrollment, registry.wire)
-                        .map_err(super::display)?;
-                registry.canonical_policy(&current, &enrollment)?;
+                registry.current_policy(&current)?;
                 return Ok(Some(Disposition::PolicySuperseded {
                     signed_policy_epoch: signed.policy_epoch,
                     finalized_policy_epoch: current.policy_epoch,
@@ -117,7 +123,7 @@ impl IntentTerms<'_> {
     }
 }
 
-pub(super) struct AuthorizedCandidateAdmission {
+pub(in crate::services) struct AuthorizedCandidateAdmission {
     authorization_root: EtdagDigest,
     parameters: EtdagParameters,
     action: ActionAuthorization,
@@ -197,7 +203,32 @@ pub(super) struct ProtectedRecoveryTerms<'a> {
     pub(super) provider: &'a PqProvider<Mldsa87>,
     pub(super) sponsor_verifier: Option<&'a ApqeIdentityVerifier>,
     pub(super) fee_schedule: &'a FeeSchedule,
-    pub(super) metered_gas: u64,
+    pub(super) metering: ProtectedMetering<'a>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ProtectedMetering<'a> {
+    Governed(&'a ProtectedWalletDispatchPolicy),
+    #[cfg(test)]
+    Fixture(u64),
+}
+
+impl ProtectedMetering<'_> {
+    fn for_admission(self, admission: &CandidateAdmission) -> Result<u64, String> {
+        use crate::services::protected_action_wire::{ENROLL_COMMIT, ENROLL_REVEAL};
+        match self {
+            Self::Governed(policy) => match &admission.authorization {
+                CandidateAuthorization::Transfer(_) => Ok(policy.transfer_gas),
+                CandidateAuthorization::SponsoredEnrollment(proof) => match proof.resources.action {
+                    ENROLL_COMMIT => Ok(policy.enroll_commit_gas),
+                    ENROLL_REVEAL => Ok(policy.enroll_reveal_gas),
+                    _ => Err("wallet dispatch has no governed metering for the requested action".into()),
+                },
+            },
+            #[cfg(test)]
+            Self::Fixture(gas) => Ok(gas),
+        }
+    }
 }
 
 pub(super) struct RecoveredProtectedAction<'a> {
@@ -225,6 +256,90 @@ impl RecoveredProtectedAction<'_> {
             self.opening.payload(self.envelope, self.context)?,
             parent,
         )
+    }
+}
+
+/// Retained only after the ETDAG owner persists the original completion.
+/// The original finalized World is already charged by the native state owner.
+pub(in crate::services) struct NativeProtectedCompletion {
+    pub(in crate::services) record: ProcessingReadyRecord,
+    context: ProcessingContext,
+    envelope: ProcessingEnvelope,
+    authorization: AuthorizedCandidateAdmission,
+    opening: AuthenticatedProcessingOpening,
+    original_world: Arc<BudgetedWorld>,
+    original_position: Position,
+    original_finality_root: EtdagDigest,
+    policy: ProtectedWalletDispatchPolicy,
+    _permit: WorldResourcePermit,
+}
+
+impl NativeProtectedCompletion {
+    pub(in crate::services) fn retain(
+        source: &NativeProcessingContext<'_>,
+        original: &CandidateAdmission,
+        reveal_parent: &BudgetedWorld,
+        mut opening: AuthenticatedProcessingOpening,
+        budget: &Arc<WorldResourceBudget>,
+    ) -> Result<Self, String> {
+        let native = source.pw13_finalized_source()?;
+        with_native_protected_intake(source, |intake| {
+            let authorization = intake.authorize(original)?;
+            let envelope = &original.envelope;
+            let permit = budget.reserve(
+                crate::services::processing_pipeline::encoded_len(envelope)?.checked_mul(2)
+                    .and_then(|bytes| bytes.checked_add(128 * 1024))
+                    .ok_or("protected completion capacity overflow")?
+            ).map_err(debug)?;
+            let record = opening.payload(envelope, native.context)?.ready_record(reveal_parent)?;
+            if record.authorization_root != authorization.authorization_root {
+                return Err("retained Wallet completion changed its original authorization".into());
+            }
+            opening.retain_plaintext()?;
+            Ok(Self {
+                record,
+                context: native.context.clone(),
+                envelope: envelope.clone(),
+                authorization,
+                opening,
+                original_world: source.retain_finalized_world()?,
+                original_position: intake.snapshot.position,
+                original_finality_root: intake.snapshot.processing_finality_root.clone(),
+                policy: native.authority.wallet_dispatch_policy()
+                    .ok_or("original Wallet policy absent")?.clone(),
+                _permit: permit,
+            })
+        })
+    }
+
+    fn with_action<T>(
+        &self,
+        parent: &BudgetedWorld,
+        registry: &CandidateProtectedAccounts<'_>,
+        terms: ProtectedRecoveryTerms<'_>,
+        action: impl FnOnce(PreparedProtectedAction<'_>) -> Result<T, String>,
+    ) -> Result<T, String> {
+        if !matches!(terms.metering, ProtectedMetering::Governed(policy) if policy == &self.policy) {
+            return Err("retained Wallet completion has a different activated policy".into());
+        }
+        let source = FinalizedSnapshot {
+            registry,
+            world: self.original_world.as_ref(),
+            position: self.original_position,
+            processing_finality_root: self.original_finality_root.clone(),
+        };
+        let original = PreparedProtectedAction::from_opening(
+            CandidateDispatch {
+                source: &source,
+                provider: terms.provider,
+                sponsor_verifier: terms.sponsor_verifier,
+                fee_schedule: terms.fee_schedule,
+                admission: &self.authorization,
+            },
+            self.opening.payload(&self.envelope, &self.context)?,
+            parent,
+        )?;
+        action(original)
     }
 }
 
@@ -258,7 +373,7 @@ impl CandidateProtectedAccounts<'_> {
 
 /// A sponsored admission can be persisted as soon as the original source is
 /// authenticated. No reveal parent or decrypted content exists at intake.
-pub(super) struct ProtectedIntake<'a> {
+pub(in crate::services) struct ProtectedIntake<'a> {
     registry: &'a CandidateProtectedAccounts<'a>,
     snapshot: FinalizedSnapshot<'a>,
     context: &'a ProcessingContext,
@@ -275,6 +390,21 @@ impl<'a> ProtectedIntake<'a> {
     ) -> Result<Self, String> {
         let verified = source.pw13_finalized_source()?;
         let snapshot = registry.native_finalized_snapshot(&verified)?;
+        match terms.metering {
+            ProtectedMetering::Governed(expected) => {
+                native::require_dispatch_policy(verified.authority, verified.genesis_hash, verified.record, expected)?;
+                let activation = registry.activated_enrollment(expected)?;
+                activation.require_activation(snapshot.context()).map_err(debug)?;
+                activation.require_proof_provider(terms.provider).map_err(debug)?;
+                if terms.fee_schedule.collector != expected.fee_collector
+                    || terms.fee_schedule.base_fee_per_gas_nwei != expected.base_fee_per_gas_nwei
+                {
+                    return Err("protected intake fees differ from signed action policy".into());
+                }
+            }
+            #[cfg(test)]
+            ProtectedMetering::Fixture(_) => {}
+        }
         Ok(Self {
             registry,
             snapshot,
@@ -309,7 +439,7 @@ impl<'a> ProtectedIntake<'a> {
         )
     }
 
-    fn authorize(
+    pub(in crate::services) fn authorize(
         &self,
         admission: &CandidateAdmission,
     ) -> Result<AuthorizedCandidateAdmission, String> {
@@ -322,10 +452,42 @@ impl<'a> ProtectedIntake<'a> {
                 sponsor_verifier: self.terms.sponsor_verifier,
                 parameters: &self.parameters,
                 fee_schedule: self.terms.fee_schedule,
-                metered_gas: self.terms.metered_gas,
+                metered_gas: self.terms.metering.for_admission(admission)?,
             },
         )
     }
+}
+
+pub(in crate::services) fn with_native_protected_intake<T>(
+    source: &NativeProcessingContext<'_>,
+    action: impl FnOnce(&ProtectedIntake<'_>) -> Result<T, String>,
+) -> Result<T, String> {
+    with_native_wallet_registry(source, |registry, terms| {
+        let intake = ProtectedIntake::new(registry, source, terms)?;
+        action(&intake)
+    })
+}
+
+fn with_native_wallet_registry<T>(
+    source: &NativeProcessingContext<'_>,
+    action: impl FnOnce(&CandidateProtectedAccounts<'_>, ProtectedRecoveryTerms<'_>) -> Result<T, String>,
+) -> Result<T, String> {
+    let finalized = source.verified_finalized_source()?;
+    let release = finalized.authority.native_wallet_release()?;
+    let provider = release.proof_provider.lock().map_err(|_| "managed Wallet proof provider poisoned")?;
+    let registry = CandidateProtectedAccounts::from_verified_release(
+        &release.verified, &finalized, &release.wire, &provider,
+    )?;
+    let sponsor = finalized.authority.apqe_identity_verifier();
+    action(
+        &registry,
+        ProtectedRecoveryTerms {
+            provider: &provider,
+            sponsor_verifier: sponsor.as_ref(),
+            fee_schedule: &release.fees,
+            metering: ProtectedMetering::Governed(release.verified.policy()),
+        },
+    )
 }
 
 impl ProcessingAdmissionAuthenticator<CandidateAdmission> for ProtectedIntake<'_> {
@@ -512,6 +674,30 @@ impl ProcessingAdmissionAuthenticator<CandidateAdmission> for ProtectedJournalRe
     ) -> Result<(), String> {
         self.completion_source(admission, evidence)?
             .verify_completion(context, admission, evidence, budget)
+    }
+
+    fn verify_progress(
+        &self,
+        context: &ProcessingContext,
+        admission: &CandidateAdmission,
+        evidence: &ProcessingProgressEvidence,
+        budget: &Arc<WorldResourceBudget>,
+    ) -> Result<(), String> {
+        let source = self.sources.iter().find(|source| {
+            source.intake.context == context
+                && evidence.reveal_validation.as_ref().is_none_or(|validation| {
+                    validation.candidate.block_id == source.recovery.reveal_parent.block_id
+                })
+                && source.recovery.dag_parents.iter().map(|parent| parent.vertex_id())
+                    .eq(evidence.parents.iter())
+        }).ok_or("protected progress lacks its original authenticated source/parent")?;
+        NativeProcessingProgressRecovery {
+            source: source.recovery.source,
+            reveal_parent: evidence.reveal_validation.as_ref().map(|_| source.recovery.reveal_parent),
+            dag_parents: source.recovery.dag_parents,
+        }.verify_authenticated_progress(context, admission, evidence, budget, |original| {
+            source.intake.authorize(original).map(drop)
+        })
     }
 }
 
@@ -713,7 +899,7 @@ impl<'a> PreparedProtectedAction<'a> {
                 "protected READY disposition differs from exact authenticated replay".into(),
             );
         }
-        if let Some(disposition) = disposition {
+        let (outcome, receipt_key) = if let Some(disposition) = disposition {
             let change = processing_disposition::prepare(
                 candidate.as_ref(),
                 &self.record,
@@ -727,15 +913,28 @@ impl<'a> PreparedProtectedAction<'a> {
                 },
                 disposition,
             )?;
+            let key = change.key.clone();
             candidate
                 .try_apply(&StateDiff {
                     protocol_changes: vec![change],
                     ..StateDiff::default()
                 })
                 .map_err(debug)?;
-            return Ok(CandidateActionOutcome::Disposition(disposition));
-        }
-        self.execute(candidate, slot)
+            (CandidateActionOutcome::Disposition(disposition), key)
+        } else {
+            let outcome = self.execute(candidate, slot)?;
+            let key = match &outcome {
+                CandidateActionOutcome::Transfer(transfer) => transfer.settlement_key.clone(),
+                CandidateActionOutcome::SponsoredEnrollment(..) => super::sponsor_settlement::receipt_key(
+                    &self.record.sender_wallet,
+                    self.record.sender_nonce,
+                ),
+                CandidateActionOutcome::Disposition(_) => unreachable!("handled above"),
+            };
+            (outcome, key)
+        };
+        retirement::record_outcome(candidate, slot.inclusion.height, &self.record, receipt_key)?;
+        Ok(outcome)
     }
 
     fn execute(

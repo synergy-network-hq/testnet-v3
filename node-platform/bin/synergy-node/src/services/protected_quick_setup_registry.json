@@ -1,0 +1,11 @@
+{
+  "format": "synergy-protected-wallet-dual-enrollment-v2",
+  "base_action_registry_sha256": "aee5e1e0cdc826fc00061d29696adfa291a878cd8689e8d247e49a2cef697bce",
+  "additional_initial_enrollment": {
+    "action_id": 28674,
+    "enrollment_schema": 2,
+    "authorization": "D+P enrollment + ownership + two-party DKG + SPONSOR",
+    "native_spend": ["D", "P"],
+    "recovery": "unset"
+  }
+}

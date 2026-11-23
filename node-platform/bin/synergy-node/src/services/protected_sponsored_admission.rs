@@ -1,6 +1,6 @@
 //! Engineering path for sponsored enrollment through the encrypted envelope.
 use super::{
-    debug, sponsor_digest, CandidateProtectedAccounts, EnrollmentProofs, FinalizedSnapshot,
+    debug, sponsor_digest, CandidateProtectedAccounts, InitialEnrollmentProofs, FinalizedSnapshot,
     Mldsa87, Position, PqProvider, ProtectedExecutionWorld, PublicKey, SignOptions, Signature,
     SponsorProof,
 };
@@ -144,9 +144,9 @@ impl CandidateProtectedAccounts<'_> {
                 inclusion,
                 content.payload,
                 &proof,
-                EnrollmentProofs {
+                InitialEnrollmentProofs {
                     ordinary: &reveal.ordinary,
-                    recovery: &reveal.recovery,
+                    recovery: reveal.recovery.as_ref(),
                     ownership: &reveal.ownership,
                     salt: &reveal.salt,
                 },
