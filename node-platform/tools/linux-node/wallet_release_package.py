@@ -1,5 +1,26 @@
 #!/usr/bin/env python3
-"""Prepare the public artifact index and selection, or compose a managed Wallet package."""
+"""Prepare the public artifact index and selection, or compose a managed Wallet package.
+
+1. Freeze and review the native base package and its APQE report. Run index
+   with the independently verified chain ID, network ID and logical Genesis.
+2. Give the release issuer the exact certified predecessor, its governed
+   ETDAG parameters, the artifact index SHA-256, the existing off-chain
+   approval and release attestation SHA-256s, and the reviewed compiled action,
+   wire, vector, provider and fee pins. Select an epoch with an unused
+   closing vote slot. Use synergy-genesis wallet-release-transcript and
+   wallet-release-attach-signature with independent native signing custody.
+3. The release issuer supplies ML-DSA-65 signatures for the dispatch release
+   and the selected host's verification qualification. The original signed
+   Genesis authority supplies the ML-DSA-65 issuer delegation bound to the
+   signed dispatch attachment and the 1952-byte issuer public key. For each
+   signature use the entire transcript, pure ML-DSA-65 and an empty FIPS
+   context. The qualification also binds the exact selected ML-DSA-87 library,
+   APQE report, native identity and release context.
+4. Use selection, then compose. Approve the complete composed package manifest
+   in Portal → dApp Hub → NodeNetwork and use its native managed preflight for
+   cryptographic authentication. Verify fleet readiness and activation through
+   the same workflow.
+"""
 import argparse
 import hashlib
 import json
@@ -188,7 +209,9 @@ def compose(package, expected, release, index_sha256, output):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    summary, sequence = __doc__.split('\n', 1)
+    parser = argparse.ArgumentParser(description=summary, epilog=sequence,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest='operation', required=True)
     prepare = commands.add_parser('index')
     selection = commands.add_parser('selection')
