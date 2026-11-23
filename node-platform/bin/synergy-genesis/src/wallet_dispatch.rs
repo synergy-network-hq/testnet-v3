@@ -4,8 +4,9 @@
 
 use serde::{Deserialize, Serialize};
 use synergy_aegis::{
-    ChainId, CryptoEngine, EnrollmentRegistryRelease, EnrollmentRegistryReleaseIssuer, KeyId,
-    NativeGenesisHash, SignatureAlgorithm, SigningContext, VerifiedEnrollmentRegistryRelease,
+    AegisProtectedPrimitives, AegisVerifier, ChainId, CryptoEngine, EnrollmentRegistryRelease,
+    EnrollmentRegistryReleaseIssuer, KeyId, NativeGenesisHash, Signature, SignatureAlgorithm,
+    SigningContext, VerifiedEnrollmentRegistryRelease,
 };
 use synergy_etdag::EtdagParameters;
 use synergy_posy::{
@@ -16,7 +17,9 @@ use synergy_posy::{
 use super::{ProtectedCutoffRelationship, ProtectedEpochPolicy};
 
 pub use synergy_aegis::ENROLLMENT_REGISTRY_RELEASE_DOMAIN as WALLET_DISPATCH_RELEASE_DOMAIN;
+pub const WALLET_RELEASE_ISSUER_DOMAIN: &str = "SYNERGY-POSY-WALLET-RELEASE-ISSUER-V1";
 const MAX_RELEASE_BYTES: usize = 32 * 1024;
+const MAX_ISSUER_AUTHORIZATION_BYTES: usize = 24 * 1024;
 const ML_DSA_65_PUBLIC_KEY_BYTES: usize = 1952;
 const ML_DSA_65_SIGNATURE_BYTES: usize = 3309;
 
@@ -242,6 +245,109 @@ pub struct WalletDispatchReleaseTrust<'a> {
     pub managed_release_manifest_sha256: &'a str,
     pub off_chain_approval_sha256: &'a str,
     pub release_attestation_sha256: &'a str,
+}
+
+/// Independent origin and release pins supplied by the native selection owner.
+/// The authority key must come from the same separately authenticated origin
+/// as `origin`. None of these are taken from a gateway's release response.
+pub struct WalletDispatchReleaseIssuerTrust<'a> {
+    pub origin: &'a crate::signing::SignedGenesis,
+    pub authority_public_key: &'a [u8],
+    pub attachment_sha256: &'a str,
+    pub issuer_sha256: &'a str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WalletDispatchReleaseIssuerAuthorization {
+    pub version: u32,
+    pub genesis_hash: String,
+    pub attachment_sha256: String,
+    pub issuer_sha256: String,
+    pub issuer_key_id: String,
+    pub signature: Vec<u8>,
+}
+
+impl WalletDispatchReleaseIssuerAuthorization {
+    pub fn signing_bytes(&self) -> Result<Vec<u8>, String> {
+        let mut bytes = WALLET_RELEASE_ISSUER_DOMAIN.as_bytes().to_vec();
+        bytes.push(0);
+        serde_json::to_writer(
+            &mut bytes,
+            &(
+                self.version,
+                &self.genesis_hash,
+                &self.attachment_sha256,
+                &self.issuer_sha256,
+                &self.issuer_key_id,
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(bytes)
+    }
+
+    pub fn verify(
+        original: &[u8],
+        attachment: &[u8],
+        trust: &WalletDispatchReleaseTrust<'_>,
+        issuer_trust: &WalletDispatchReleaseIssuerTrust<'_>,
+        verifier: &impl AegisVerifier,
+    ) -> Result<Self, String> {
+        if original.is_empty()
+            || original.len() > MAX_ISSUER_AUTHORIZATION_BYTES
+            || attachment.is_empty()
+            || attachment.len() > MAX_RELEASE_BYTES
+        {
+            return Err("Wallet release issuer authorization exceeds its bound".into());
+        }
+        let authorization: Self = serde_json::from_slice(original)
+            .map_err(|_| "invalid signed Wallet release issuer authorization")?;
+        let hash_matches = |bytes: &[u8], pin: &str| {
+            synergy_posy::parse_hash_bytes(pin).is_ok_and(|expected| {
+                expected != [0; 32] && AegisProtectedPrimitives.sha256(bytes) == expected
+            })
+        };
+        if issuer_trust.authority_public_key.len() != ML_DSA_65_PUBLIC_KEY_BYTES
+            || trust.release_signer_public_key.len() != ML_DSA_65_PUBLIC_KEY_BYTES
+            || issuer_trust.origin.genesis_hash != trust.genesis_hash
+            || authorization.version != 1
+            || authorization.genesis_hash != trust.genesis_hash
+            || authorization.attachment_sha256 != issuer_trust.attachment_sha256
+            || authorization.issuer_sha256 != issuer_trust.issuer_sha256
+            || authorization.issuer_key_id != trust.release_signer_key_id.as_str()
+            || authorization.signature.len() != ML_DSA_65_SIGNATURE_BYTES
+            || !hash_matches(attachment, issuer_trust.attachment_sha256)
+            || !hash_matches(trust.release_signer_public_key, issuer_trust.issuer_sha256)
+            || serde_json::to_vec(&authorization).map_err(|error| error.to_string())? != original
+        {
+            return Err("Wallet release issuer is outside the signed origin delegation".into());
+        }
+        crate::signing::verify(
+            issuer_trust.origin,
+            verifier,
+            issuer_trust.authority_public_key,
+        )?;
+        let root_key = KeyId::new(&issuer_trust.origin.unsigned.authority_trust_key_id)
+            .map_err(|error| error.to_string())?;
+        verifier
+            .verify(
+                &SigningContext {
+                    domain: WALLET_RELEASE_ISSUER_DOMAIN.into(),
+                    chain_id: issuer_trust.origin.unsigned.network.chain_id,
+                    epoch: None,
+                    height: None,
+                },
+                &authorization.signing_bytes()?,
+                &Signature {
+                    algorithm: SignatureAlgorithm::MlDsa65,
+                    key_id: root_key,
+                    bytes: authorization.signature.clone(),
+                },
+                issuer_trust.authority_public_key,
+            )
+            .map_err(|_| "Wallet release issuer delegation signature is invalid")?;
+        Ok(authorization)
+    }
 }
 
 /// This in-memory capability cannot be decoded directly or supply an active

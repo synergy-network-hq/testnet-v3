@@ -1,6 +1,8 @@
 //! Explicit APQE primitive boundary for existing protected-envelope formats.
 //! Callers own nonce uniqueness and exact transcript framing.
-use synergy_address_engine::apqe::{HashAlgorithm, Primitives, SecretBytes};
+use synergy_address_engine::apqe::{
+    fixed_digest, FixedDigest, HashAlgorithm, Primitives, SecretBytes,
+};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AegisProtectedPrimitives;
@@ -8,6 +10,10 @@ pub struct AegisProtectedPrimitives;
 pub struct PrimitiveError;
 
 impl AegisProtectedPrimitives {
+    pub fn sha256(&self, bytes: &[u8]) -> [u8; 32] {
+        fixed_digest(&Primitives, FixedDigest::Sha256, bytes)
+    }
+
     pub fn random_bytes(&self, output: &mut [u8]) -> Result<(), PrimitiveError> {
         Primitives.random_bytes(output).map_err(|_| PrimitiveError)
     }

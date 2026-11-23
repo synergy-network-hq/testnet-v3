@@ -12,7 +12,9 @@ pub use synergy_posy::SimplifiedFinalityParent as AuthorityParent;
 mod wallet_dispatch;
 pub use wallet_dispatch::{
     ProtectedWalletDispatchPolicy, SignedWalletDispatchRelease, VerifiedWalletDispatchRelease,
+    WalletDispatchReleaseIssuerAuthorization, WalletDispatchReleaseIssuerTrust,
     WalletDispatchReleasePayload, WalletDispatchReleaseTrust, WALLET_DISPATCH_RELEASE_DOMAIN,
+    WALLET_RELEASE_ISSUER_DOMAIN,
 };
 
 impl AuthorityPayload {
