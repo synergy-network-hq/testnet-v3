@@ -1,5 +1,7 @@
 """Isolated managed package and restart regressions without a host or service."""
 import copy
+from contextlib import redirect_stdout
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -144,7 +146,7 @@ class WalletReleaseUpgradeTests(unittest.TestCase):
         self.assertFalse((self.root/life.UPGRADE_INTENT).exists())
         self.assertEqual(json.loads((self.root/'config/node.json').read_bytes()), self.config)
 
-    def test_offline_composer_preserves_exact_base_and_requires_selected_index(self):
+    def _offline_base(self):
         base = self.root.parent/'unsealed-base'
         manifest = {'format': 'synergy-universal-linux-v1', 'architecture': 'x86_64',
                     'release_id': 'wallet-qualification-fixture', 'files': {}}
@@ -161,10 +163,15 @@ class WalletReleaseUpgradeTests(unittest.TestCase):
         save(base/'tools/runtime_probe.py', b'new stage verifier')
         report = 'lib/apqe/build-report.json'
         save(base/report, b'candidate report')
+        save(base/'lib/apqe/libaegismldsa65.so', b'public release verifier fixture')
+        save(base/'lib/apqe/libaegismldsa87.so', b'public enrollment verifier fixture')
         manifest['files'] = {p.relative_to(base).as_posix(): digest(p) for p in base.rglob('*') if p.is_file()}
         manifest['apqe_provider'] = {'report_sha256': manifest['files'][report]}
         save(base/'package.json', manifest)
-        base_pin = digest(base/'package.json')
+        return base, digest(base/'package.json'), manifest
+
+    def test_offline_composer_preserves_exact_base_and_requires_selected_index(self):
+        base, base_pin, _ = self._offline_base()
         index = producer.artifact_index(base, base_pin, 99999, self.identity['network_id'], self.genesis)
         entry = json.loads(index)['platforms'][0]
         self.assertEqual(entry['base_package_manifest_sha256'], base_pin)
@@ -180,6 +187,13 @@ class WalletReleaseUpgradeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'approved digest'):
             producer.compose(base, base_pin, inputs, 'f'*64, output)
         self.assertFalse(output.exists())
+        wrong_index = json.loads(index)
+        wrong_index['platforms'].append({**entry, 'executable_size': entry['executable_size'] + 1})
+        index_path.write_bytes(json.dumps(wrong_index).encode())
+        with self.assertRaisesRegex(ValueError, 'does not bind this base package'):
+            producer.compose(base, base_pin, inputs, digest(index_path), output)
+        self.assertFalse(output.exists())
+        index_path.write_bytes(index)
         result = producer.compose(base, base_pin, inputs, index_pin, output)
         self.assertFalse(result['managed_preflight_verified'])
         self.assertEqual(result['base_package_manifest_sha256'], base_pin)
@@ -188,6 +202,78 @@ class WalletReleaseUpgradeTests(unittest.TestCase):
         self.assertEqual(producer.verify_package(output)['files']['bin/synergy-node'], entry['executable_sha256'])
         self.assertEqual(layout.wallet_release_package(output, producer.verify_package(output))[0],
                          {**selection, 'from_sealed_package': True})
+
+    def test_offline_selection_binds_reviewed_bytes_and_packaged_verifier(self):
+        base, base_pin, manifest = self._offline_base()
+        release = self.root.parent/'public-wallet-release'
+        release.mkdir(mode=0o700)
+        index = release/'wallet-dispatch-managed-artifacts.json'
+        attachment = release/'wallet-dispatch-release.json'
+        issuer = release/'wallet-dispatch-release-issuer.pub'
+        endorsement = release/'wallet-dispatch-release-issuer-authorization.json'
+        qualification = release/'wallet-dispatch-ml-dsa-87-qualification.json'
+        save(index, producer.artifact_index(base, base_pin, 99999, self.identity['network_id'], self.genesis))
+        save(issuer, b'R'*1952)
+        proof_pin = manifest['files']['lib/apqe/libaegismldsa87.so']
+        evidence = {'managed_release_manifest_sha256': digest(index),
+                    'off_chain_approval_sha256': 'ab'*32, 'release_attestation_sha256': 'bc'*32}
+        signer = 'fixture-wallet-release-key'
+        signature = [1] * 3309  # Structural package test only. Native signature tests are separate.
+        payload = {'version': 1, 'signer_key_id': signer, 'predecessor_context_root': '2'*64,
+                   'policy': {'version': 1, 'chain_id': 99999, 'network_id': self.identity['network_id'],
+                              'genesis_hash': self.genesis, 'enrollment_proof_provider_artifacts': [proof_pin],
+                              **evidence}}
+        save(attachment, {'payload': payload, 'signature_algorithm': 'ml_dsa65', 'signature': signature})
+        approved = {**evidence, 'attachment_sha256': digest(attachment), 'issuer_sha256': digest(issuer)}
+        delegation = {'version': 1, 'genesis_hash': self.genesis, 'issuer_key_id': signer,
+                      'attachment_sha256': approved['attachment_sha256'], 'issuer_sha256': approved['issuer_sha256'],
+                      'signature': signature}
+        save(endorsement, delegation)
+        qualifier = {'version': 1, 'target': 'x86_64-unknown-linux-gnu', 'artifact_sha256': list(bytes.fromhex(proof_pin)),
+                     'release_attestation_sha256': list(bytes.fromhex(evidence['release_attestation_sha256'])),
+                     'report_sha256': list(bytes.fromhex(manifest['apqe_provider']['report_sha256']))}
+        save(qualification, {'qualification': qualifier, 'signature': signature})
+
+        def prepare(pins):
+            return producer.prepare_selection(base, base_pin, release, pins)
+        with self.assertRaisesRegex(ValueError, 'differs from its approved bytes'):
+            prepare({**approved, 'issuer_sha256': 'dc'*32})
+        with self.assertRaisesRegex(ValueError, 'reviewed package and evidence'):
+            prepare({**approved, 'release_attestation_sha256': 'de'*32})
+        endorsement.write_bytes(json.dumps({**delegation, 'genesis_hash': 'ba'*32}).encode())
+        with self.assertRaisesRegex(ValueError, 'issuer delegation'):
+            prepare(approved)
+        endorsement.write_bytes(json.dumps(delegation).encode())
+        for coordinates in ({'report_sha256': [9]*32}, {'artifact_sha256': [9]*32},
+                            {'target': 'aarch64-apple-darwin'}):
+            qualification.write_bytes(json.dumps({'qualification': {**qualifier, **coordinates},
+                                                  'signature': signature}).encode())
+            with self.assertRaisesRegex(ValueError, 'packaged artifact'):
+                prepare(approved)
+        qualification.write_bytes(json.dumps({'qualification': qualifier, 'signature': signature}).encode())
+
+        selection = release/'selection.json'
+        command = ['wallet_release_package.py', 'selection', '--base', str(base), '--base-sha256', base_pin,
+                   '--release-inputs', str(release), '--output', str(selection),
+                   '--index-sha256', approved['managed_release_manifest_sha256'],
+                   '--attachment-sha256', approved['attachment_sha256'], '--issuer-sha256', approved['issuer_sha256'],
+                   '--off-chain-approval-sha256', approved['off_chain_approval_sha256'],
+                   '--release-attestation-sha256', approved['release_attestation_sha256']]
+        stream = io.StringIO()
+        with patch('sys.argv', command), redirect_stdout(stream):
+            producer.main()
+            with self.assertRaisesRegex(ValueError, 'Exact public signed Wallet release inputs required'):
+                producer.main()
+        expected = {**approved, 'issuer_key_id': signer,
+                    'release_verifier_artifact_sha256': manifest['files']['lib/apqe/libaegismldsa65.so']}
+        self.assertEqual(selection.read_bytes(), layout._canonical_package_manifest(expected))
+        self.assertEqual(json.loads(stream.getvalue()), {'selection_sha256': digest(selection),
+                                                         'managed_preflight_verified': False})
+        output = self.root.parent/'selected-release-package'
+        result = producer.compose(base, base_pin, release, approved['managed_release_manifest_sha256'], output)
+        self.assertFalse(result['managed_preflight_verified'])
+        self.assertEqual(layout.wallet_release_package(output, producer.verify_package(output))[0],
+                         {**expected, 'from_sealed_package': True})
 
 
 if __name__ == '__main__':
