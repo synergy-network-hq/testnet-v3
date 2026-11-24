@@ -1,4 +1,6 @@
 import copy
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import nullcontext
 import hashlib
 import importlib.util
 import json
@@ -294,12 +296,13 @@ class AsyncProofTests(unittest.TestCase):
         self.assertEqual({row["record"]["sender"] for row in rows if row["kind"] == "finalized_transfer"}, {"sender", "sender-1"})
 
     def test_async_wallet_window_32_reserves_each_nonce_once_and_releases_terminal_records(self):
-        report, rows = self.simulated_async(inclusion_delay=15, max_tx=32, per_wallet=32, batch=True)
+        report, rows = self.simulated_async(inclusion_delay=15, max_tx=32, per_wallet=32,
+                                            batch=True, deterministic_author=True)
         finalized = [row["record"] for row in rows if row["kind"] == "finalized_transfer"]
         self.assertEqual(report["finalized_transactions"], 32)
         self.assertEqual({r["nonce"] for r in finalized}, set(range(32)))
         self.assertEqual(report["transactions"], [])
-        self.assertLessEqual(report["peak_in_flight"], 32)
+        self.assertEqual(report["peak_in_flight"], 32)
 
     def test_ambiguous_accepted_nonce_freezes_wallet_without_resubmit_or_successor(self):
         report, rows = self.simulated_async(inclusion_delay=15, max_tx=4, per_wallet=4, ambiguous=True)
@@ -363,7 +366,7 @@ class AsyncProofTests(unittest.TestCase):
 
     def simulated_async(self, inclusion_delay=1, max_tx=3, drain_timeout=None, stalled=False, failure=None,
                         per_wallet=1, wallet_count=1, batch=False, ambiguous=False, corrupt=None, first_use=False, cancel_after_submit=False,
-                        cadence_seconds=1.0, observation_cohort="legacy-five"):
+                        cadence_seconds=1.0, observation_cohort="legacy-five", deterministic_author=False):
         observers = harness.CANARY_OBSERVERS if observation_cohort == "canary-four" else harness.VALIDATORS
         real_sleep = time.sleep
         class Clock:
@@ -498,7 +501,29 @@ class AsyncProofTests(unittest.TestCase):
                 drain_timeout_seconds=drain_timeout, maximum_gap_seconds=30, receiver="receiver", amount_nwei=1, gas_limit=21000,
                 max_fee_per_gas_nwei=1, gas_class_units=21000, fee_class=1, keytool=keytool, raw_proof_stream=None,
                 raw_proof_budget_bytes=4*1024*1024, temp_dir=root)
-            with patch.object(adapter, "time", clock):
+            class ImmediateAuthor:
+                def submit(self, action, *args):
+                    future = Future()
+                    try:
+                        future.set_result(action(*args))
+                    except BaseException as error:
+                        future.set_exception(error)
+                    return future
+
+                def shutdown(self, **_options):
+                    pass
+
+            # This case fills one sender window before a delayed batch and does
+            # not measure authoring speed. Keep the proof reader asynchronous.
+            def fixture_executor(*, max_workers):
+                if max_workers == args.author_workers:
+                    return ImmediateAuthor()
+                return ThreadPoolExecutor(max_workers=max_workers)
+
+            args.author_workers = 8
+            author_context = (patch.object(adapter.concurrent.futures, "ThreadPoolExecutor", fixture_executor)
+                              if deterministic_author else nullcontext())
+            with patch.object(adapter, "time", clock), author_context:
                 if failure:
                     with self.assertRaisesRegex(KeyboardInterrupt if cancel_after_submit else harness.BaselineError,
                                                 "" if cancel_after_submit else failure):
