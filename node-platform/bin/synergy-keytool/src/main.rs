@@ -68,6 +68,31 @@ fn run() -> Result<(), String> {
             return Err(wallet_sponsor_identity::USAGE.into());
         }
         #[cfg(unix)]
+        [command] if command == "wallet-release-contract" => {
+            println!("{}",network_formation::wallet_release_authoring::contract(
+                &engine.ok_or("authenticated native APQE provider required")?,
+                supplied.last().ok_or("authenticated APQE report required")?)?);
+        }
+        #[cfg(unix)]
+        [command, context, formation_pin, formation, request, request_pin, tail @ ..]
+            if matches!(command.as_str(), "prepare-wallet-release-authoring" | "sign-wallet-release-authoring" | "review-wallet-release-authoring") =>
+        {
+            use network_formation::wallet_release_authoring::{prepare, sign, status, Inputs};
+            if (command != "sign-wallet-release-authoring" && !tail.is_empty())
+                || (command == "sign-wallet-release-authoring" && tail.len() != 1)
+            {
+                return Err("Wallet release authoring requires context, formation pin, custody, exact request and request pin; signing also requires its native review pin".into());
+            }
+            let input = Inputs {context:Path::new(context),formation_sha256:formation_pin,
+                formation:Path::new(formation),request:Path::new(request),request_sha256:request_pin,
+                provider_report_sha256:supplied.last().ok_or("authenticated APQE report required")?};
+            let engine=engine.ok_or("authenticated native APQE provider required")?;
+            let result=if command=="prepare-wallet-release-authoring" {prepare(input,engine)?}
+                else if command=="review-wallet-release-authoring" {status(input,engine)?}
+                else {sign(input,&tail[0],engine)?};
+            println!("{result}");
+        }
+        #[cfg(unix)]
         [command, context, formation_pin, formation, reviewed, request, request_pin]
             if matches!(command.as_str(), "inspect-wallet-release-issuer" | "delegate-wallet-release-issuer") =>
         {
@@ -755,6 +780,10 @@ fn selected_arguments(
                 Some("CONTEXT_JSON CONTEXT_SHA256 PRIVATE_DIRECTORY SIGNED_PUBLIC_DIRECTORY BOUND_CUSTODY_DIRECTORY GENESIS_SHA256 AUTHORITY_SHA256 TRUST_ROOT_SHA256"),
             "inspect-wallet-release-issuer" | "delegate-wallet-release-issuer" =>
                 Some("CONTEXT_JSON FORMATION_SHA256 FORMATION_DIR REVIEWED_INPUT_DIR REQUEST_JSON REQUEST_SHA256"),
+            "prepare-wallet-release-authoring" | "review-wallet-release-authoring" =>
+                Some("CONTEXT_JSON FORMATION_SHA256 FORMATION_DIR REQUEST_JSON REQUEST_SHA256"),
+            "sign-wallet-release-authoring" =>
+                Some("CONTEXT_JSON FORMATION_SHA256 FORMATION_DIR REQUEST_JSON REQUEST_SHA256 REVIEW_SHA256"),
             _ => None,
         };
         if let Some(usage) = usage {
@@ -773,6 +802,10 @@ fn selected_arguments(
     if !matches!(
         command,
         "check-gateway-admission"
+            | "wallet-release-contract"
+            | "prepare-wallet-release-authoring"
+            | "review-wallet-release-authoring"
+            | "sign-wallet-release-authoring"
             | "inspect-wallet-release-issuer"
             | "delegate-wallet-release-issuer"
             | "prepare-wallet-sponsor-identity"

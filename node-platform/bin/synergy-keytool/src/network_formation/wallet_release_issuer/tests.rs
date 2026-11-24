@@ -151,6 +151,9 @@ pub(in crate::network_formation) fn exercise(
     write(&reviewed.join(QUALIFICATION_FILE), &qualification).unwrap();
     drop(engine_guard);
 
+    super::super::wallet_release_authoring::exercise(context,formation_sha256,formation,parent,
+        &payload,&predecessor,parameters,&index,engine.clone());
+
     let request = json!({"version":1, "operation":ACTION, "parameters":{
         "formation_sha256":formation_sha256, "formation_review_sha256":prepared.review_pin,
         "genesis_sha256":digest(signed.genesis_bytes.as_bytes()),

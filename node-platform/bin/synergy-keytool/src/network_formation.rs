@@ -24,6 +24,7 @@ const REGISTRATION_LIMIT: usize = 128 * 1024;
 const ROLE: &str = "fresh-genesis-formation-ml-dsa-65";
 
 pub(super) mod wallet_release_issuer;
+pub(super) mod wallet_release_authoring;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
