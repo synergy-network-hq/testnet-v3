@@ -23,6 +23,8 @@ const RECIPE_LIMIT: usize = 1024 * 1024;
 const REGISTRATION_LIMIT: usize = 128 * 1024;
 const ROLE: &str = "fresh-genesis-formation-ml-dsa-65";
 
+pub(super) mod wallet_release_issuer;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Request<T> {
@@ -281,6 +283,14 @@ struct Prepared {
     custody: Custody,
     unlock: SecretBytes,
 }
+
+struct SignedFormation {
+    genesis: SignedGenesis,
+    authority: SignedAuthorityBinding,
+    genesis_bytes: SecretBytes,
+    authority_bytes: SecretBytes,
+    sign_request_sha256: String,
+}
 fn load(
     context_path: &Path,
     context_pin: &str,
@@ -372,6 +382,53 @@ fn load(
     })
 }
 impl Prepared {
+    fn read_signed_formation(&self, directory: &Path) -> Result<Option<SignedFormation>, String> {
+        if directory.join("signed-pending").exists() {
+            return Err(
+                "Interrupted formation signing requires reconciliation; no regeneration".into(),
+            );
+        }
+        let signed = directory.join("signed");
+        if !signed.exists() {
+            return Ok(None);
+        }
+        private_dir(&signed)?;
+        let request = read(&signed.join("sign-request.json"), 4096, true)?;
+        let request_sha256 = digest(request.as_bytes());
+        let request: Request<Sign> = decode(&request)?;
+        if request.version != 1
+            || request.operation != "network_formation_sign"
+            || request.parameters.review_sha256 != self.review_pin
+        {
+            return Err("Signed request differs from reviewed formation".into());
+        }
+        let genesis_bytes = read(&signed.join("genesis.json"), REQUEST_LIMIT, true)?;
+        let authority_bytes = read(&signed.join("authority.json"), REQUEST_LIMIT, true)?;
+        let genesis: SignedGenesis = decode(&genesis_bytes)?;
+        let authority: SignedAuthorityBinding = decode(&authority_bytes)?;
+        if genesis.unsigned != self.genesis
+            || authority.payload.signing_bytes()? != self.authority.signing_bytes()?
+        {
+            return Err("Signed outputs differ from reviewed source".into());
+        }
+        let id = KeyId::new(self.review.key_id.clone()).map_err(|e| e.to_string())?;
+        synergy_genesis::signing::verify(
+            &genesis,
+            &crate::provider::verifier(policy(), Some(self.signer.clone()))?,
+            &self.public,
+        )?;
+        crate::authority::check_with_provider(
+            &authority, &id, &self.public, Some(self.signer.clone())
+        )?;
+        Ok(Some(SignedFormation {
+            genesis,
+            authority,
+            genesis_bytes,
+            authority_bytes,
+            sign_request_sha256: request_sha256,
+        }))
+    }
+
     fn signer(&self) -> Result<impl AegisSigner, String> {
         let guard = self
             .signer
@@ -430,47 +487,18 @@ pub fn status(
         .verify(&ctx, possession.as_bytes(), &proof, &p.public)
         .map_err(|e| e.to_string())?;
     let mut result = p.receipt();
-    if directory.join("signed-pending").exists() {
-        return Err(
-            "Interrupted formation signing requires reconciliation; no regeneration".into(),
-        );
-    }
-    let signed = directory.join("signed");
-    if !signed.exists() {
+    let Some(signed) = p.read_signed_formation(directory)? else {
         if export {
             return Err("Reviewed network formation has not been signed".into());
         }
         return Ok(result);
-    }
-    private_dir(&signed)?;
-    let sign_request = read(&signed.join("sign-request.json"), 4096, true)?;
-    let req: Request<Sign> = decode(&sign_request)?;
-    if req.version != 1
-        || req.operation != "network_formation_sign"
-        || req.parameters.review_sha256 != p.review_pin
-    {
-        return Err("Signed request differs from reviewed formation".into());
-    }
-    let g = read(&signed.join("genesis.json"), REQUEST_LIMIT, true)?;
-    let a = read(&signed.join("authority.json"), REQUEST_LIMIT, true)?;
-    let genesis: SignedGenesis = decode(&g)?;
-    let authority: SignedAuthorityBinding = decode(&a)?;
-    if genesis.unsigned != p.genesis
-        || authority.payload.signing_bytes()? != p.authority.signing_bytes()?
-    {
-        return Err("Signed outputs differ from reviewed source".into());
-    }
-    let id = KeyId::new(p.review.key_id.clone()).map_err(|e| e.to_string())?;
-    synergy_genesis::signing::verify(
-        &genesis,
-        &crate::provider::verifier(policy(), Some(engine.clone()))?,
-        &p.public,
-    )?;
-    crate::authority::check_with_provider(&authority, &id, &p.public, Some(engine))?;
+    };
+    let g = signed.genesis_bytes;
+    let a = signed.authority_bytes;
     result["signed"] = true.into();
     result["genesis_sha256"] = digest(g.as_bytes()).into();
     result["authority_sha256"] = digest(a.as_bytes()).into();
-    result["sign_request_sha256"] = digest(sign_request.as_bytes()).into();
+    result["sign_request_sha256"] = signed.sign_request_sha256.into();
     if export {
         use base64::{engine::general_purpose::STANDARD, Engine as _};
         let exported = json!({"schema":"nodenetwork-network-formation-export-v1","review_sha256":p.review_pin,
@@ -557,6 +585,8 @@ pub(crate) fn exercise_native_fixture(
     transport_custodies:&[(EncryptedEnvelope,SecretBytes)],
 ) {
     let mut recipe: Value = decode(&read(recipe_path, REQUEST_LIMIT, true).unwrap()).unwrap();
+    recipe["network"]["autonomous_epoch_protocol"] =
+        json!(synergy_genesis::network::AUTONOMOUS_EPOCH_PROTOCOL_V1);
     recipe["authority"]["protected"]["version"] = json!(2);
     recipe["authority"]["protected"]["cutoff_relationship"] = json!("processing_groups_v1");
     recipe["canary_testing_treasury"] = crate::formation_treasury::prepare_send_fixture_treasury(context_path,context_pin,parent,engine.clone(),recipe["network"]["activation_unix"].as_u64().unwrap());
@@ -665,6 +695,9 @@ pub(crate) fn exercise_native_fixture(
         let (enrollment,_)=synergy_address_engine::validator_provisioning::bind_formation(&engine.lock().unwrap(),&registration,&registration.payload.formation,envelope,std::str::from_utf8(unlock.as_bytes()).unwrap(),synergy_address_engine::validator_provisioning::NetworkBinding{chain_id_hex:registration.payload.formation.chain_id_hex.clone(),genesis_sha256:signed["genesis_sha256"].as_str().unwrap().into()}).unwrap();
         enrolled.push(serde_json::to_string(&enrollment).unwrap());
     }
+    wallet_release_issuer::tests::exercise(
+        context_path, context_pin, &directory, parent, engine.clone(),
+    );
     crate::network_transport::exercise_native_fixture(context_path,context_pin,&directory,parent,engine.clone(),&enrolled);
     crate::formation_treasury::exercise_send_fixture(context_path,context_pin,&directory,parent,engine.clone());
     let unlock = SecretBytes::from_bytes(fs::read(directory.join("unlock")).unwrap());

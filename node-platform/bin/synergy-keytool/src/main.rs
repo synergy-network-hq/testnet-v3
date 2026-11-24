@@ -38,8 +38,8 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
-    let (arguments, engine) = selected_arguments(&arguments)?;
+    let supplied = std::env::args().skip(1).collect::<Vec<_>>();
+    let (arguments, engine) = selected_arguments(&supplied)?;
     match arguments {
         [command, request, output] if command == "prepare-wallet-sponsor-identity" => {
             wallet_sponsor_identity::prepare(
@@ -66,6 +66,28 @@ fn run() -> Result<(), String> {
             ) =>
         {
             return Err(wallet_sponsor_identity::USAGE.into());
+        }
+        #[cfg(unix)]
+        [command, context, formation_pin, formation, reviewed, request, request_pin]
+            if command == "delegate-wallet-release-issuer" =>
+        {
+            println!(
+                "{}",
+                network_formation::wallet_release_issuer::delegate(
+                    network_formation::wallet_release_issuer::Inputs {
+                        context: Path::new(context),
+                        formation_sha256: formation_pin,
+                        formation: Path::new(formation),
+                        reviewed: Path::new(reviewed),
+                        request: Path::new(request),
+                        request_sha256: request_pin,
+                        provider_report_sha256: supplied
+                            .last()
+                            .ok_or("authenticated APQE report digest required")?,
+                    },
+                    engine.ok_or("authenticated APQE provider required")?,
+                )?
+            );
         }
         #[cfg(unix)]
         [command, context, pin, formation, transport] if command == "review-gateway-issuer" => {
@@ -747,6 +769,7 @@ fn selected_arguments(
     if !matches!(
         command,
         "check-gateway-admission"
+            | "delegate-wallet-release-issuer"
             | "prepare-wallet-sponsor-identity"
             | "attach-wallet-sponsor-identity"
             | "review-gateway-issuer"
