@@ -67,6 +67,10 @@ class FormationReviewTests(unittest.TestCase):
             self.assertEqual(result["initial_allocation_total_nwei"], "123")
             self.assertEqual(result["initial_quorum"]["minimum_distinct_signers"], 4)
             self.assertEqual(result["initial_quorum"]["minimum_signed_weight"], "334")
+            self.assertTrue(all(
+                entry["quorum_possible"]
+                for entry in result["initial_quorum"]["single_validator_dropout"].values()
+            ))
             with self.assertRaisesRegex(ValueError, "approved allocation map"):
                 formation.review(directory, {**expectations, "allocations": {}})
             with self.assertRaisesRegex(ValueError, "balance or purpose"):
@@ -101,6 +105,24 @@ class FormationReviewTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "authority roster"):
                 formation.review(directory, expectations)
 
+
+    def test_dropout_report_preserves_strict_weight_quorum(self):
+        # Four of five satisfy count, but 400 of 600 is exactly two thirds.
+        quorum = formation.initial_quorum({"heavy": 200, **{f"v{i}": 100 for i in range(4)}})
+        self.assertEqual(quorum["minimum_signed_weight"], "401")
+        self.assertEqual(quorum["single_validator_dropout"]["heavy"], {
+            "remaining_signer_count": 4,
+            "remaining_signing_weight": "400",
+            "quorum_possible": False,
+        })
+        self.assertTrue(quorum["single_validator_dropout"]["v0"]["quorum_possible"])
+
+    def test_full_roster_weight_must_fit_native_quorum_arithmetic(self):
+        maximum = formation.U128_MAX // 3
+        weights = {"a": maximum - 4, "b": 1, "c": 1, "d": 1, "e": 1}
+        self.assertEqual(formation.initial_quorum(weights)["total_frozen_voting_weight"], str(maximum))
+        with self.assertRaisesRegex(ValueError, "overflow native quorum"):
+            formation.initial_quorum({**weights, "a": maximum - 3})
 
     def test_treasury_projection_requires_exact_operator_approval(self):
         recipe = {"authority": {"protected": {"initial_world_state": {"accounts": {}}}},

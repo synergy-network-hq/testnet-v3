@@ -105,13 +105,33 @@ def review_signers(authority, identities, height):
                 or any(type(byte) is not int for key in (entry["public_key"], member_ingress["public_key"]) for byte in key)):
             raise ValueError("authority signer, frozen weight or ingress key differs from formation")
         weights[address] = weight
+    return initial_quorum(weights)
+
+
+def initial_quorum(weights):
+    count = len(weights)
     total = sum(weights.values())
-    minimum_weight = 2 * total // 3 + 1
-    if 2 * total > U128_MAX or 3 * minimum_weight > U128_MAX:
+    min_signers = 2 * count // 3 + 1
+    min_weight = 2 * total // 3 + 1
+    # Native verification multiplies the actual signed weight by three,
+    # even when every active validator participates.
+    if 3 * total > U128_MAX:
         raise ValueError("frozen voting weight would overflow native quorum arithmetic")
-    return {"validator_count": len(weights), "minimum_distinct_signers": 2 * len(weights) // 3 + 1,
-            "total_frozen_voting_weight": str(total), "minimum_signed_weight": str(minimum_weight),
-            "weights_by_validator": {address: str(weight) for address, weight in weights.items()}}
+    return {
+        "validator_count": count,
+        "minimum_distinct_signers": min_signers,
+        "total_frozen_voting_weight": str(total),
+        "minimum_signed_weight": str(min_weight),
+        "weights_by_validator": {address: str(weight) for address, weight in weights.items()},
+        "single_validator_dropout": {
+            address: {
+                "remaining_signer_count": count - 1,
+                "remaining_signing_weight": str(total - weight),
+                "quorum_possible": count - 1 >= min_signers and total - weight >= min_weight,
+            }
+            for address, weight in weights.items()
+        },
+    }
 
 
 def review(directory, approval):
