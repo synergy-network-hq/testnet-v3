@@ -289,6 +289,71 @@ class FinalityObservationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "native plain transfer"):
             verify(tx={**intent, "payload": [1]})
 
+    def test_transfer_accounting_cli_requires_both_observers_to_supply_matching_worlds(self):
+        genesis, txid = "a" * 64, "b" * 64
+        ids = {1000: "c" * 64, 1001: "d" * 64}
+        intent = {
+            "sender": "sender", "receiver": "receiver", "class": "user", "payload": [],
+            "amount_nwei": 10, "nonce": 7,
+            "fee_limit": {"gas_limit": 21000, "max_fee_per_gas_nwei": 2},
+        }
+        prior = {"sender": {"balance_nwei": 90000, "nonce": 7, "code_hash": None}}
+        final = {
+            "sender": {"balance_nwei": 47990, "nonce": 8, "code_hash": None},
+            "receiver": {"balance_nwei": 10, "nonce": 0, "code_hash": None},
+            "collector": {"balance_nwei": 42000, "nonce": 0, "code_hash": None},
+        }
+        worlds = {height: json.dumps({"accounts": accounts, "protocol": {}}).encode()
+                  for height, accounts in ((1000, prior), (1001, final))}
+        roots = {height: hashlib.sha3_256(
+            b"SYNERGY_WORLD_STATE_ROOT_V1" + len(world).to_bytes(8, "big") + world
+        ).hexdigest() for height, world in worlds.items()}
+        receipt = {"transaction_id": txid, "status": "applied", "gas_used": 21000,
+                   "state_root_after": roots[1001], "error_code": None}
+        urls = ["https://first.example.test", "https://second.example.test"]
+        args = ["verify", "--observer", urls[0], "--observer", urls[1], "--node", __file__,
+                "--config", __file__, "--chain", "99999", "--network", "canary",
+                "--genesis", genesis, "--height", "1000", "--through-height", "1001",
+                "--receipt-height", "1001", "--receipt-id", txid,
+                "--fee-collector", "collector", "--base-fee-per-gas-nwei", "2"]
+
+        def proof(endpoint, height, kind):
+            if kind == "world_state":
+                world = worlds[height]
+                return world + b" " if (endpoint, height) == corrupt else world
+            if kind == "finality":
+                return b"native fixture input"
+            txs, receipts = ([{"unsigned": intent}], [receipt]) if height == 1001 else ([], [])
+            return json.dumps([height, ids.get(height - 1, "0" * 64),
+                               "f" * 64, roots[height], txs, receipts]).encode()
+
+        def native(_command, height):
+            epoch = 1 if height == 1000 else 2
+            return dict(verified=True, chain_id=99999, network_id="canary", genesis_hash=genesis,
+                        state_root=roots[height], epoch=epoch, epoch_context_root=str(epoch) * 64,
+                        consensus_timestamp_unix=height, finalized=dict(
+                            height=height, block_id=ids[height], protected_execution_root="f" * 64))
+
+        corrupt = None
+        with (patch("sys.argv", args), patch.object(verifier, "fetch_proof", side_effect=proof) as fetch,
+              patch.object(verifier, "verify_native", side_effect=native)):
+            with redirect_stdout(io.StringIO()) as out:
+                verifier.main()
+            result = json.loads(out.getvalue())
+            self.assertEqual(result["observer_count"], 2)
+            self.assertTrue(result["world_preimage_verified"])
+            self.assertEqual(result["observations"][1]["transfer_accounting"]["fee_nwei"], "42000")
+            self.assertNotIn("transfer_accounting", result["observations"][0])
+            for height in worlds:
+                for endpoint in urls:
+                    self.assertIn(((endpoint, height, "world_state"), {}), fetch.call_args_list)
+            for height in worlds:
+                corrupt = (urls[1], height)
+                with (self.subTest(corrupt=corrupt), patch("sys.stderr", new=io.StringIO()) as err,
+                      self.assertRaises(SystemExit)):
+                    verifier.main()
+                self.assertIn("World preimage does not match the authenticated state root", err.getvalue())
+
     def test_exact_receipt_selection_rejects_missing_duplicate_and_invalid_status(self):
         txid = "a" * 64
         receipt = dict(transaction_id=txid, status="applied", gas_used=21000,
