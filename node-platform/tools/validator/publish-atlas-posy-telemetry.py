@@ -482,6 +482,38 @@ def validator_status(state, gap):
     return ('syncing' if gap is not None and gap > 2 else 'active'), None
 
 
+def selected_mesh_check(verified, expected, timestamp):
+    """Compare directions among the explicitly selected observation hosts."""
+    check = {'name': 'Authenticated validator sessions', 'status': 'observing',
+             'started_at': None, 'updated_at': timestamp,
+             'detail': 'Authenticated session identities are unavailable on one or more selected validators.'}
+    if not expected.issubset(verified):
+        return check
+    missing = []
+    for number in sorted(expected):
+        state = verified[number]
+        native = safe_native_telemetry(state)
+        transport = native.get('transport') if native else None
+        peers = transport.get('peers') if isinstance(transport, dict) else None
+        if not isinstance(peers, list) or len(peers) > 16:
+            return check
+        ids = [peer.get('peer_id') for peer in peers if isinstance(peer, dict)]
+        if (len(ids) != len(peers) or any(not isinstance(peer, str) or not peer for peer in ids)
+                or len(set(ids)) != len(ids) or len(ids) != authenticated_peer_count(state)):
+            return check
+        connected = set(ids)
+        for other in sorted(expected - {number}):
+            if verified[other]['address'] not in connected:
+                missing.append(f'Val{number} → Val{other}')
+    if missing:
+        check.update(status='warning', detail='Selected validators did not report these directions: '
+                     + ', '.join(missing) + '.')
+    else:
+        check.update(status='passed', detail=f'All {len(expected) * (len(expected) - 1)} directed sessions '
+                     'among the selected validators were reported authenticated.')
+    return check
+
+
 def live_canary_checks(network_id, genesis_hash, nodes, timestamp, states=None):
     if (network_id, genesis_hash) != ('posy-apqe-canary-process-49028',
             '2a770743814a98e61856efb85ebae1461dbac38a7b75ca65fb9f7ffe2e7011dc'):
@@ -606,6 +638,9 @@ def run(report=None, once=False, test_plan=None, *, selected=None, observe_only=
 
             nodes.append({'id':f'val{n}','address':s.get('address'),'public_ip':ips[n],'vpn_ip':s.get('vpn_ip'),'status':status,'height':s['height'] if s['block'] else None,'finalized_height':s['height'] if s['block'] else None,'gap':gap,'peers':authenticated_peer_count(s),'updated_at':s.get('observed_at'),'error':status_error,'finalized_block_id':b.get('block_hash'),'state_root':b.get('state_root'),'service_pid':int(s['service'].get('MainPID',0)),'restarts':int(s['service'].get('NRestarts',0)),'release_id':s['release_id']})
         tests=live_canary_checks(network_id,genesis_hash,nodes,timestamp,states)
+        observed_hosts = {number for number in states if f'synergy-val{number}' in MASTER_SOCKETS}
+        if selected is not None and len(observed_hosts) >= 2:
+            tests.append(selected_mesh_check(verified, observed_hosts, timestamp))
         if test_plan:
             plan=json.loads(test_plan.read_bytes())
             if (plan.get('network_id')!=network_id or plan.get('genesis_hash') not in {None, genesis_hash}

@@ -156,6 +156,31 @@ class RosterSelection(unittest.TestCase):
                 collector.run(once=True, selected={**scope, 'genesis_hash': 'f' * 64})
             remote.assert_not_called()
 
+    def test_selected_mesh_requires_exact_peer_identities_in_each_direction(self):
+        expected = {2, 3, 4, 6}
+        verified = {number: self.states[number] for number in expected}
+        for number, state in verified.items():
+            state['chain_telemetry']['transport'] = {
+                'authenticated_peer_count': 3,
+                'peers': [{'peer_id': f'validator-{other}'} for other in sorted(expected - {number})],
+            }
+        timestamp = self.states[2]['observed_at']
+        mesh = lambda: collector.selected_mesh_check(verified, expected, timestamp)
+        self.assertEqual(mesh()['status'], 'passed')
+        self.assertIn('12 directed sessions', mesh()['detail'])
+
+        # An unrelated authenticated peer keeps the count at three while a
+        # required directed session is absent. The reciprocal remains intact.
+        transport = verified[3]['chain_telemetry']['transport']
+        transport['peers'][2] = {'peer_id': 'other-authorized-peer'}
+        self.assertEqual(mesh()['status'], 'warning')
+        self.assertIn('Val3 → Val6', mesh()['detail'])
+        self.assertNotIn('Val6 → Val3', mesh()['detail'])
+        transport['authenticated_peer_count'] = 2
+        self.assertEqual(mesh()['status'], 'observing')
+        del verified[6]
+        self.assertEqual(mesh()['status'], 'observing')
+
     def test_duplicate_identity_does_not_count_twice(self):
         self.states[5] = {}
         self.states[4]['address'] = self.states[3]['address']
