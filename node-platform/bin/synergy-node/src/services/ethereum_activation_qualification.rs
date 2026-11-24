@@ -355,8 +355,8 @@ fn real_apqe_governance_evm_scope_native_settlement_history_and_restart() {
         .unwrap()
         .unwrap();
     assert!(!activation::is_active(&selected, &world).unwrap());
-    assert_eq!(activation::authorization_update_height(&world).unwrap(),20);
-    crate::services::rpc::proofs::require_public_world(&world,None).unwrap();
+    assert_eq!(activation::authorization_update_height(&world).unwrap(), 20);
+    crate::services::rpc::proofs::require_public_world(&world, None).unwrap();
     crate::services::rpc::proofs::bounded_document(world.as_ref()).unwrap();
     let staged_root = activation::authorization_root(&world);
     assert_ne!(staged_root, activation::authorization_root(&initial));
@@ -379,8 +379,11 @@ fn real_apqe_governance_evm_scope_native_settlement_history_and_restart() {
         );
     }
     assert!(activation::is_active(&selected, &world).unwrap());
-    assert_eq!(activation::authorization_update_height(&world).unwrap(),286);
-    crate::services::rpc::proofs::require_public_world(&world,None).unwrap();
+    assert_eq!(
+        activation::authorization_update_height(&world).unwrap(),
+        286
+    );
+    crate::services::rpc::proofs::require_public_world(&world, None).unwrap();
     crate::services::rpc::proofs::bounded_document(world.as_ref()).unwrap();
     assert_ne!(staged_root, activation::authorization_root(&world));
     for (height, hash) in expected.range(30..) {
@@ -432,7 +435,7 @@ fn real_apqe_governance_evm_scope_native_settlement_history_and_restart() {
     )
     .unwrap();
     assert!(deployed.receipt.success);
-    crate::services::rpc::proofs::require_public_world(&deployed.world,None).unwrap();
+    crate::services::rpc::proofs::require_public_world(&deployed.world, None).unwrap();
     crate::services::rpc::proofs::bounded_document(deployed.world.as_ref()).unwrap();
     let expired = crate::services::execution::qualification_governance_transition(
         configuration,
@@ -671,7 +674,7 @@ pub(super) fn qualify_five_process(
                     );
                     let proof=process_rpc(config.rpc.listen_address.unwrap(),"synergy_getFinalizedProofPageV1",
                         serde_json::json!({"height":height,"kind":"world_state","offset":0,"limit":1})).unwrap();
-                    assert_eq!(proof["commitment"]["type"],"full_canonical_world_preimage");
+                    assert_eq!(proof["commitment"]["type"], "full_canonical_world_preimage");
                 }
                 settled = true;
             }
@@ -696,6 +699,32 @@ pub(super) fn qualify_five_process(
                     .collect::<Vec<_>>();
                 assert!(!commitments[0].is_null());
                 assert!(commitments.iter().all(|row| row == &commitments[0]));
+                // Capability maturity and publication of the new exact
+                // finalized admission anchor are separate native-owner steps.
+                let refresh_deadline = Instant::now() + Duration::from_secs(30);
+                loop {
+                    let contexts = configs
+                        .iter()
+                        .map(|config| {
+                            process_rpc(
+                                config.rpc.listen_address.unwrap(),
+                                "synergy_getProcessingContextV1",
+                                serde_json::json!({}),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    if contexts.iter().all(|row| {
+                        row.as_ref().is_ok_and(|value| {
+                            value["context"]["authority"]["source_finalized_height"]
+                                .as_u64()
+                                .is_some_and(|source| source >= spec.activation_height)
+                        })
+                    }) {
+                        break;
+                    }
+                    assert!(Instant::now()<refresh_deadline,"governed finalized admission anchors did not refresh autonomously: {contexts:?}");
+                    std::thread::sleep(Duration::from_secs(1));
+                }
                 break;
             }
         }
@@ -714,15 +743,34 @@ pub(super) fn qualify_five_process(
     eprintln!("Actual five-process same-Genesis frozen-quorum activation + original ACK restart PASS H{last}; Solidity/RPC acceptance follows");
 }
 
-pub(super) fn qualify_final_world_pages(configs:&[NodeConfiguration]) {
+pub(super) fn qualify_final_world_pages(configs: &[NodeConfiguration]) {
     use super::secure_process_canary::process_rpc;
-    let height=configs.iter().map(|config|process_rpc(config.rpc.listen_address.unwrap(),
-        "synergy_chainTelemetry",serde_json::json!({})).unwrap()["finalized_height"].as_u64().unwrap()).min().unwrap();
+    let height = configs
+        .iter()
+        .map(|config| {
+            process_rpc(
+                config.rpc.listen_address.unwrap(),
+                "synergy_chainTelemetry",
+                serde_json::json!({}),
+            )
+            .unwrap()["finalized_height"]
+                .as_u64()
+                .unwrap()
+        })
+        .min()
+        .unwrap();
     for config in configs {
-        let proof=process_rpc(config.rpc.listen_address.unwrap(),"synergy_getFinalizedProofPageV1",
-            serde_json::json!({"height":height,"kind":"world_state","offset":0,"limit":1})).unwrap();
-        assert_eq!(proof["commitment"]["type"],"full_canonical_world_preimage");
-        assert!(proof["total_bytes"].as_u64().unwrap()<=1024*1024);
-        eprintln!("Governed+Solidity finalized World actual bounded proof H{height}, bytes={}",proof["total_bytes"]);
+        let proof = process_rpc(
+            config.rpc.listen_address.unwrap(),
+            "synergy_getFinalizedProofPageV1",
+            serde_json::json!({"height":height,"kind":"world_state","offset":0,"limit":1}),
+        )
+        .unwrap();
+        assert_eq!(proof["commitment"]["type"], "full_canonical_world_preimage");
+        assert!(proof["total_bytes"].as_u64().unwrap() <= 1024 * 1024);
+        eprintln!(
+            "Governed+Solidity finalized World actual bounded proof H{height}, bytes={}",
+            proof["total_bytes"]
+        );
     }
 }

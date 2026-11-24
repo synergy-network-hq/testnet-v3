@@ -74,6 +74,77 @@ fn context<'a>(hashes: &'a BTreeMap<u64, [u8; 32]>) -> EvmBlockContext<'a> {
     }
 }
 #[test]
+fn blockhash_opcode_uses_exact_native_history_window_and_refuses_missing_ancestors() {
+    use sha3::{Digest, Keccak256};
+    let (mut world, budget) = setup();
+    // Real EVM runtime: return BLOCKHASH(calldata[0..32]). No receipt or
+    // interpreter is mocked; code executes in the same AIVM call kernel.
+    let code = unhex("6000354060005260206000f3");
+    let code_hash = Keccak256::digest(&code)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    world
+        .protocol
+        .insert(format!("aivm/ethereum/v1/code/{code_hash}"), code);
+    world.accounts.insert(
+        conventional_evm_account_key([0x77; 20]),
+        AccountState {
+            balance_nwei: 0,
+            nonce: 1,
+            code_hash: Some(code_hash),
+        },
+    );
+    let original = world.clone();
+    let history = BTreeMap::from([(44, [0x44; 32]), (299, [0x99; 32])]);
+    let mut ctx = context(&history);
+    ctx.height = 300;
+    for (number, expected) in [
+        (44, [0x44; 32]),
+        (299, [0x99; 32]),
+        (43, [0; 32]),
+        (300, [0; 32]),
+        (301, [0; 32]),
+    ] {
+        let mut data = [0u8; 32];
+        data[24..].copy_from_slice(&(number as u64).to_be_bytes());
+        let result = call_evm(
+            &EvmCallRequest {
+                from: [0x11; 20],
+                recipient: Some([0x77; 20]),
+                value_wei: [0; 32],
+                data: &data,
+                gas_limit: 100_000,
+            },
+            &ctx,
+            &world,
+            &budget,
+        )
+        .unwrap();
+        assert!(result.success);
+        assert_eq!(result.output, expected);
+    }
+    let mut data = [0u8; 32];
+    data[31] = 45;
+    assert!(matches!(
+        call_evm(
+            &EvmCallRequest {
+                from: [0x11; 20],
+                recipient: Some([0x77; 20]),
+                value_wei: [0; 32],
+                data: &data,
+                gas_limit: 100_000
+            },
+            &ctx,
+            &world,
+            &budget
+        ),
+        Err(EvmExecutionError::MissingBlockHistory)
+    ));
+    assert_eq!(world, original);
+}
+
+#[test]
 fn independent_solidity_and_ethers_deploy_call_logs_storage_revert_and_native_fees() {
     use sha3::{Digest, Keccak256};
     let f = fixture();
