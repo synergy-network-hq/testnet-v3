@@ -535,7 +535,18 @@ fn authenticated_lineage_context(
     formation_directory: &Path, request_path: &Path, request_sha: &str,
     formation: &FormationContext, p: &SendParameters, exported: &Value,
 ) -> Result<(synergy_etdag::ProcessingContext, synergy_etdag::crypto::IngressKemKeyRegistry), String> {
+    let descriptor=bundled_authority_descriptor(formation_directory,"check-processing-context",request_path)?;
+    checked_lineage_descriptor(&descriptor,request_sha,formation,p,exported)
+}
+
+/// Invoke only a closed native authority inspection from the exact installed
+/// package. Caller-provided executables/configuration and shell dispatch are
+/// deliberately unavailable.
+pub(crate) fn bundled_authority_descriptor(formation_directory:&Path,command:&str,request_path:&Path)->Result<Value,String>{
     use std::{io::Read, process::{Command,Stdio}, time::{Duration,Instant}};
+    if !matches!(command,"check-processing-context"|"check-wallet-release-predecessor") {
+        return Err("unsupported native authority inspection".into());
+    }
     let root = formation_directory.parent().and_then(Path::parent).ok_or("Managed treasury root missing")?;
     if formation_directory != root.join("tmp/network-formation")
         || std::env::current_exe().map_err(|_| "Current keytool unavailable")? != root.join("bin/synergy-keytool")
@@ -548,7 +559,7 @@ fn authenticated_lineage_context(
         }
     }
     let mut child = Command::new(root.join("bin/synergy-node"))
-        .args(["authority-successor","check-processing-context"])
+        .args(["authority-successor",command])
         .arg(root.join("config/node.json")).arg(request_path)
         .env_clear().current_dir(root).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
         .spawn().map_err(|_| "Cannot start the bundled autonomous authority verifier")?;
@@ -567,8 +578,7 @@ fn authenticated_lineage_context(
     if !status?.success() || bytes.len()>8192 {
         return Err("Authenticated autonomous treasury context unavailable".into());
     }
-    let descriptor: Value = serde_json::from_slice(&bytes).map_err(|_| "Invalid native authority descriptor")?;
-    checked_lineage_descriptor(&descriptor, request_sha, formation, p, exported)
+    serde_json::from_slice(&bytes).map_err(|_| "Invalid native authority descriptor".into())
 }
 fn send_path(treasury: &Path, nonce: u64) -> Result<std::path::PathBuf, String> {
     private_dir(treasury)?;

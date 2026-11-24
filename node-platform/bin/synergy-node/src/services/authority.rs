@@ -2005,6 +2005,9 @@ impl VerifiedAuthority {
             .as_ref()
             .map(|v| v as &dyn synergy_identity::authorization::AuthorizationSignatureVerifier)
     }
+    pub(super) fn native_identity_verifier(&self)->Option<&synergy_aegis::ApqeIdentityVerifier>{
+        self.identity_verifier.as_ref()
+    }
 }
 
 #[cfg(test)]

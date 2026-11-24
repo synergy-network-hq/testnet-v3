@@ -696,6 +696,47 @@ fn treasury_processing_scope(
     Ok(context)
 }
 
+fn check_wallet_release_predecessor(config:&NodeConfiguration,request_path:&Path)->Result<serde_json::Value,String>{
+    let raw=apqe_transport::read(request_path,2*1024*1024,false)?;
+    let request:serde_json::Value=serde_json::from_slice(&raw).map_err(|_|"invalid Wallet authoring request")?;
+    if request["version"]!=1 ||request["operation"]!="wallet_release_authoring_prepare" {
+        return Err("Wallet authoring operation differs".into());
+    }
+    let p=&request["parameters"];
+    let previous:SimplifiedEpochContext=serde_json::from_value(p["predecessor"].clone()).map_err(|_|"Wallet predecessor missing")?;
+    let parameters:synergy_etdag::EtdagParameters=serde_json::from_value(p["parameters"].clone()).map_err(|_|"Wallet parameters missing")?;
+    let policy:synergy_genesis::authority::ProtectedWalletDispatchPolicy=serde_json::from_value(p["policy"].clone()).map_err(|_|"Wallet policy missing")?;
+    let tip=load(config)?.ok_or("authenticated Wallet authority unavailable")?;
+    let selected=tip.autonomous_authority_at(previous.epoch_start_height).ok_or("Wallet predecessor lacks retained certified history")?;
+    let protected=selected.protected.as_ref().ok_or("Wallet predecessor lacks governed parameters")?;
+    let genesis_path=config.genesis_path.as_ref().ok_or("Wallet Genesis absent")?;
+    let root_path=config.consensus.authority_trust_key_path.as_ref().ok_or("Wallet original root absent")?;
+    let stamps=[Stamp::capture(genesis_path)?,Stamp::capture(root_path)?];
+    let genesis=crate::commands::selected_network::verified_genesis(config)?;
+    if selected.epoch!=previous ||protected.parameters!=parameters ||policy.genesis_hash!=genesis.genesis_hash {
+        return Err("Wallet predecessor differs from independently authenticated native history".into());
+    }
+    crate::services::protected_accounts::processing_execution::native::require_compiled_wallet_contract(&policy)?;
+    synergy_genesis::authority::WalletDispatchReleasePayload {version:1,
+        predecessor_context_root:previous.root().map_err(|e|e.to_string())?,
+        signer_key_id:"wallet-release-native-review".into(),policy:policy.clone()}
+        .check_predecessor(&previous,&parameters)?;
+    let layout=synergy_storage::NodeStorageLayout::new(config.storage.data_directory.clone()).map_err(|e|e.to_string())?;
+    let store=synergy_state::FinalizedStateStore::load(layout.state().join("execution")).map_err(|e|format!("Wallet finalized state unavailable: {e:?}"))?;
+    let current=store.current().ok_or("Wallet finalized state absent")?;
+    let close=previous.epoch_end_height.checked_sub(2).ok_or("Wallet predecessor close underflow")?;
+    let result=serde_json::json!({"schema":"nodenetwork-verified-wallet-release-predecessor-v1",
+        "request_sha256":apqe_transport::sha256(&raw),"genesis_sha256":apqe_transport::sha256(&apqe_transport::read(genesis_path,4*1024*1024,false)?),
+        "authority_root_sha256":apqe_transport::sha256(&apqe_transport::read(root_path,8192,false)?),
+        "genesis_hash":genesis.genesis_hash,"predecessor_context_root":previous.root().map_err(|e|e.to_string())?,
+        "predecessor_epoch":previous.epoch,"policy_sha256":apqe_transport::sha256(&serde_json::to_vec(&policy).map_err(|e|e.to_string())?),
+        "finalized_height":current.finalized_height,"predecessor_close_height":close,
+        "initial_adoption_before_close":tip.epoch==previous&&previous.contains_height(current.finalized_height)&&current.finalized_height<close,
+        "mutation_performed":false});
+    if !stamps.iter().all(Stamp::unchanged){return Err("Wallet origin changed during predecessor verification".into());}
+    Ok(result)
+}
+
 fn check_treasury_processing_context(config: &NodeConfiguration, request_path: &Path) -> Result<serde_json::Value, String> {
     let genesis_path = config.genesis_path.as_ref().ok_or("treasury Genesis absent")?;
     let root_path = config.consensus.authority_trust_key_path.as_ref().ok_or("treasury authority root absent")?;
@@ -1382,6 +1423,10 @@ pub(crate) fn cli(args: impl Iterator<Item = String>) -> Result<(), String> {
     let configuration = synergy_config::load(config).map_err(|e| e.to_string())?;
     if command == "check-processing-context" && extra.is_empty() {
         println!("{}", check_treasury_processing_context(&configuration, Path::new(proposal_path))?);
+        return Ok(());
+    }
+    if command == "check-wallet-release-predecessor" && extra.is_empty() {
+        println!("{}",check_wallet_release_predecessor(&configuration,Path::new(proposal_path))?);
         return Ok(());
     }
     if configuration

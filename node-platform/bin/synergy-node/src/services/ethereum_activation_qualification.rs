@@ -191,6 +191,53 @@ fn real_apqe_governance_evm_scope_native_settlement_history_and_restart() {
         .collect::<Vec<_>>();
     let budget = WorldResourceBudget::new(512 * 1024 * 1024);
     let initial = authority.initial_world_state_budgeted(&budget).unwrap();
+    // Real native dispatcher and actual APQE authorization. A registration
+    // that runs out of gas, and an unsupported module, must not poison the
+    // next authenticated nonce. This is execution acceptance, not injected
+    // PoSy finality or an actual Canary funding/spend claim.
+    {
+        use synergy_transaction::{TransactionAction,ReceiptStatus};
+        let sign=|mut tx:SignedTransaction,nonce,gas,action:TransactionAction,fee|{
+            tx.unsigned.nonce=nonce;tx.unsigned.fee_limit.gas_limit=gas;
+            tx.unsigned.fee_limit.max_fee_per_gas_nwei=fee;
+            tx.unsigned.payload=action.encode().unwrap();
+            tx.unsigned.amount_nwei=if matches!(action,TransactionAction::Transfer){7}else{0};
+            if !matches!(action,TransactionAction::Transfer){tx.unsigned.receiver=tx.unsigned.sender.clone();}
+            tx.unsigned.timestamp_unix=authority.consensus_timestamp_unix(5).unwrap();
+            tx.signature=fixture_sign(&account_secret,SignatureAlgorithm::MlDsa87,"transaction-presented-key",
+                "SYNERGY-TRANSACTION-SIGNING-V1",None,&tx.unsigned.signing_bytes().unwrap());tx
+        };
+        let registration=TransactionAction::Native{module:"identity".into(),method:"register_authorization".into(),
+            input:transaction.identity_authorization.as_ref().unwrap().canonical_json_bytes().unwrap()};
+        let txs=vec![sign(transaction.clone(),0,1,registration.clone(),40),
+            sign(transaction.clone(),1,50000,TransactionAction::Native{module:"unassigned-module".into(),method:"rejected".into(),input:vec![]},40),
+            sign(transaction.clone(),2,21000,TransactionAction::Transfer,40),
+            sign(transaction.clone(),3,21000,TransactionAction::Transfer,1),
+            sign(transaction.clone(),4,100000,registration,40)];
+        let sender=transaction.unsigned.sender.clone();let receiver=transaction.unsigned.receiver.clone();
+        let outcome=crate::services::execution::qualification_native_transition(configuration,authority.clone(),txs.clone(),5,&initial).unwrap();
+        assert_eq!(outcome.receipts.len(),5);
+        assert_eq!(outcome.receipts[0].error_code.as_deref(),Some("async_out_of_gas_v1"));
+        assert_eq!(outcome.receipts[0].gas_used,1);
+        assert_eq!(outcome.receipts[1].error_code.as_deref(),Some("native_execution_rejected_v1"));
+        assert_eq!(outcome.receipts[1].gas_used,50000);
+        assert_eq!(outcome.receipts[2].status,ReceiptStatus::Applied);
+        assert_eq!(outcome.receipts[3].error_code.as_deref(),Some("async_fee_cap_below_base_v1"));
+        assert_eq!(outcome.receipts[3].gas_used,0);
+        assert_eq!(outcome.receipts[4].status,ReceiptStatus::Applied);
+        assert_eq!(outcome.state.accounts[&sender].nonce,5);
+        assert_eq!(outcome.state.accounts[&receiver].balance_nwei,7);
+        assert_eq!(initial.accounts[&sender].balance_nwei-outcome.state.accounts[&sender].balance_nwei,
+            outcome.total_fees_nwei+7);
+        assert_eq!(outcome.state.accounts["synf1pnchsrnyral0u9r65xusjrexuctfh465h06l"].balance_nwei,outcome.total_fees_nwei);
+        let encoded=serde_json::to_vec(outcome.state.as_ref()).unwrap();
+        let reopened:synergy_state::WorldState=serde_json::from_slice(&encoded).unwrap();
+        let reopened=synergy_state::world_resources::BudgetedWorld::try_clone_world(&reopened,&budget).unwrap();
+        let replay=crate::services::execution::qualification_native_transition(configuration,authority.clone(),txs,6,&reopened).unwrap();
+        assert_eq!(synergy_state::state_root(replay.state.as_ref()).unwrap(),synergy_state::state_root(outcome.state.as_ref()).unwrap());
+        assert!(replay.receipts.iter().all(|r|r.gas_used==0&&r.status==ReceiptStatus::Reverted));
+        eprintln!("Actual native APQE OOG/module/fee-cap terminal accounting, next nonce and encoded-World restart replay passed");
+    }
     let policy_bytes =
         serde_json::to_vec(&super::ethereum_qualification::fixture_policy()).unwrap();
     let spec = activation::EthereumActivationSpec {
@@ -297,6 +344,7 @@ fn real_apqe_governance_evm_scope_native_settlement_history_and_restart() {
     assert!(activation::install(&authority, &execution, 9, &initial).is_err());
     transaction.unsigned.class = synergy_transaction::TransactionClass::System;
     transaction.unsigned.amount_nwei = 0;
+    transaction.unsigned.receiver=transaction.unsigned.sender.clone();
     transaction.unsigned.fee_limit.gas_limit = 1_000_000;
     transaction.unsigned.timestamp_unix = authority.consensus_timestamp_unix(20).unwrap();
     transaction.unsigned.payload = synergy_transaction::TransactionAction::Governance {

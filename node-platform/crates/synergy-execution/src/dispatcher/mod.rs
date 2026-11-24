@@ -39,6 +39,13 @@ pub struct TransactionDispatch {
 pub trait TransactionExecutor {
     type Error: std::fmt::Display;
 
+    /// Explicit protocol rejection only. Local provider/state failures retain
+    /// the default fail-closed behavior and must never become consensus votes
+    /// for a different outcome merely because one process was unavailable.
+    fn terminal_rejection(&self, _error: &Self::Error) -> bool {
+        false
+    }
+
     fn execute(
         &self,
         transaction: &SignedTransaction,
@@ -75,6 +82,7 @@ pub struct CanonicalTransactionDispatcher<N, Q, X, G, S> {
 pub struct RoutedDispatchError {
     pub route: ActionRoute,
     pub message: String,
+    pub terminal: bool,
 }
 
 impl<N, Q, X, G, S> TransactionExecutor for CanonicalTransactionDispatcher<N, Q, X, G, S>
@@ -86,6 +94,10 @@ where
     S: TransactionExecutor,
 {
     type Error = RoutedDispatchError;
+
+    fn terminal_rejection(&self, error: &Self::Error) -> bool {
+        error.terminal
+    }
 
     fn execute(
         &self,
@@ -99,34 +111,43 @@ where
                 ActionRoute::Native,
                 self.native
                     .execute(transaction, action, context, state)
-                    .map_err(|error| error.to_string()),
+                    .map_err(|error| (error.to_string(), self.native.terminal_rejection(&error))),
             ),
             TransactionAction::Synq { .. } => (
                 ActionRoute::Synq,
                 self.synq
                     .execute(transaction, action, context, state)
-                    .map_err(|error| error.to_string()),
+                    .map_err(|error| (error.to_string(), self.synq.terminal_rejection(&error))),
             ),
             TransactionAction::Sxcp { .. } => (
                 ActionRoute::Sxcp,
                 self.sxcp
                     .execute(transaction, action, context, state)
-                    .map_err(|error| error.to_string()),
+                    .map_err(|error| (error.to_string(), self.sxcp.terminal_rejection(&error))),
             ),
             TransactionAction::Governance { .. } => (
                 ActionRoute::Governance,
                 self.governance
                     .execute(transaction, action, context, state)
-                    .map_err(|error| error.to_string()),
+                    .map_err(|error| {
+                        (
+                            error.to_string(),
+                            self.governance.terminal_rejection(&error),
+                        )
+                    }),
             ),
             TransactionAction::System { .. } => (
                 ActionRoute::System,
                 self.system
                     .execute(transaction, action, context, state)
-                    .map_err(|error| error.to_string()),
+                    .map_err(|error| (error.to_string(), self.system.terminal_rejection(&error))),
             ),
         };
-        result.map_err(|message| RoutedDispatchError { route, message })
+        result.map_err(|(message, terminal)| RoutedDispatchError {
+            route,
+            message,
+            terminal,
+        })
     }
 }
 

@@ -210,12 +210,20 @@ pub fn write_public_json(path: &Path, value: &impl Serialize) -> Result<(), Stri
     if bytes.len() as u64 > MAX_METADATA_BYTES {
         return Err("JSON output exceeds the keytool limit".into());
     }
+    write_public_bytes(path,&bytes)
+}
+
+/// Exact public transcript/compact carrier output under the same 1MiB bound.
+pub(crate) fn write_public_bytes(path:&Path,bytes:&[u8])->Result<(),String>{
+    if bytes.is_empty() || bytes.len() as u64>MAX_METADATA_BYTES {
+        return Err("public output exceeds the existing keytool bound".into());
+    }
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .ok_or("output must have an explicit parent directory")?;
     validate_output_directory(parent)?;
-    write_new(path, &bytes, false)?;
+    write_new(path, bytes, false)?;
     if let Err(error) = sync_directory(parent) {
         let _ = fs::remove_file(path);
         return Err(error);

@@ -329,6 +329,66 @@ fn load_review(input: &Inputs<'_>, prepared: &Prepared) -> Result<(Review, Vec<u
     Ok((review, raw.as_bytes().to_vec()))
 }
 
+fn native_predecessor(
+    input: &Inputs<'_>,
+    p: &Parameters,
+    prepared: &Prepared,
+    signed: &SignedFormation,
+) -> Result<bool, String> {
+    // E1 is fully independently checked against signed Genesis above. A later
+    // predecessor must come from the original managed owner's actual native
+    // three-QC history, rather than a caller's exported context JSON.
+    if p.predecessor.epoch == signed.authority.payload.epoch {
+        return Ok(true);
+    }
+    let value = crate::formation_treasury::bundled_authority_descriptor(
+        input.formation,
+        "check-wallet-release-predecessor",
+        input.request,
+    )?;
+    let fields = [
+        "schema",
+        "request_sha256",
+        "genesis_sha256",
+        "authority_root_sha256",
+        "genesis_hash",
+        "predecessor_context_root",
+        "predecessor_epoch",
+        "policy_sha256",
+        "finalized_height",
+        "predecessor_close_height",
+        "initial_adoption_before_close",
+        "mutation_performed",
+    ];
+    if !value
+        .as_object()
+        .is_some_and(|m| m.len() == fields.len() && fields.iter().all(|k| m.contains_key(*k)))
+        || value["schema"] != "nodenetwork-verified-wallet-release-predecessor-v1"
+        || value["request_sha256"] != input.request_sha256
+        || value["genesis_sha256"] != digest(signed.genesis_bytes.as_bytes())
+        || value["authority_root_sha256"] != digest(&prepared.public)
+        || value["genesis_hash"] != signed.genesis.genesis_hash
+        || value["predecessor_context_root"] != p.predecessor.root().map_err(|e| e.to_string())?
+        || value["predecessor_epoch"] != p.predecessor.epoch
+        || value["policy_sha256"]
+            != digest(&serde_json::to_vec(&p.policy).map_err(|e| e.to_string())?)
+        || value["predecessor_close_height"]
+            != p.predecessor
+                .epoch_end_height
+                .checked_sub(2)
+                .ok_or("predecessor close underflow")?
+        || !value["finalized_height"].is_u64()
+        || value["mutation_performed"] != false
+    {
+        return Err(
+            "native Wallet predecessor descriptor differs from exact reviewed formation".into(),
+        );
+    }
+    value["initial_adoption_before_close"]
+        .as_bool()
+        .ok_or_else(|| "native Wallet adoption window missing".into())
+}
+
 fn reply(review: &Review, raw: &[u8], state: &str) -> Result<Value, String> {
     Ok(
         json!({"schema":"nodenetwork-wallet-release-authoring-v1","state":state,
@@ -429,6 +489,7 @@ pub(crate) fn status(input: Inputs<'_>, engine: crate::provider::Engine) -> Resu
         input.provider_report_sha256,
         &engine,
     )?;
+    native_predecessor(&input, &request.parameters, &prepared, &signed)?;
     let slot = input.formation.join(DIRECTORY);
     if !slot.exists() {
         return Ok(
@@ -488,6 +549,9 @@ pub(crate) fn prepare(input: Inputs<'_>, engine: crate::provider::Engine) -> Res
     if slot.exists() {
         let (review, raw) = load_review(&input, &prepared)?;
         return reply(&review, &raw, "prepared");
+    }
+    if !native_predecessor(&input, &request.parameters, &prepared, &signed)? {
+        return Err("Wallet predecessor's genuine certified close has already been reached".into());
     }
     let staging = input.formation.join(PREPARING);
     // No published issuer exists in this staging directory. Recover an
@@ -619,6 +683,9 @@ pub(crate) fn sign(
         let cached = read(&output, 128 * 1024, true)?;
         let value: Value = decode(&cached)?;
         return verify_cached(value, &review, &raw, input.provider_report_sha256, &engine);
+    }
+    if !native_predecessor(&input, &request.parameters, &prepared, &signed)? {
+        return Err("Wallet release signing window is no longer open".into());
     }
     let custody: SealedIssuer = decode(&read(&slot.join("issuer.enc.json"), 128 * 1024, true)?)?;
     if custody.version != 1

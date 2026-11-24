@@ -39,6 +39,8 @@ const WORKERS: usize = 4;
 const MAX_EPOCH_PROOFS_PER_REQUEST: usize = 4;
 #[path="apqe_rpc_batch.rs"]
 mod batch;
+#[path="apqe_rpc_identity.rs"]
+mod retained_identity;
 const TELEMETRY: &[u8] =
     br#"{"jsonrpc":"2.0","method":"synergy_chainTelemetry","params":{},"id":1}"#;
 
@@ -80,6 +82,10 @@ pub(crate) fn cli(args: impl Iterator<Item = String>) -> Result<(), String> {
         ["inspect-origin"] => {
             let config:NodeConfiguration=serde_json::from_slice(&target_stdin()?).map_err(|_|"invalid gateway origin configuration")?;
             println!("{}",apqe_rpc::inspect_gateway_origin(&config)?); Ok(())
+        },
+        ["inspect-current-identity-custody"] => {
+            let q:TargetEnrollment=serde_json::from_slice(&target_stdin()?).map_err(|_|"invalid retained Gateway identity review")?;
+            println!("{}",retained_identity::inspect(q)?); Ok(())
         },
         ["inspect-target-enrollment"] => {
             let q:TargetEnrollment=serde_json::from_slice(&target_stdin()?).map_err(|_|"invalid gateway enrollment review")?;

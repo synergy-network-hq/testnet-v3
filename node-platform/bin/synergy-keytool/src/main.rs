@@ -25,6 +25,7 @@ mod validator_custody;
 mod validator_formation;
 mod wallet;
 mod wallet_sponsor_identity;
+mod wallet_payer_registration;
 
 use std::path::Path;
 
@@ -41,6 +42,20 @@ fn run() -> Result<(), String> {
     let supplied = std::env::args().skip(1).collect::<Vec<_>>();
     let (arguments, engine) = selected_arguments(&supplied)?;
     match arguments {
+        [command,request,output] if command=="prepare-wallet-payer-registration" => {
+            wallet_payer_registration::prepare(Path::new(request),Path::new(output),engine.ok_or("authenticated native APQE required")?)?;
+        }
+        [command,request,inner_signature,stage_output,transcript_output,output] if command=="encrypt-wallet-payer-registration" => {
+            wallet_payer_registration::encrypt(Path::new(request),Path::new(inner_signature),Path::new(stage_output),
+                Path::new(transcript_output),Path::new(output),engine.ok_or("authenticated native APQE required")?)?;
+        }
+        [command,request,stage,stage_sha,outer_signature,output] if command=="attach-wallet-payer-registration" => {
+            wallet_payer_registration::attach(Path::new(request),Path::new(stage),stage_sha,Path::new(outer_signature),
+                Path::new(output),engine.ok_or("authenticated native APQE required")?)?;
+        }
+        [command,..] if matches!(command.as_str(),"prepare-wallet-payer-registration"|"encrypt-wallet-payer-registration"|"attach-wallet-payer-registration") => {
+            return Err(wallet_payer_registration::USAGE.into());
+        }
         [command, request, output] if command == "prepare-wallet-sponsor-identity" => {
             wallet_sponsor_identity::prepare(
                 Path::new(request),
@@ -802,6 +817,9 @@ fn selected_arguments(
     if !matches!(
         command,
         "check-gateway-admission"
+            | "prepare-wallet-payer-registration"
+            | "encrypt-wallet-payer-registration"
+            | "attach-wallet-payer-registration"
             | "wallet-release-contract"
             | "prepare-wallet-release-authoring"
             | "review-wallet-release-authoring"

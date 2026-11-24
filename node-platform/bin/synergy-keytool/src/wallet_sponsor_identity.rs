@@ -63,15 +63,21 @@ struct Prepared {
 }
 
 fn load_genesis(request: &Request, engine: &Engine) -> Result<SignedGenesis, String> {
-    let genesis = read_bounded(&request.genesis_path, MAX_GENESIS_BYTES, "signed Genesis")?;
+    selected_origin(&request.genesis_path,&request.genesis_sha256,&request.authority_root_path,
+        &request.authority_root_sha256,engine)
+}
+
+pub(super) fn selected_origin(genesis_path:&Path,genesis_sha256:&str,root_path:&Path,root_sha256:&str,
+    engine:&Engine)->Result<SignedGenesis,String>{
+    let genesis = read_bounded(genesis_path, MAX_GENESIS_BYTES, "signed Genesis")?;
     let root = read_bounded(
-        &request.authority_root_path,
+        root_path,
         ROOT_KEY_BYTES,
         "Genesis public root",
     )?;
     if root.len() as u64 != ROOT_KEY_BYTES
-        || hex(&AegisProtectedPrimitives.sha256(&genesis)) != request.genesis_sha256
-        || hex(&AegisProtectedPrimitives.sha256(&root)) != request.authority_root_sha256
+        || hex(&AegisProtectedPrimitives.sha256(&genesis)) != genesis_sha256
+        || hex(&AegisProtectedPrimitives.sha256(&root)) != root_sha256
     {
         return Err("signed Genesis or original public root differs from reviewed SHA-256".into());
     }

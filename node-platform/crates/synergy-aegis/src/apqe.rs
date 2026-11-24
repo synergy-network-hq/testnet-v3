@@ -238,6 +238,59 @@ impl ApqeIdentityVerifier {
             Err("identity authorization signature verification failed".into())
         }
     }
+
+    /// Preserve the distinction between a verified bad signature and a local
+    /// unavailable/busy provider. Neither classification grants authorization.
+    pub fn verify_raw_classified(
+        &self,
+        algorithm: &str,
+        public: &[u8],
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), VerificationError> {
+        use synergy_address_engine::apqe::provider::{
+            variants::{Fndsa1024, Mldsa65, Mldsa87},
+            NativeProviderError, ProviderError, Variant,
+        };
+        let (algorithm, metadata, variable_signature) = match algorithm {
+            "FN-DSA-1024" => (Algorithm::FnDsa1024, Fndsa1024::METADATA, true),
+            "ML-DSA-65" => (Algorithm::MlDsa65, Mldsa65::METADATA, false),
+            "ML-DSA-87" => (Algorithm::MlDsa87, Mldsa87::METADATA, false),
+            _ => return Err(VerificationError::InvalidContext),
+        };
+        if public.len() != metadata.public_key_bytes {
+            return Err(VerificationError::InvalidPublicKey);
+        }
+        if signature.is_empty()
+            || signature.len() > metadata.signature_bytes
+            || (!variable_signature && signature.len() != metadata.signature_bytes)
+        {
+            return Err(VerificationError::InvalidSignature);
+        }
+        let engine = self
+            .engine
+            .try_lock()
+            .map_err(|_| VerificationError::Provider("APQE provider busy or poisoned".into()))?;
+        match engine.verify(
+            algorithm,
+            public,
+            message,
+            signature,
+            SignOptions::default(),
+        ) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(VerificationError::InvalidSignature),
+            Err(EngineError::Provider(ProviderError::Native(
+                NativeProviderError::InvalidPublicKey,
+            ))) => Err(VerificationError::InvalidPublicKey),
+            Err(EngineError::Provider(ProviderError::Native(
+                NativeProviderError::InvalidSignature
+                | NativeProviderError::Length
+                | NativeProviderError::InvalidArgument,
+            ))) => Err(VerificationError::InvalidSignature),
+            Err(error) => Err(VerificationError::Provider(error.to_string())),
+        }
+    }
 }
 pub struct ApqeKem {
     engine: Arc<Mutex<CryptoEngine>>,
@@ -318,6 +371,39 @@ mod tests {
         );
     }
     #[test]
+    fn identity_classification_never_calls_local_provider_failure_an_invalid_signature() {
+        let engine = Arc::new(Mutex::new(CryptoEngine::new()));
+        let identity = ApqeIdentityVerifier {
+            engine: engine.clone(),
+        };
+        assert_eq!(
+            identity.verify_raw_classified("ML-DSA-87", &[], b"message", &[]),
+            Err(VerificationError::InvalidPublicKey)
+        );
+        assert_eq!(
+            identity.verify_raw_classified("ML-DSA-87", &[0; 2592], b"message", &[]),
+            Err(VerificationError::InvalidSignature)
+        );
+        assert!(matches!(
+            identity.verify_raw_classified("ML-DSA-87", &[0; 2592], b"message", &[0; 4627]),
+            Err(VerificationError::Provider(_))
+        ));
+        assert_eq!(
+            identity.verify_raw_classified("FN-DSA-512", &[], b"message", &[]),
+            Err(VerificationError::InvalidContext)
+        );
+        let _held = engine.lock().unwrap();
+        assert!(
+            matches!(identity.verify_raw_classified("ML-DSA-87",&[0;2592],b"message",&[0;4627]),Err(VerificationError::Provider(message)) if message.contains("busy or poisoned"))
+        );
+        assert_eq!(
+            identity
+                .verify_raw("unknown", &[], b"message", &[])
+                .unwrap_err(),
+            "unsupported identity authorization profile"
+        );
+    }
+    #[test]
     #[ignore = "requires explicitly authenticated immutable APQE native report"]
     fn native_apqe_adapters_preserve_raw_profiles_and_reject_substitution() {
         let report = std::env::var("APQE_TRUSTED_NATIVE_REPORT").expect("trusted report path");
@@ -357,6 +443,15 @@ mod tests {
                 &root_signature,
             )
             .unwrap();
+        assert_eq!(
+            identity.verify_raw_classified(
+                "FN-DSA-1024",
+                &root.public_key,
+                b"different proof",
+                &root_signature
+            ),
+            Err(VerificationError::InvalidSignature)
+        );
         assert!(identity
             .verify_raw(
                 "FN-DSA-1024",

@@ -554,6 +554,14 @@ where
                 transaction_index: transaction_position,
             };
             let state = overlay.staged();
+            if async_mode && transaction.unsigned.fee_limit.max_fee_per_gas_nwei<self.fees.base_fee_per_gas_nwei {
+                consume_async_rejection_nonce(&mut overlay,&transaction.unsigned.sender,transaction.unsigned.nonce)
+                    .map_err(|source|BlockExecutionError::State{transaction_index,source})?;
+                receipts.push(TransactionReceipt {transaction_id,status:ReceiptStatus::Reverted,gas_used:0,
+                    state_root_after:state_root(overlay.staged()).map_err(BlockExecutionError::StateRoot)?,
+                    error_code:Some("async_fee_cap_below_base_v1".into())});
+                continue;
+            }
             let protected_credit = matches!(action, TransactionAction::Transfer)
                 && transaction.unsigned.receiver.starts_with("synw");
             let (mut dispatch, rejection) = match (protected_credit, wallet) {
@@ -570,16 +578,23 @@ where
                     )),
                     Err(error) => Err(error.to_string()),
                 },
-                _ => self
-                    .dispatcher
-                    .execute(transaction, &action, context, state)
-                    .map(|dispatch| (dispatch, None))
-                    .map_err(|error| error.to_string()),
+                _ => match self.dispatcher.execute(transaction,&action,context,state){
+                    Ok(dispatch)=>Ok((dispatch,None)),
+                    Err(error) if async_mode&&self.dispatcher.terminal_rejection(&error)=>Ok((
+                        NativeTransferDispatcher::rejection(transaction,transaction.unsigned.fee_limit.gas_limit),
+                        Some("native_execution_rejected_v1"))),
+                    Err(error)=>Err(error.to_string()),
+                },
             }
             .map_err(|message| BlockExecutionError::Dispatcher {
                 transaction_index,
                 message,
             })?;
+            let mut rejection=rejection;
+            if async_mode && dispatch.gas_used>transaction.unsigned.fee_limit.gas_limit {
+                dispatch=NativeTransferDispatcher::rejection(transaction,transaction.unsigned.fee_limit.gas_limit);
+                rejection=Some("async_out_of_gas_v1");
+            }
             if let Some(binding) = first_use_binding.filter(|_| rejection.is_none()) {
                 add_first_use_binding(
                     &mut dispatch.state_diff,

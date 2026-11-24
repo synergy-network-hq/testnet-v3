@@ -16,6 +16,10 @@ pub struct NativeTransferDispatcher;
 pub trait NativeOperation {
     type Error: std::fmt::Display;
 
+    fn terminal_rejection(&self, _error: &Self::Error) -> bool {
+        false
+    }
+
     /// A value transfer may credit a protected account only when the selected
     /// protocol verifies its registration against finalized authorization state.
     fn authorize_protected_credit(
@@ -74,6 +78,19 @@ where
 {
     type Error = CanonicalNativeDispatchError<O::Error>;
 
+    fn terminal_rejection(&self, error: &Self::Error) -> bool {
+        match error {
+            CanonicalNativeDispatchError::Operation(error) => {
+                self.operation.terminal_rejection(error)
+            }
+            CanonicalNativeDispatchError::UnsupportedAction => true,
+            CanonicalNativeDispatchError::Transfer(
+                NativeDispatchError::ZeroValueTransfer | NativeDispatchError::AccountNotEnrolled,
+            ) => true,
+            _ => false,
+        }
+    }
+
     fn execute(
         &self,
         transaction: &SignedTransaction,
@@ -129,6 +146,10 @@ impl NativeTransferDispatcher {
     pub(crate) fn protected_credit_reversion(
         transaction: &SignedTransaction,
     ) -> TransactionDispatch {
+        Self::rejection(transaction, NATIVE_TRANSFER_GAS)
+    }
+
+    pub(crate) fn rejection(transaction: &SignedTransaction, gas_used: u64) -> TransactionDispatch {
         TransactionDispatch {
             state_diff: StateDiff {
                 changes: vec![AccountChange {
@@ -140,7 +161,7 @@ impl NativeTransferDispatcher {
                 }],
                 protocol_changes: Vec::new(),
             },
-            gas_used: NATIVE_TRANSFER_GAS,
+            gas_used,
         }
     }
 
