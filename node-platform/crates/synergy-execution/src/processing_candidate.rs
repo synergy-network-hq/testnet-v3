@@ -68,6 +68,11 @@ pub trait ProcessingPayloadProvider {
 pub trait ProcessingNativeWalletActions {
     fn owns(&self, record: &ProcessingReadyRecord) -> bool;
 
+    /// A natively authenticated external action owns its own nonce transition
+    /// and terminal rejection. It must never be decoded as a native transaction.
+    fn external_nonce_owner(&self, _record:&ProcessingReadyRecord)->bool {false}
+
+
     /// Use only the finalized Wallet policy and the ordered execution state.
     /// A native Wallet action handler without that authority denies credit.
     fn authorize_ordinary_protected_credit(
@@ -580,6 +585,7 @@ impl<D: TransactionExecutor, V: AegisTransactionVerifier> BlockExecutionSchedule
             transactions.push(transaction);
         }
         for record in selected.records() {
+            if wallet.is_some_and(|dispatch|dispatch.external_nonce_owner(record)) {continue;}
             let nonce = expected_nonces
                 .entry(record.sender_wallet.as_str())
                 .or_insert_with(|| {

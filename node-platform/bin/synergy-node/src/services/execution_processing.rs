@@ -53,29 +53,8 @@ where
             "signed Wallet action policy requires an activated native journal".into(),
         ));
     }
-    match subject {
-        Some(subject_root) => {
-            scheduler.execute_processing_epoch_close(
-                ProcessingEpochClose {
-                    epoch_end_height: authority.epoch.epoch_end_height,
-                    subject_root: &subject_root,
-                },
-                context,
-                parent.world(),
-                publications,
-                pipeline,
-                pipeline,
-            )
-        }
-        None => scheduler.execute_processing_candidate_with_epoch_transition(
-            context,
-            parent.world(),
-            publications,
-            pipeline,
-            pipeline,
-            parent.epoch_transition(),
-        ),
-    }
+    execute_combined_processing(scheduler,authority,context,parent,publications,pipeline,pipeline,None,subject)
+
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -93,15 +72,31 @@ where
     D: synergy_execution::TransactionExecutor,
     V: synergy_transaction::AegisTransactionVerifier,
 {
-    match subject {
-        Some(subject_root) => scheduler.execute_processing_epoch_close_with_wallet_actions(
-            ProcessingEpochClose { epoch_end_height: authority.epoch.epoch_end_height, subject_root: &subject_root },
-            context, parent.world(), publications, wallet, pipeline, Some(wallet),
-        ),
-        None => scheduler.execute_processing_candidate_with_wallet_actions(
-            context, parent.world(), publications, wallet, pipeline, parent.epoch_transition(), Some(wallet),
-        ),
+    execute_combined_processing(scheduler,authority,context,parent,publications,pipeline,wallet,Some(wallet),subject)
+
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_combined_processing<D,V,R>(
+    scheduler:&BlockExecutionScheduler<D,V>,authority:&VerifiedAuthority,mut context:ProcessingCandidateContext<'_>,
+    parent:&NativeProcessingParent<'_>,publications:&[synergy_execution::ProcessingReadyRecord],
+    pipeline:&NativeProcessingPipeline<'_>,readiness:&R,wallet:Option<&dyn synergy_execution::ProcessingNativeWalletActions>,
+    subject:Option<String>,
+)->Result<ExecutionCandidate,ProcessingCandidateError>
+where D:synergy_execution::TransactionExecutor,V:synergy_transaction::AegisTransactionVerifier,R:synergy_execution::ProcessingReadinessVerifier {
+    if authority.ethereum_genesis().is_some() {
+        let policy=synergy_aivm::ethereum_execution::EvmCompatibilityPolicy::load(parent.world()).map_err(|error|ProcessingCandidateError::Invalid(error.to_string()))?;
+        context.maximum_gas=context.maximum_gas.min(policy.block_gas_limit);
     }
+    let dispatch=crate::services::processing_pipeline::ethereum::EthereumDispatch{pipeline,authority,context,wallet};
+    let candidate=match subject {
+        Some(subject_root)=>scheduler.execute_processing_epoch_close_with_wallet_actions(
+            ProcessingEpochClose{epoch_end_height:authority.epoch.epoch_end_height,subject_root:&subject_root},
+            context,parent.world(),publications,readiness,pipeline,Some(&dispatch)),
+        None=>scheduler.execute_processing_candidate_with_wallet_actions(
+            context,parent.world(),publications,readiness,pipeline,parent.epoch_transition(),Some(&dispatch)),
+    }?;
+    crate::services::processing_pipeline::ethereum::finish_candidate(authority,candidate)
 }
 
 pub(super) struct ProcessingExecutionState {
@@ -388,16 +383,11 @@ impl ExecutionService {
         pipeline: &NativeProcessingPipeline<'_>,
     ) -> Result<ExecutionCandidate, ProcessingCandidateError> {
         let subject = authority.epoch_close_subject_at(context.height).map_err(ProcessingCandidateError::Invalid)?;
-        match subject {
-            Some(subject_root) if parent.epoch_transition().is_none() => self.scheduler.execute_processing_epoch_close(
-                ProcessingEpochClose { epoch_end_height: authority.epoch.epoch_end_height, subject_root: &subject_root },
-                context, parent.world(), publications, pipeline, pipeline,
-            ),
-            Some(_) => Err(ProcessingCandidateError::Invalid("closing subject cannot apply an opening processing transition".into())),
-            None => self.scheduler.execute_processing_candidate_with_epoch_transition(
-                context, parent.world(), publications, pipeline, pipeline, parent.epoch_transition(),
-            ),
+        if subject.is_some() && parent.epoch_transition().is_some(){
+            return Err(ProcessingCandidateError::Invalid("closing subject cannot apply an opening processing transition".into()));
         }
+        execute_combined_processing(&self.scheduler,authority,context,parent,publications,pipeline,pipeline,None,subject)
+
     }
     pub(super) fn processing_authority_at(
         &self,

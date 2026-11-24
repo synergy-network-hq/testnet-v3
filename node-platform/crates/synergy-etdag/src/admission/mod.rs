@@ -11,6 +11,8 @@ mod target_height;
 mod validator;
 mod verifier;
 mod wallet_protected;
+mod ethereum;
+pub use ethereum::EthereumProcessingAdmission;
 
 pub use certificate::{AdmissionCertificate, AdmissionVote};
 pub use context::{TargetAdmissionContext, TargetAdmissionContextV3};
@@ -18,7 +20,7 @@ pub use nonce_window::AdmissionNonceWindow;
 pub use policy::EtdagAdmission;
 pub use processing::{
     ProcessingAdmissionRequest, ProcessingContext, ProcessingEnvelope, ProcessingEnvelopeAad,
-    WalletProcessingAdmission, PROCESSING_PROFILE_ID, PW13_SPONSOR_CANDIDATE_LANE,
+    WalletProcessingAdmission, ETHEREUM_PROCESSING_PROFILE_ID, ETHEREUM_PROCESSING_LANE, PROCESSING_PROFILE_ID, PW13_SPONSOR_CANDIDATE_LANE,
     PW13_SPONSOR_CANDIDATE_PROFILE_ID, PW13_TRANSFER_CANDIDATE_LANE,
     PW13_TRANSFER_CANDIDATE_PROFILE_ID,
 };

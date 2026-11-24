@@ -42,6 +42,9 @@ use synergy_storage::NodeStorageLayout;
 use synergy_transaction::ReceiptStatus;
 use synergy_ws::{server::WsServer, WsTopic};
 
+#[path = "rpc_ethereum.rs"]
+mod ethereum;
+
 #[path = "rpc_proofs.rs"]
 pub(super) mod proofs;
 pub(crate) use proofs::verify_finality_proof_cli;
@@ -407,6 +410,10 @@ impl CanonicalQueryStore {
 }
 
 impl CanonicalReadProvider for CanonicalQueryStore {
+    fn ethereum_query(&self, method:&str, params:&Value)->Result<Value,RpcError> {
+        self.canonical_ethereum_query(method,params)
+    }
+
     fn finalized_proof_page(&self, query: &Value) -> Result<Value, RpcError> {
         self.canonical_proof_page(query)
     }
@@ -776,6 +783,7 @@ pub(super) fn registration_with_reserved_admission_listener(
     websocket_hub: Arc<WsServer>,
     admission: Option<super::protected_admission::AdmissionHandle>,
     listener: Arc<TcpListener>,
+    network_identity:Option<VerifiedRpcNetwork>,
 ) -> Result<(ServiceSpec, Box<dyn ManagedService>), String> {
     if listener.local_addr().map_err(|e| e.to_string())?
         != configuration
@@ -791,7 +799,7 @@ pub(super) fn registration_with_reserved_admission_listener(
         websocket_hub,
         admission,
         None,
-        None,
+        network_identity,
     )?;
     service.reserved_listener = Some(listener);
     Ok((
@@ -1043,6 +1051,42 @@ impl RuntimeDispatcher {
 
 impl RpcDispatcher for RuntimeDispatcher {
     fn dispatch(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if method=="eth_getTransactionCount" && params.as_array().is_some_and(|values|
+            values.len()==2&&values[1].as_str()==Some("pending")) {
+            let mut finalized=params.clone();finalized[1]=json!("latest");
+            let base=self.query_store.ethereum_query(method,&finalized)?;
+            let nonce=u64::from_str_radix(base.as_str().and_then(|text|text.strip_prefix("0x")).ok_or_else(||RpcError::unavailable("invalid native finalized nonce"))?,16)
+                .map_err(|_|RpcError::unavailable("invalid native finalized nonce"))?;
+            let sender=params[0].as_str().ok_or_else(||RpcError::invalid_params("expected Ethereum address"))?.to_lowercase();
+            let pending=self.admission.as_ref().ok_or_else(||RpcError::unavailable("native Ethereum pending owner unavailable"))?
+                .ethereum_pending_nonce(&sender,nonce).map_err(RpcError::unavailable)?;
+            return Ok(json!(format!("0x{pending:x}")));
+        }
+        if method=="eth_sendRawTransaction" {
+            let preflight=self.query_store.ethereum_query(method,&params)?;
+            let selected=self.network_identity.as_ref().ok_or_else(||RpcError::unavailable("selected Ethereum network unavailable"))?;
+            let authority=selected.live_authority.as_ref().and_then(|live|live.read().ok().and_then(|value|value.clone()))
+                .ok_or_else(||RpcError::unavailable("authenticated Ethereum authority unavailable"))?;
+            let raw=ethereum::decode_raw_params(&params)?;
+            let handle=self.admission.as_ref().ok_or_else(||RpcError::unavailable("asynchronous Ethereum processing unavailable"))?;
+            let queued=handle.enqueue_ethereum_raw(&authority,&selected.genesis_hash,raw).map_err(RpcError::invalid_params)?;
+            let id=queued.get("receipt_id").and_then(Value::as_str).ok_or_else(||RpcError::unavailable("Ethereum queue receipt missing"))?;
+            let deadline=Instant::now()+Duration::from_secs(5);
+            loop {
+                let observation=handle.receipt(id).map_err(RpcError::unavailable)?;
+                match observation.get("status").and_then(Value::as_str) {
+                    Some("accepted") if observation.get("admitted").and_then(Value::as_bool)==Some(true)=>
+                        return preflight.get("transaction_hash").cloned().ok_or_else(||RpcError::unavailable("Ethereum hash missing")),
+                    Some("rejected")=>return Err(RpcError::invalid_params(format!("Ethereum admission rejected: {observation}"))),
+                    _=>{},
+                }
+                if Instant::now()>=deadline{return Err(RpcError::unavailable("Ethereum durable admission pending; query transaction hash before retry"));}
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        if synergy_rpc::methods::is_ethereum_method(method) {
+            return self.query_store.ethereum_query(method, &params);
+        }
         match method {
             PROCESSING_CONTEXT_V1 => {
                 let handle = self

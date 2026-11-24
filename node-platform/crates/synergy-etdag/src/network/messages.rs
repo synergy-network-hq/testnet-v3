@@ -124,6 +124,7 @@ pub enum EtdagNetworkMessage {
     RequestMissingArtifact(MissingArtifactRequest),
     RecoveredShardCustody(RecoveredShardCustody),
     ProcessingProtectedWalletVertexV1(ProcessingVertex<ProtectedWalletAdmission>),
+    ProcessingEthereumVertexV1(ProcessingVertex<crate::admission::EthereumProcessingAdmission>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

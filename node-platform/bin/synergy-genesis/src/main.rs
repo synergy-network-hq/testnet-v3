@@ -302,6 +302,7 @@ mod tests {
                     protocol_version: "posy/3.0".into(),
                     activation_unix: 1,
                     autonomous_epoch_protocol: None,
+                    ethereum_compatibility: None,
                 },
                 validators: (0..synergy_posy::POSY_MIN_VALIDATOR_COUNT)
                     .map(|i| GenesisValidator {

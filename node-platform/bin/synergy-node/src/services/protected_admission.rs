@@ -504,6 +504,7 @@ struct State {
     ingress: Option<super::ingress::AuthenticatedIngress>,
     pending: VecDeque<PendingAdmission>,
     processing_pending: VecDeque<PendingProcessingAdmission>,
+    ethereum_pending_nonces:BTreeMap<String,std::collections::BTreeSet<u64>>,
     pending_bytes: usize,
     inflight: BTreeMap<String, usize>,
     receipts: BTreeMap<String, Receipt>,
@@ -761,6 +762,66 @@ impl AdmissionHandle {
         Ok(result)
     }
 
+    /// Only the native durable pending owner publishes this observation,
+    /// including after restart. Queued/unverified requests are never counted.
+    pub(super) fn publish_ethereum_pending_nonces(&self,values:impl Iterator<Item=(String,u64)>)->Result<(),String>{
+        let mut pending=BTreeMap::<String,std::collections::BTreeSet<u64>>::new();let mut count=0usize;
+        for (sender,nonce) in values {
+            count+=1;if count>4096||sender.len()!=42||!sender.starts_with("0x")||nonce==u64::MAX {
+                return Err("invalid bounded native Ethereum pending observation".into());
+            }
+            pending.entry(sender).or_default().insert(nonce);
+        }
+        self.0.lock().map_err(|_|"admission lock poisoned")?.ethereum_pending_nonces=pending;Ok(())
+    }
+    pub(super) fn ethereum_pending_nonce(&self,sender:&str,finalized:u64)->Result<u64,String>{
+        let state=self.0.lock().map_err(|_|"admission lock poisoned")?;
+        let mut nonce=finalized;
+        if let Some(pending)=state.ethereum_pending_nonces.get(sender){
+            while pending.contains(&nonce){nonce=nonce.checked_add(1).ok_or("Ethereum pending nonce overflow")?;}
+        }Ok(nonce)
+    }
+
+    /// Standard external raw authorization is encrypted by the native gateway
+    /// against the published exact roster. This creates no native user proof.
+    pub(super) fn enqueue_ethereum_raw(&self,authority:&super::authority::VerifiedAuthority,genesis:&str,raw:Vec<u8>)
+        ->Result<Value,String>{
+        use synergy_etdag::admission::{EthereumProcessingAdmission,ETHEREUM_PROCESSING_PROFILE_ID,ETHEREUM_PROCESSING_LANE};
+        use synergy_etdag::crypto::{encrypt_protected_payload_with_kem,pad_plaintext};
+        let signed=authority.ethereum_genesis().ok_or("Ethereum compatibility is absent from signed Genesis")?;
+        if signed.genesis_hash!=genesis||raw.is_empty()||raw.len()>65536 {return Err("Ethereum input differs from selected signed Genesis or byte bound".into());}
+        let mut context=self.0.lock().map_err(|_|"admission lock poisoned")?.processing_context.as_ref()
+            .ok_or("asynchronous processing context unavailable")?.context.clone();
+        if context.authority.chain_id!=authority.epoch.chain_id||context.authority.epoch!=authority.epoch.epoch {
+            return Err("Ethereum context differs from current authenticated authority".into());
+        }
+        context.profile_id=ETHEREUM_PROCESSING_PROFILE_ID.into();context.validate().map_err(|error|format!("{error:?}"))?;
+        let tx=synergy_aivm::ethereum::decode_eip155(&raw,authority.epoch.chain_id).map_err(|error|error.to_string())?;
+        let signer=synergy_aegis::ethereum::verify_eip155_signature(tx.chain_id,&tx.signing_hash,tx.v,&tx.r,&tx.s).map_err(|error|error.to_string())?;
+        let aad=synergy_etdag::ProcessingEnvelopeAad{profile_id:context.profile_id.clone(),chain_id:tx.chain_id,
+            network_id:context.authority.network_id.clone(),protocol_version:context.authority.protocol_version.clone(),epoch:context.authority.epoch,
+            processing_context_root:context.root().map_err(|error|format!("{error:?}"))?,authorization_height:context.authority.target_height,
+            assigned_cluster_id:context.authority.assigned_cluster_id,lane_id:ETHEREUM_PROCESSING_LANE.into(),
+            sender_id:synergy_aivm::ethereum_execution::conventional_evm_account_key(*signer.account_id()),nonce_slot:tx.nonce};
+        let registry=authority.protected_ingress_registry()?;
+        let recipients=authority.registry.active().map(|validator|synergy_etdag::crypto::active_key_for_validator(
+            registry,&validator.validator_id,context.authority.target_height).cloned().map_err(|error|format!("{error:?}")))
+            .collect::<Result<Vec<_>,String>>()?;
+        let quorum=synergy_etdag::certificate_quorum(recipients.len()).map_err(|error|format!("{error:?}"))?;
+        let padded=pad_plaintext(&raw).map_err(|error|format!("{error:?}"))?;
+        let kem=authority.ethereum_ingress_kem()?;
+        let payload=encrypt_protected_payload_with_kem(&aad,&recipients,quorum,&padded,&kem).map_err(|error|format!("{error:?}"))?;
+        let order=EtdagDigest::from_canonical("SYNERGY_ETHEREUM_EIP155_PUBLIC_ORDER_KEY_V1",&tx.transaction_hash).map_err(|error|format!("{error:?}"))?;
+        let mut envelope=synergy_etdag::ProcessingEnvelope{envelope_version:1,envelope_id:order.clone(),aad,
+            aead_nonce:payload.aead_nonce,key_commitment:payload.key_commitment,share_commitment_root:order.clone(),share_capsule_root:order.clone(),
+            ciphertext:payload.ciphertext,content_blind_order_key:order,share_capsules:payload.share_capsules};
+        envelope.refresh_capsule_roots().map_err(|error|format!("{error:?}"))?;
+        envelope.envelope_id=envelope.commitment().map_err(|error|format!("{error:?}"))?;
+        let admission=EthereumProcessingAdmission{envelope,raw_transaction:raw,gas_limit:tx.gas_limit};
+        admission.validate_context(&context).map_err(|error|format!("{error:?}"))?;
+        self.enqueue_runtime_processing(RuntimeProcessingAdmission::Ethereum(admission))
+    }
+
     pub fn enqueue_processing(
         &self,
         admission: WalletProcessingAdmission,
@@ -801,7 +862,7 @@ impl AdmissionHandle {
         .0;
         let mut state = self.0.lock().map_err(|_| "admission lock poisoned")?;
         let published = match &admission {
-            RuntimeProcessingAdmission::Ordinary(_) => &state.processing_context.as_ref()
+            RuntimeProcessingAdmission::Ordinary(_) | RuntimeProcessingAdmission::Ethereum(_) => &state.processing_context.as_ref()
                 .ok_or("asynchronous processing admission is unavailable")?
                 .context.authority,
             RuntimeProcessingAdmission::Protected(_) => &state.wallet_processing_context.as_ref()

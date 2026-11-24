@@ -68,6 +68,12 @@ pub struct FinalizedBlockCommitment {
 /// boundaries before returning data. Missing records are represented by
 /// `None`; corrupt or unverifiable records fail closed.
 pub trait CanonicalReadProvider: Send + Sync {
+    /// Ethereum views must be served from the same authenticated finalized
+    /// native World. The default grants no compatibility capability.
+    fn ethereum_query(&self, _method: &str, _params: &Value) -> Result<Value, RpcError> {
+        Err(RpcError::unavailable("signed Ethereum compatibility is unavailable"))
+    }
+
     /// Original canonical commitment bytes, bounded and pinned by height.
     /// A page is evidence transport; clients still authenticate its three-QC witness.
     fn finalized_proof_page(&self, _query: &Value) -> Result<Value, RpcError> {

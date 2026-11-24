@@ -54,6 +54,7 @@ impl RpcRateLimiter {
         }
         if bucket.used >= self.policy.requests {
             return Err(crate::RpcError {
+                data:None,
                 code: -32002,
                 message: "RPC rate limit exceeded".into(),
             });

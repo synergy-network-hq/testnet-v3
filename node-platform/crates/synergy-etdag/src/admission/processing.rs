@@ -8,6 +8,8 @@ use std::collections::BTreeSet;
 use crate::crypto::{canonical_signing_bytes, ShareCapsule, ShareCommitment};
 use crate::{EtdagDigest, EtdagError, TargetAdmissionContextV3};
 
+pub const ETHEREUM_PROCESSING_PROFILE_ID: &str = "etdag-aivm-ethereum-eip155-v1";
+pub const ETHEREUM_PROCESSING_LANE: &str = "ethereum-eip155";
 pub const PROCESSING_PROFILE_ID: &str = "etdag-async-processing-v1";
 pub const PW13_TRANSFER_CANDIDATE_PROFILE_ID: &str = "etdag-pw13-transfer-candidate-v1";
 pub const PW13_TRANSFER_CANDIDATE_LANE: &str = "protected-transfer";
@@ -36,6 +38,7 @@ fn invalid(message: &str) -> EtdagError {
 fn profile_lane(profile: &str) -> Option<&'static str> {
     match profile {
         PROCESSING_PROFILE_ID => Some("ordinary-user"),
+        ETHEREUM_PROCESSING_PROFILE_ID => Some(ETHEREUM_PROCESSING_LANE),
         PW13_TRANSFER_CANDIDATE_PROFILE_ID => Some(PW13_TRANSFER_CANDIDATE_LANE),
         PW13_SPONSOR_CANDIDATE_PROFILE_ID => Some(PW13_SPONSOR_CANDIDATE_LANE),
         _ => None,

@@ -9,6 +9,13 @@ const CLAIM: &str = "etdag-processing-groups-v1/claim/";
 const READY: &str = "etdag-processing-ready-v1/item/";
 const MAX_METADATA_BYTES: usize = 16 * 1024;
 
+// Public metadata is not spending authority. External account identifiers are
+// admitted only by the independently signed EIP155 processing owner.
+fn valid_processing_sender(value:&str)->bool {
+    synergy_address::is_valid_address(value) || value.strip_prefix("0x")
+        .is_some_and(|text|text.len()==40&&text.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte)))
+}
+
 pub(super) fn validate_record(key: &str, bytes: &[u8]) -> Result<bool, String> {
     let invalid = || "invalid public processing metadata".to_owned();
     if let Some(number) = key.strip_prefix(GROUP) {
@@ -29,7 +36,7 @@ pub(super) fn validate_record(key: &str, bytes: &[u8]) -> Result<bool, String> {
             || record.order_position >= 4096
             || envelope.nonce_slot == u64::MAX
             || envelope.protocol_dependencies.len() > 64
-            || !synergy_address::is_valid_address(&envelope.sender_id)
+            || !valid_processing_sender(&envelope.sender_id)
             || EtdagDigest::from_canonical(
                 "SYNERGY_ETDAG_PROCESSING_NONCE_CLAIM_V1",
                 &(&envelope.sender_id, envelope.nonce_slot),
@@ -57,7 +64,7 @@ pub(super) fn validate_record(key: &str, bytes: &[u8]) -> Result<bool, String> {
             || item.encoded_bytes == 0
             || item.remaining_dependencies.len() > 64
             || record.sender_nonce == u64::MAX
-            || !synergy_address::is_valid_address(&record.sender_wallet)
+            || !valid_processing_sender(&record.sender_wallet)
         {
             return Err(invalid());
         }

@@ -83,6 +83,7 @@ fn processing_startup_capacity_matches_actual_intake_reservation() {
 pub(crate) struct ProcessingStoreLimits {
     pub slots: usize,
     pub completion_bytes_per_item: usize,
+    pub execution_headroom_bytes: usize,
 }
 
 /// Must resolve the frozen context and authorization timestamp from verified
@@ -601,7 +602,7 @@ impl<A: ProcessingAdmissionRecord> PendingProcessingStore<A> {
             return Err(invalid("historical processing record exceeds bound"));
         }
         let workspace = self.budget.reserve_with_headroom(
-            reservation(original.len(), self.limits)?, PROCESSING_INTAKE_HEADROOM_BYTES,
+            reservation(original.len(), self.limits)?, self.execution_headroom(),
         )?.into_budget();
         let _original = workspace.reserve(read_reservation(original.len())?)?;
         let _sideband = workspace.reserve(completion_reservation(donor_progress.len())?)?;
@@ -969,6 +970,12 @@ impl<A: ProcessingAdmissionRecord> PendingProcessingStore<A> {
     pub(crate) fn identities(&self) -> impl Iterator<Item = &PendingProcessingIdentity> {
         self.slots.iter().flatten().map(|entry| &entry.identity)
     }
+    pub(crate) fn execution_headroom(&self)->usize {
+        PROCESSING_INTAKE_HEADROOM_BYTES.max(self.limits.completion_bytes_per_item).max(self.limits.execution_headroom_bytes)
+    }
+    pub(crate) fn set_execution_headroom(&mut self,bytes:usize){
+        self.limits.execution_headroom_bytes=bytes;
+    }
     pub(crate) fn source_heights(&self) -> impl Iterator<Item = u64> + '_ {
         self.slots
             .iter()
@@ -1209,7 +1216,7 @@ impl<A: ProcessingAdmissionRecord> PendingProcessingStore<A> {
         context
             .validate()
             .map_err(|e| invalid(format!("processing context: {e:?}")))?;
-        let headroom = PROCESSING_INTAKE_HEADROOM_BYTES.max(self.limits.completion_bytes_per_item);
+        let headroom = self.execution_headroom();
         let _context_scratch = self
             .budget
             .reserve_with_headroom(MAX_CONTEXT_BYTES * 2, headroom)?;

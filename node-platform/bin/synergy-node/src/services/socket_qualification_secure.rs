@@ -256,9 +256,16 @@ fn actual_apqe_five_process_signed_wallet_release_stays_pending_in_e1() {
     qualify_actual_apqe_five_process_canary(FiveProcessScenario::ManagedReleasePending);
 }
 
+#[test]
+#[ignore="requires real APQE provider, normal node binary and independent ethers"]
+fn actual_apqe_five_process_ethereum_eip155_solidity_restart_and_rpc(){
+    qualify_actual_apqe_five_process_canary(FiveProcessScenario::Ethereum);
+}
+
 enum FiveProcessScenario {
     Ordinary,
     ManagedReleasePending,
+    Ethereum,
 }
 
 fn qualify_actual_apqe_five_process_canary(scenario: FiveProcessScenario) {
@@ -272,10 +279,12 @@ fn qualify_actual_apqe_five_process_canary(scenario: FiveProcessScenario) {
     };
     let network_id = secure_fixture_network();
     let managed = matches!(scenario, FiveProcessScenario::ManagedReleasePending);
-    let chain_id = if managed { 99_999 } else { 1266 };
-    let (transaction, world, mut account_secret) = funded_transaction_fixture_for_network_provider_chain(
+    let ethereum=matches!(scenario,FiveProcessScenario::Ethereum);
+    let chain_id = if ethereum || managed { 99_999 } else { 1266 };
+    let (transaction, mut world, mut account_secret) = funded_transaction_fixture_for_network_provider_chain(
         &network_id, 10_000_000, Some(&provider), chain_id,
     );
+    if ethereum {super::ethereum_qualification::fund_world(&mut world);}
     let mut prepared = prepare_socket_fixture_with_managed_release(
         world,
         None,
@@ -417,6 +426,11 @@ fn qualify_actual_apqe_five_process_canary(scenario: FiveProcessScenario) {
             "APQE fullmesh sessiondeadline"
         );
         std::thread::sleep(Duration::from_millis(1000));
+    }
+    if ethereum {
+        account_secret.fill(0);
+        super::ethereum_qualification::qualify(&prepared.configurations,&mut cleanup.children,&binary,&prepared.root);
+        return;
     }
     let rpc_address = prepared.configurations[0].rpc.listen_address.unwrap();
     if managed {
@@ -562,7 +576,7 @@ mod recovery;
 #[path = "socket_qualification_secure_wallet.rs"]
 mod wallet_activation;
 
-fn process_rpc(
+pub(super) fn process_rpc(
     address: std::net::SocketAddr,
     method: &str,
     params: serde_json::Value,
@@ -575,7 +589,7 @@ fn process_rpc(
     let mut socket = std::net::TcpStream::connect_timeout(&address, Duration::from_secs(2))
         .map_err(|e| e.to_string())?;
     socket
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(Duration::from_secs(if method=="eth_sendRawTransaction" {10} else {5})))
         .unwrap();
     socket
         .set_write_timeout(Some(Duration::from_secs(5)))

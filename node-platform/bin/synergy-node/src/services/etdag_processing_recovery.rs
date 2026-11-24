@@ -310,6 +310,7 @@ mod tests {
         let limits = ProcessingStoreLimits {
             slots: 4,
             completion_bytes_per_item: 64 * 1024 * 1024,
+            execution_headroom_bytes: 0,
         };
         let pending_root = scratch.0.join("pending");
         let mut pending = PendingProcessingStore::open(

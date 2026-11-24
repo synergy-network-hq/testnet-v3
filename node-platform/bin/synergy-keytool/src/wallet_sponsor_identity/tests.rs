@@ -40,6 +40,7 @@ fn actual_proofs_authorize_the_same_public_binding_for_registration_and_sponsors
             protocol_version: synergy_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION.into(),
             activation_unix: 100,
             autonomous_epoch_protocol: Some(AUTONOMOUS_EPOCH_PROTOCOL_V1.into()),
+                    ethereum_compatibility: None,
         },
         validators: (0..synergy_posy::POSY_MIN_VALIDATOR_COUNT)
             .map(|index| GenesisValidator {

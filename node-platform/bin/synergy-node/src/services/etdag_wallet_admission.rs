@@ -12,6 +12,7 @@ use synergy_etdag::{
 pub(super) enum RuntimeProcessingAdmission {
     Ordinary(WalletProcessingAdmission),
     Protected(ProtectedWalletAdmission),
+    Ethereum(synergy_etdag::admission::EthereumProcessingAdmission),
 }
 
 impl RuntimeProcessingAdmission {
@@ -23,6 +24,7 @@ impl RuntimeProcessingAdmission {
         use synergy_etdag::admission::*;
         match self {
             Self::Ordinary(_) => PROCESSING_PROFILE_ID,
+            Self::Ethereum(_) => ETHEREUM_PROCESSING_PROFILE_ID,
             Self::Protected(value) => match &value.authorization {
                 ProtectedWalletAuthorization::Transfer(_) => PW13_TRANSFER_CANDIDATE_PROFILE_ID,
                 ProtectedWalletAuthorization::SponsoredEnrollment(_) => {
@@ -40,6 +42,8 @@ impl ProcessingAdmissionRecord for RuntimeProcessingAdmission {
     ) -> Result<Self, serde_json::Error> {
         if context.profile_id == synergy_etdag::PROCESSING_PROFILE_ID {
             serde_json::from_str(value).map(Self::Ordinary)
+        } else if context.profile_id == synergy_etdag::admission::ETHEREUM_PROCESSING_PROFILE_ID {
+            serde_json::from_str(value).map(Self::Ethereum)
         } else if is_pw13_context(context) {
             serde_json::from_str(value).map(Self::Protected)
         } else {
@@ -60,6 +64,7 @@ impl ProcessingAdmissionRecord for RuntimeProcessingAdmission {
         match self {
             Self::Ordinary(value) => value.validate_context(context),
             Self::Protected(value) => value.validate_context(context),
+            Self::Ethereum(value) => value.validate_context(context),
         }
     }
 
@@ -67,6 +72,10 @@ impl ProcessingAdmissionRecord for RuntimeProcessingAdmission {
         match self {
             Self::Ordinary(value) => value.identity(),
             Self::Protected(value) => value.identity(),
+            Self::Ethereum(value) => PendingProcessingIdentity {
+                envelope_id:value.envelope.envelope_id.clone(),context_root:value.envelope.aad.processing_context_root.clone(),
+                sender_wallet:value.envelope.aad.sender_id.clone(),sender_nonce:value.envelope.aad.nonce_slot,
+            },
         }
     }
 }
@@ -76,6 +85,7 @@ impl ProcessingVertexAdmission for RuntimeProcessingAdmission {
         match self {
             Self::Ordinary(value) => value.envelope(),
             Self::Protected(value) => value.envelope(),
+            Self::Ethereum(value) => value.envelope(),
         }
     }
 
@@ -86,6 +96,7 @@ impl ProcessingVertexAdmission for RuntimeProcessingAdmission {
         match self {
             Self::Ordinary(value) => value.validate_vertex_resources(reference),
             Self::Protected(value) => value.validate_vertex_resources(reference),
+            Self::Ethereum(value) => value.validate_vertex_resources(reference),
         }
     }
 }
@@ -93,19 +104,15 @@ impl ProcessingVertexAdmission for RuntimeProcessingAdmission {
 pub(super) fn vertex_message(
     vertex: ProcessingVertex<RuntimeProcessingAdmission>,
 ) -> EtdagNetworkMessage {
-    if matches!(&vertex.admission, RuntimeProcessingAdmission::Ordinary(_)) {
-        EtdagNetworkMessage::ProcessingVertexV1(vertex.map_admission(|admission| {
-            let RuntimeProcessingAdmission::Ordinary(value) = admission else {
-                unreachable!()
-            };
-            value
-        }))
-    } else {
-        EtdagNetworkMessage::ProcessingProtectedWalletVertexV1(vertex.map_admission(|admission| {
-            let RuntimeProcessingAdmission::Protected(value) = admission else {
-                unreachable!()
-            };
-            value
-        }))
+    match &vertex.admission {
+        RuntimeProcessingAdmission::Ordinary(_) => EtdagNetworkMessage::ProcessingVertexV1(vertex.map_admission(|admission| {
+            let RuntimeProcessingAdmission::Ordinary(value)=admission else {unreachable!()};value
+        })),
+        RuntimeProcessingAdmission::Protected(_) => EtdagNetworkMessage::ProcessingProtectedWalletVertexV1(vertex.map_admission(|admission| {
+            let RuntimeProcessingAdmission::Protected(value)=admission else {unreachable!()};value
+        })),
+        RuntimeProcessingAdmission::Ethereum(_) => EtdagNetworkMessage::ProcessingEthereumVertexV1(vertex.map_admission(|admission| {
+            let RuntimeProcessingAdmission::Ethereum(value)=admission else {unreachable!()};value
+        })),
     }
 }

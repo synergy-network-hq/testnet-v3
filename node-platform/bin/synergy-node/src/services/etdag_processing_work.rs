@@ -16,7 +16,7 @@ use crate::services::protected_accounts::processing_execution::{
 };
 use crate::services::processing_store::{
     PendingProcessingStore, ProcessingAdmissionAuthenticator, ProcessingAdmissionRecord, ProcessingStoreError,
-    ProcessingStoreLimits, PROCESSING_INTAKE_HEADROOM_BYTES,
+    ProcessingStoreLimits,
 };
 use synergy_etdag::execution::{ProcessingDecryptShare, ProcessingVertex, ProcessingVertexAdmission};
 use synergy_etdag::{CertifiedEnvelopeRef, ProcessingContext};
@@ -259,6 +259,7 @@ impl LiveVerifier {
         admission.validate_context(context).map_err(|error| format!("{error:?}"))?;
         match admission {
             RuntimeProcessingAdmission::Ordinary(value) => source.verify(context, timestamp, value),
+            RuntimeProcessingAdmission::Ethereum(value) => source.authenticate_ethereum(value),
             RuntimeProcessingAdmission::Protected(value) => {
                 if source.pw13_finalized_source()?.consensus_time != timestamp {
                     return Err("protected Wallet original differs from the certified source time".into());
@@ -496,6 +497,7 @@ impl ProcessingAdmissionAuthenticator<RuntimeProcessingAdmission> for LiveVerifi
         };
         match admission {
             RuntimeProcessingAdmission::Ordinary(value) => recovery.verify_completion(context, value, evidence, budget),
+            RuntimeProcessingAdmission::Ethereum(value) => recovery.recover_ethereum(value,evidence,budget).map(drop),
             RuntimeProcessingAdmission::Protected(value) => {
                 with_native_protected_intake(&source, |intake| {
                     recovery.recover_pw13(value, evidence, budget, |original| intake.authorize(original)).map(drop)
@@ -526,6 +528,7 @@ impl EtdagService {
         let envelope = admission.envelope();
         let (gas_class_units, fee_class) = match admission {
             RuntimeProcessingAdmission::Ordinary(value) => (value.request.gas_class_units, value.request.fee_class),
+            RuntimeProcessingAdmission::Ethereum(value) => (value.gas_limit,0),
             RuntimeProcessingAdmission::Protected(value) => {
                 let owner = check(self.authority.native_wallet_release())?;
                 (value.gas_limit(), owner.verified.policy().fee_class)
@@ -606,9 +609,10 @@ impl EtdagService {
         // The successor source is an authenticated finalized World, not
         // Genesis. Starting with Genesis here falsely detects an authorization
         // change and attempts to reopen its old update-height context.
-        let authorization_root = verifier
-            .source(&context, &verifier.scratch)?
-            .authorization_root();
+        let (authorization_root,execution_headroom_bytes)={
+            let source=verifier.source(&context,&verifier.scratch)?;
+            (source.authorization_root(),source.execution_headroom()?)
+        };
         let owner_epoch = self.authority.autonomous_processing_origin().epoch.epoch;
         let pending = PendingProcessingStore::open(
             &self.pipeline_root.join(if owner_epoch == 1 {
@@ -620,6 +624,7 @@ impl EtdagService {
             ProcessingStoreLimits {
                 slots: 4096,
                 completion_bytes_per_item: 64 * 1024 * 1024,
+                execution_headroom_bytes,
             },
             self.ingress.world_budget(),
             &verifier,
@@ -867,7 +872,7 @@ impl EtdagService {
                         .ok_or_else(|| {
                             ProcessingStoreError::Invalid("processing intake size overflow".into())
                         })?,
-                    PROCESSING_INTAKE_HEADROOM_BYTES,
+                    work.pending.execution_headroom(),
                 )?
                 .into_budget(),
         };
@@ -912,6 +917,13 @@ impl EtdagService {
         v: ProcessingVertex,
     ) -> Result<(), String> {
         self.processing_runtime_vertex(v.map_admission(RuntimeProcessingAdmission::Ordinary))
+    }
+
+    pub(in crate::services::etdag) fn processing_ethereum_vertex(
+        &mut self,v:ProcessingVertex<synergy_etdag::admission::EthereumProcessingAdmission>,
+    )->Result<(),String>{
+        self.authority.ethereum_genesis().ok_or("signed Ethereum compatibility is unavailable")?;
+        self.processing_runtime_vertex(v.map_admission(RuntimeProcessingAdmission::Ethereum))
     }
 
     pub(in crate::services::etdag) fn processing_protected_wallet_vertex(
@@ -1197,6 +1209,8 @@ impl EtdagService {
             if height < work.verifier.context.authority.source_finalized_height {
                 return Ok(());
             }
+            work.pending.set_execution_headroom(
+                NativeProcessingContext::execution_headroom_for(&self.authority,&world)?);
             let root = authorization_state_root(&world);
             if root == work.authorization_root
                 && !work.context_published
@@ -1300,7 +1314,7 @@ impl EtdagService {
                             None => self
                                 .ingress
                                 .world_budget()
-                                .reserve_with_headroom(charge, PROCESSING_INTAKE_HEADROOM_BYTES),
+                                .reserve_with_headroom(charge, work.pending.execution_headroom()),
                         }
                         .map_err(ProcessingStoreError::Resource)?;
                         let v = self.authored_processing_vertex(&request.admission)?;
@@ -1315,6 +1329,11 @@ impl EtdagService {
                     }
                 }
             }
+        }
+        if let Some(handle)=&self.wallet_admission {
+            handle.publish_ethereum_pending_nonces(work.pending.pending_identities()
+                .filter(|identity|identity.sender_wallet.starts_with("0x"))
+                .map(|identity|(identity.sender_wallet.clone(),identity.sender_nonce)))?;
         }
         #[cfg(test)]
         if self.ingress.processing_work_held()? {
@@ -2071,6 +2090,9 @@ impl EtdagService {
                         NativeProcessingCompletion::decrypt_ordinary(
                             &parent, &native, value, &evidence.shares, budget,
                         )
+                    )?),
+                    RuntimeProcessingAdmission::Ethereum(value) => NativeCompletion::Ordinary(check(
+                        NativeProcessingCompletion::decrypt_ethereum(&parent,&native,value,&evidence.shares,budget)
                     )?),
                     RuntimeProcessingAdmission::Protected(value) => NativeCompletion::Wallet(check(
                         NativeProtectedCompletion::retain(

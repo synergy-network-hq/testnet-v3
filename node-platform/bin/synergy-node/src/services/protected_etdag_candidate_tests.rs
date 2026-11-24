@@ -925,6 +925,7 @@ fn qualify_retained_replay(
     let limits = ProcessingStoreLimits {
         slots: 2,
         completion_bytes_per_item: 64 * 1024 * 1024,
+        execution_headroom_bytes: 0,
     };
     // The same authority may have another live protected profile and more
     // than one retained candidate for this admission context. Neither may

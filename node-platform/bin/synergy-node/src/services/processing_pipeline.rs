@@ -197,6 +197,47 @@ pub(super) struct NativeProcessingContext<'a> {
     _permit: WorldResourcePermit,
 }
 impl<'a> NativeProcessingContext<'a> {
+    pub(super) fn execution_headroom(&self)->Result<usize,String>{
+        Self::execution_headroom_for(self.authority,&self.world)
+    }
+    pub(super) fn execution_headroom_for(authority:&VerifiedAuthority,world:&WorldState)->Result<usize,String>{
+        let native=super::processing_store::PROCESSING_INTAKE_HEADROOM_BYTES;
+        if authority.ethereum_genesis().is_none(){return Ok(native);}
+        Self::check_ethereum_policy(authority,world)?;
+        native.checked_add(synergy_aivm::ethereum_execution::ethereum_execution_headroom(world).map_err(err)?)
+            .ok_or_else(||"processing execution headroom overflow".into())
+    }
+    fn check_ethereum_policy(authority:&VerifiedAuthority,world:&WorldState)->Result<(),String>{
+        use synergy_aivm::ethereum_execution::{EvmCompatibilityPolicy,EVM_POLICY_KEY};
+        let signed=authority.ethereum_genesis().ok_or("Ethereum compatibility is absent from signed Genesis")?;
+        signed.descriptor.validate()?;
+        let policy=EvmCompatibilityPolicy::load(world).map_err(err)?;
+        let expected=synergy_posy::parse_hash_bytes(&signed.descriptor.policy_sha256).map_err(err)?;
+        if policy.chain_id!=authority.epoch.chain_id || synergy_aegis::AegisProtectedPrimitives.sha256(&world.protocol[EVM_POLICY_KEY])!=expected {
+            return Err("EVM policy differs from authenticated signed Genesis".into());
+        }Ok(())
+    }
+    pub(super) fn authenticate_ethereum(&self,admission:&synergy_etdag::admission::EthereumProcessingAdmission)->Result<(),String>{
+        Self::check_ethereum_policy(self.authority,&self.world)?;
+        admission.validate_context(self.context).map_err(err)?;
+        let authenticated=synergy_aivm::ethereum_admission::authenticate_conventional_eip155(
+            &admission.raw_transaction,self.authority.epoch.chain_id,&self.world).map_err(err)?;
+        let tx=authenticated.transaction();
+        let policy=synergy_aivm::ethereum_execution::EvmCompatibilityPolicy::load(&self.world).map_err(err)?;
+        let terms=tx.native_terms().map_err(err)?;
+        let sender=synergy_aivm::ethereum_execution::conventional_evm_account_key(*authenticated.signer().account_id());
+        if sender!=admission.envelope.aad.sender_id || tx.nonce!=admission.envelope.aad.nonce_slot
+            || tx.gas_limit!=admission.gas_limit || tx.gas_limit>policy.block_gas_limit
+            || terms.gas_price_nwei<policy.base_fee_nwei || tx.nonce==u64::MAX {
+            return Err("external EIP155 authorization differs from ETDAG resources".into());
+        }
+        let account=self.world.accounts.get(&sender).ok_or("Ethereum sender has no native funding")?;
+        if account.nonce>tx.nonce || account.balance_nwei<terms.maximum_debit_nwei {
+            return Err("Ethereum sender lacks finalized nonce/funds".into());
+        }
+        Ok(())
+    }
+
     pub(super) fn persisted_authorization_timestamp(&self) -> Result<u64, String> {
         if is_pw13_context(self.context) {
             return Ok(self.pw13_finalized_source()?.consensus_time);
@@ -253,7 +294,7 @@ impl<'a> NativeProcessingContext<'a> {
         budget: &Arc<WorldResourceBudget>,
         transition: Option<&super::authority::VerifiedTransitionContext>,
     ) -> Result<Self, String> {
-        if context.profile_id != synergy_etdag::PROCESSING_PROFILE_ID {
+        if !matches!(context.profile_id.as_str(), synergy_etdag::PROCESSING_PROFILE_ID | synergy_etdag::admission::ETHEREUM_PROCESSING_PROFILE_ID) {
             return Err("unsupported live processing profile".into());
         }
         Self::verify_owned_source(authority, context, candidate, witness, budget, transition)
@@ -332,7 +373,7 @@ impl<'a> NativeProcessingContext<'a> {
         budget: &Arc<WorldResourceBudget>,
         transition: Option<&super::authority::VerifiedTransitionContext>,
     ) -> Result<Self, String> {
-        if context.profile_id != synergy_etdag::PROCESSING_PROFILE_ID {
+        if !matches!(context.profile_id.as_str(), synergy_etdag::PROCESSING_PROFILE_ID | synergy_etdag::admission::ETHEREUM_PROCESSING_PROFILE_ID) {
             return Err("unsupported live processing profile".into());
         }
         Self::verify_bound_source(authority, context, source, budget, transition)
@@ -487,6 +528,9 @@ impl<'a> NativeProcessingContext<'a> {
             .0;
         if context.authority != expected {
             return Err("processing context differs from frozen native authority".into());
+        }
+        if context.profile_id==synergy_etdag::admission::ETHEREUM_PROCESSING_PROFILE_ID {
+            Self::check_ethereum_policy(authority,world)?;
         }
         let timestamp = authority.consensus_timestamp_unix(context.authority.target_height)?;
         Ok(Self {
@@ -1244,9 +1288,7 @@ impl AuthenticatedProcessingOpening {
 pub(super) struct NativeProcessingCompletion {
     // Retain only the authenticated authorization needed at inclusion. Worker
     // handoff must not pin an entire historical source World or a decode stack.
-    source_binding: synergy_identity::authorization::IdentityAuthorizationBindingCommitment,
-    identity_authorization: synergy_identity::authorization::IdentityAuthorizationCarrier,
-    signer_public_key: Vec<u8>,
+    authorization: CompletionAuthorization,
     chain_id: u64,
     network_id: String,
     pub(super) record: ProcessingReadyRecord,
@@ -1254,7 +1296,33 @@ pub(super) struct NativeProcessingCompletion {
     _permit: WorldResourcePermit,
 }
 
+enum CompletionAuthorization {
+    Native {
+        source_binding:synergy_identity::authorization::IdentityAuthorizationBindingCommitment,
+        identity_authorization:synergy_identity::authorization::IdentityAuthorizationCarrier,
+        signer_public_key:Vec<u8>,
+    },
+    Ethereum,
+}
+
 impl NativeProcessingCompletion {
+    fn retain_ethereum(source:&NativeProcessingContext<'_>,admission:&synergy_etdag::admission::EthereumProcessingAdmission,
+        parent:&WorldState, mut opened:AuthenticatedProcessingOpening)->Result<Self,String>{
+        source.authenticate_ethereum(admission)?;
+        if opened.plaintext.as_bytes()!=admission.raw_transaction {return Err("Ethereum ciphertext differs from public EIP155 authorization".into());}
+        let record=ready_record_for_opening(parent,&opened.permission,&admission.envelope.aad.sender_id,
+            admission.envelope.aad.nonce_slot,opened.plaintext.as_bytes())?;
+        opened.permit.shrink(opened.plaintext_capacity+128*1024).map_err(err)?;
+        Ok(Self{authorization:CompletionAuthorization::Ethereum,chain_id:source.authority.epoch.chain_id,
+            network_id:source.authority.epoch.network_id.clone(),record,plaintext:opened.plaintext,_permit:opened.permit})
+    }
+    pub(super) fn decrypt_ethereum(parent:&NativeProcessingParent<'_>,vertex:&NativeProcessingVertex<'_,impl ProcessingVertexAdmission>,
+        admission:&synergy_etdag::admission::EthereumProcessingAdmission,shares:&[ProcessingDecryptShare],budget:&Arc<WorldResourceBudget>)
+        ->Result<Self,String>{
+        let opened=AuthenticatedProcessingOpening::open_in(parent,vertex,shares,budget)?;
+        Self::retain_ethereum(vertex.source,admission,parent.world(),opened)
+    }
+
     pub(super) fn decrypt(
         parent: &NativeProcessingParent<'_>,
         vertex: &NativeProcessingVertex<'_>,
@@ -1347,9 +1415,11 @@ impl NativeProcessingCompletion {
         drop(transaction);
         opened.permit.shrink(retained).map_err(err)?;
         Ok(Self {
-            source_binding: binding,
-            identity_authorization: admission.identity_authorization.clone(),
-            signer_public_key: request.signer_public_key.clone(),
+            authorization:CompletionAuthorization::Native {
+                source_binding: binding,
+                identity_authorization: admission.identity_authorization.clone(),
+                signer_public_key: request.signer_public_key.clone(),
+            },
             chain_id: vertex.source.context.authority.chain_id,
             network_id: vertex.source.context.authority.network_id.clone(),
             record,
@@ -1361,10 +1431,13 @@ impl NativeProcessingCompletion {
 
 /// Borrowed bounded worker results. This adapter grants no authority to arbitrary
 /// caller records: only private, natively verified vertex/completion values enter.
+#[path = "processing_ethereum.rs"]
+pub(super) mod ethereum;
+
 pub(super) struct NativeProcessingPipeline<'a> {
     parent: &'a NativeProcessingParent<'a>,
     vertices: BTreeMap<EtdagDigest, (EtdagDigest, ProcessingGroupMember)>,
-    completions: BTreeMap<EtdagDigest, &'a NativeProcessingCompletion>,
+    pub(super) completions: BTreeMap<EtdagDigest, &'a NativeProcessingCompletion>,
     wallet_journal: Option<&'a super::protected_accounts::processing_execution::native::NativeProtectedJournal<'a>>,
     _permit: WorldResourcePermit,
 }
@@ -1473,6 +1546,15 @@ impl<'a> NativeProcessingPipeline<'a> {
     }
 }
 impl ProcessingReadinessVerifier for NativeProcessingPipeline<'_> {
+    fn retires_without_nonce(&self,record:&ProcessingReadyRecord)->bool {
+        self.completions.get(&record.item.envelope_id).is_some_and(|completion| {
+            matches!(completion.authorization,CompletionAuthorization::Ethereum)
+                && (record.sender_wallet.strip_prefix("0x").is_some_and(|account|
+                    self.parent.world().protocol.contains_key(&format!("apqe-protected-account-candidate/v1/policy/{account}")))
+                    || !self.parent.world().accounts.contains_key(&record.sender_wallet))
+        })
+    }
+
     fn first_unconsumed_position(
         &self,
         record: &ProcessingReadyRecord,
@@ -1545,14 +1627,15 @@ impl ProcessingReadinessVerifier for NativeProcessingPipeline<'_> {
             .completions
             .get(&record.item.envelope_id)
             .ok_or("processing eligibility lacks original native authorization")?;
-        self.parent.identity_is_current(
-            record,
-            &completion.source_binding,
-            &completion.identity_authorization,
-            completion.chain_id,
-            &completion.network_id,
-            &completion.signer_public_key,
-        )
+        match &completion.authorization {
+            CompletionAuthorization::Native{source_binding,identity_authorization,signer_public_key} => self.parent.identity_is_current(
+                record,source_binding,identity_authorization,completion.chain_id,&completion.network_id,signer_public_key),
+            CompletionAuthorization::Ethereum => {
+                NativeProcessingContext::check_ethereum_policy(self.parent.authority,parent)?;
+                Ok(completion.chain_id==self.parent.authority.epoch.chain_id
+                    && completion.network_id==self.parent.authority.epoch.network_id)
+            }
+        }
     }
 }
 impl NativeProcessingParent<'_> {
@@ -1962,7 +2045,7 @@ impl NativeProcessingRecovery<'_> {
         budget: &Arc<WorldResourceBudget>,
         authenticate: impl FnOnce(&A) -> Result<T, String>,
     ) -> Result<(AuthenticatedProcessingOpening, T), String> {
-        if evidence.version != 1 || !is_pw13_context(self.source.context) {
+        if evidence.version != 1 || !(is_pw13_context(self.source.context) || self.source.context.profile_id==synergy_etdag::admission::ETHEREUM_PROCESSING_PROFILE_ID) {
             return Err("unsupported durable PW13 completion".into());
         }
         // Charge the retained assignment separately. Vertex reconstruction
@@ -2020,6 +2103,12 @@ impl NativeProcessingRecovery<'_> {
             .shrink(opening.plaintext_capacity + 128 * 1024)
             .map_err(err)?;
         Ok((opening, authorized))
+    }
+
+    pub(super) fn recover_ethereum(&self,admission:&synergy_etdag::admission::EthereumProcessingAdmission,
+        evidence:&ProcessingCompletionEvidence,budget:&Arc<WorldResourceBudget>)->Result<NativeProcessingCompletion,String>{
+        let (opened,())=self.recover_pw13(admission,evidence,budget,|value|self.source.authenticate_ethereum(value))?;
+        NativeProcessingCompletion::retain_ethereum(self.source,admission,self.reveal_parent.state.as_ref(),opened)
     }
 
     pub(super) fn recover(
@@ -2146,7 +2235,8 @@ impl NativeProcessingRetirement {
             matches = candidate.transactions.iter().any(|transaction| {
                 transaction.unsigned.sender == identity.sender_wallet
                     && transaction.unsigned.nonce == identity.sender_nonce
-            }) || wallet_retirement::matches_pending(&candidate.state, height, identity)?;
+            }) || wallet_retirement::matches_pending(&candidate.state, height, identity)?
+                || ethereum::matches_pending(&candidate.state,height,identity)?;
             if matches {
                 break;
             }
@@ -2364,6 +2454,11 @@ impl NativeProcessingRetirement {
             )?;
             if wallet {
                 candidate_authority.native_wallet_release()?;
+            } else if ethereum::verify_selected(&parent.state,&candidate.state,candidate.height,record)? {
+                if candidate_authority.ethereum_genesis().is_none() {
+                    return Err("EVM retirement lacks signed Genesis authority".into());
+                }
+                NativeProcessingContext::check_ethereum_policy(&candidate_authority,&candidate.state)?;
             } else {
                 let transaction = transactions
                     .next()

@@ -17,6 +17,7 @@ impl RpcAuthenticator for PublicOnlyAuthenticator {
             Ok(())
         } else {
             Err(crate::RpcError {
+                data:None,
                 code: -32001,
                 message: "RPC method requires authentication".into(),
             })

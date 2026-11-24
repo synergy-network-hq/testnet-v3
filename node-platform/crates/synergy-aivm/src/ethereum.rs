@@ -6,6 +6,8 @@
 //! Wire rules: https://eips.ethereum.org/EIPS/eip-155 and Ethereum RLP.
 use sha3::{Digest, Keccak256};
 
+pub fn ethereum_keccak256(bytes:&[u8])->[u8;32] {Keccak256::digest(bytes).into()}
+
 pub const MAX_LEGACY_TRANSACTION_BYTES: usize = 1_048_576;
 pub const WEI_PER_NWEI: u64 = 1_000_000_000;
 
@@ -240,7 +242,7 @@ fn canonical_integer(bytes: &[u8], limit: usize) -> Result<(), EthereumDecodeErr
 fn minimal_bytes(bytes: &[u8]) -> &[u8] {
     &bytes[bytes.iter().position(|&b| b != 0).unwrap_or(bytes.len())..]
 }
-fn encode_length(length: usize, offset: u8, output: &mut Vec<u8>) {
+pub(crate) fn encode_length(length: usize, offset: u8, output: &mut Vec<u8>) {
     if length < 56 {
         output.push(offset + length as u8);
     } else {
@@ -250,7 +252,7 @@ fn encode_length(length: usize, offset: u8, output: &mut Vec<u8>) {
         output.extend_from_slice(bytes);
     }
 }
-fn encode_bytes(bytes: &[u8], output: &mut Vec<u8>) {
+pub(crate) fn encode_bytes(bytes: &[u8], output: &mut Vec<u8>) {
     if bytes.len() == 1 && bytes[0] < 0x80 {
         output.push(bytes[0]);
     } else {

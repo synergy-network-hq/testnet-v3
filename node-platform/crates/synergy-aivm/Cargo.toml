@@ -13,3 +13,7 @@ synergy-ai={path="../synergy-ai"}
 synergy-synq={path="../synergy-synq"}
 synergy-aegis={path="../synergy-aegis"}
 synergy-state={path="../synergy-state"}
+synergy-address={path="../synergy-address"}
+serde_json.workspace=true
+revm={version="=43.0.3",default-features=false,features=["std","portable","memory_limit","optional_no_base_fee","optional_eip3607"]}
+alloy-trie={version="=0.9.9",default-features=false,features=["std"]}

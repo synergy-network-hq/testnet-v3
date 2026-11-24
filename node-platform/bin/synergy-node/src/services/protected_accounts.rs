@@ -1804,6 +1804,13 @@ impl CandidateEnrollmentWrite {
 }
 
 fn eligible_account(world: &WorldState, address: &str) -> bool {
+    // A conventional EVM account and its protected representation cannot own
+    // separate SNRG balances. Class migration requires a governed operation;
+    // enrollment cannot strand an existing EOA balance or change its authority.
+    let Ok(identity) = synergy_address::parse_protected_wallet_address(address) else { return false; };
+    if world.accounts.contains_key(&synergy_aivm::ethereum_execution::conventional_evm_account_key(*identity.as_bytes())) {
+        return false;
+    }
     world
         .accounts
         .get(address)
@@ -2052,6 +2059,15 @@ mod tests {
                 protected_execution_root: "b".repeat(64),
             },
         )
+    }
+
+    #[test]
+    fn conventional_evm_alias_cannot_silently_change_to_protected_account_class() {
+        let id=[0x35;20];
+        let address=synergy_address::protected_wallet_native_representation(id).unwrap();
+        let mut world=WorldState::default();assert!(eligible_account(&world,&address));
+        world.accounts.insert(synergy_aivm::ethereum_execution::conventional_evm_account_key(id),Default::default());
+        assert!(!eligible_account(&world,&address));
     }
 
     #[test]

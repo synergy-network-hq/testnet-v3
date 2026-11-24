@@ -111,6 +111,32 @@ pub fn verify_eip155_signature(
     })
 }
 
+/// Ethereum's contract ecrecover precompile accepts historical high-S values,
+/// unlike transaction admission. Normalize the equivalent point/parity before
+/// using the same APQE interoperability provider; this grants no native rights.
+pub fn recover_ethereum_precompile(
+    signature: &[u8; 64], parity: u8, digest: &[u8; 32],
+) -> Result<[u8; 32], EthereumAuthorizationError> {
+    let r: [u8;32] = signature[..32].try_into().unwrap();
+    let s: [u8;32] = signature[32..].try_into().unwrap();
+    if parity>1 || r==[0;32] || r>=ORDER || s==[0;32] || s>=ORDER {
+        return Err(EthereumAuthorizationError::InvalidScalar);
+    }
+    let mut normalized=[0;65]; normalized[..64].copy_from_slice(signature);normalized[64]=parity;
+    if s>HALF_ORDER {
+        let mut borrow=0i16;
+        for index in (0..32).rev() {
+            let value=ORDER[index] as i16-s[index] as i16-borrow;
+            normalized[32+index]=value.rem_euclid(256) as u8;borrow=i16::from(value<0);
+        }
+        normalized[64]^=1;
+    }
+    let point=Primitives.secp256k1_recover_prehash(digest,&normalized).map_err(|_|EthereumAuthorizationError::InvalidSignature)?;
+    let hash=Primitives.hash(HashAlgorithm::Keccak256,&point[1..]).map_err(|_|EthereumAuthorizationError::Provider)?;
+    if hash.len()!=32 {return Err(EthereumAuthorizationError::Provider);}
+    let mut output=[0;32];output[12..].copy_from_slice(&hash[12..]);Ok(output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +225,14 @@ mod tests {
             verify_eip155_signature(1, &hash, 37, &r, &[0; 32]),
             Err(EthereumAuthorizationError::InvalidScalar)
         );
+    }
+    #[test]
+    fn contract_ecrecover_preserves_historical_high_s_without_weakening_transaction_admission() {
+        let (digest,r,s)=vector();let mut signature=[0;64];signature[..32].copy_from_slice(&r);signature[32..].copy_from_slice(&s);
+        let low=recover_ethereum_precompile(&signature,0,&digest).unwrap();
+        let mut borrow=0i16;for i in (0..32).rev(){let value=ORDER[i] as i16-s[i] as i16-borrow;signature[32+i]=value.rem_euclid(256) as u8;borrow=i16::from(value<0);}
+        assert_eq!(recover_ethereum_precompile(&signature,1,&digest).unwrap(),low);
+        assert!(matches!(verify_eip155_signature(1,&digest,38,&r,&signature[32..].try_into().unwrap()),Err(EthereumAuthorizationError::NoncanonicalSignature)));
+        assert!(recover_ethereum_precompile(&signature,2,&digest).is_err());
     }
 }

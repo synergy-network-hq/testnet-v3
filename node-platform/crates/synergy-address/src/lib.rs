@@ -31,6 +31,11 @@ pub fn protected_wallet_evm_counterpart(text: &str) -> Result<String, String> {
         .to_evm(&Primitives)
         .map_err(|e| e.to_string())
 }
+/// Canonical native representation of an already established bytes20 identity.
+/// Rendering establishes no protected account registration or spending right.
+pub fn protected_wallet_native_representation(account: [u8; 20]) -> Result<String, String> {
+    AccountIdentifier::from_bytes(account).to_native(&Primitives).map_err(|error| error.to_string())
+}
 fn proposed_multisig(prefix: &str) -> bool {
     matches!(prefix, "synm" | "synu" | "synl")
 }

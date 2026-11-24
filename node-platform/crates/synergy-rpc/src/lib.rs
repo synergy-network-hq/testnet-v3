@@ -33,6 +33,8 @@ impl RpcRequest {
 pub struct RpcError {
     pub code: i64,
     pub message: String,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub data:Option<Value>,
 }
 
 impl RpcError {
@@ -40,6 +42,7 @@ impl RpcError {
         Self {
             code: -32600,
             message: message.into(),
+            data:None,
         }
     }
 
@@ -47,6 +50,7 @@ impl RpcError {
         Self {
             code: -32601,
             message: "method not found".into(),
+            data:None,
         }
     }
 
@@ -54,6 +58,7 @@ impl RpcError {
         Self {
             code: -32602,
             message: message.into(),
+            data:None,
         }
     }
 
@@ -61,6 +66,7 @@ impl RpcError {
         Self {
             code: -32000,
             message: message.into(),
+            data:None,
         }
     }
 }

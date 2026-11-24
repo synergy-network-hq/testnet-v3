@@ -38,7 +38,16 @@ pub const PROTECTED_TRANSACTION_SUBMIT: &str = "synergy_submitProtectedTransacti
 pub const PROTECTED_ADMISSION_STATS: &str = "synergy_getProtectedAdmissionStats";
 pub const PROTECTED_ADMISSION_RECEIPT: &str = "synergy_getProtectedAdmissionReceipt";
 
+/// Only implemented legacy-profile methods are public. Typed transactions,
+/// subscriptions, fee history and Ethereum proofs are not advertised.
+pub fn is_ethereum_method(method: &str) -> bool {
+    matches!(method, "eth_chainId" | "net_version" | "eth_blockNumber"
+        | "eth_getBalance" | "eth_getTransactionCount" | "eth_getCode"
+        | "eth_getStorageAt" | "eth_call" | "eth_estimateGas" | "eth_gasPrice" | "eth_sendRawTransaction" | "eth_getTransactionReceipt" | "eth_getTransactionByHash" | "eth_getBlockByNumber" | "eth_getBlockByHash" | "eth_getLogs")
+}
+
 pub fn method_access(method: &str) -> crate::auth::RpcAccess {
+    if is_ethereum_method(method) { return crate::auth::RpcAccess::Public; }
     match method {
         SYSTEM_VERSION
         | NODE_STATUS

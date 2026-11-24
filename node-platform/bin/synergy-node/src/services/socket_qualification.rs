@@ -225,7 +225,7 @@ impl Node {
             || {
                 posy::registration_with_preparation(
                     &configuration,
-                    authority,
+                    authority.clone(),
                     ingress.clone(),
                     native_consensus_preparation.then(|| {
                         sync_diagnostic_preparation
@@ -245,24 +245,29 @@ impl Node {
             let runtime = Arc::new(std::sync::RwLock::new(synergy_node_core::RuntimeSnapshot {
                 node_name: configuration.node_name.clone(),
                 role: "validator".into(),
-                chain_id: 1266,
+                chain_id: configuration.chain_id,
                 lifecycle: synergy_node_core::NodeLifecycleState::Starting,
                 services: Vec::new(),
             }));
+            let evm_identity=authority.ethereum_genesis().map(|signed|super::rpc::VerifiedRpcNetwork{
+                network_id:configuration.network_id.clone(),epoch:authority.epoch.epoch,live_epoch:None,
+                live_authority:Some(Arc::new(std::sync::RwLock::new(Some(authority.clone())))),
+                autonomous_bootstrap_sha256:None,genesis_hash:signed.genesis_hash.clone(),
+            });
+            let mut query=super::rpc::CanonicalQueryStore::load_with_world_budget(
+                configuration.storage.data_directory.clone(),Arc::clone(ingress.world_budget())).unwrap();
+            if let Some(identity)=&evm_identity {
+                query=query.with_wallet_finalized_authority(&identity.genesis_hash,identity.live_authority.as_ref().unwrap().clone());
+            }
             Some(
                 super::rpc::registration_with_reserved_admission_listener(
                     &configuration.rpc,
                     runtime,
-                    Arc::new(
-                        super::rpc::CanonicalQueryStore::load_with_world_budget(
-                            configuration.storage.data_directory.clone(),
-                            Arc::clone(ingress.world_budget()),
-                        )
-                        .unwrap(),
-                    ),
+                    Arc::new(query),
                     Arc::new(synergy_ws::server::WsServer::new(16, 16, 1024 * 1024).unwrap()),
                     Some(handle),
                     Arc::clone(&listeners.rpc),
+                    evm_identity,
                 )
                 .unwrap()
                 .1,
@@ -2989,6 +2994,7 @@ fn processing_async_native_order_reveal_ready_and_execution_use_existing_posy_pr
     let limits = super::processing_store::ProcessingStoreLimits {
         slots: 1,
         completion_bytes_per_item: 64 * 1024 * 1024,
+        execution_headroom_bytes: 0,
     };
     let raw = serde_json::to_vec(&vertex.admission).unwrap();
     let mut pending = super::processing_store::PendingProcessingStore::open(
@@ -5260,6 +5266,7 @@ fn processing_async_pending_owner_recovers_native_requests_and_releases_only_on_
     let limits = ProcessingStoreLimits {
         slots: 2,
         completion_bytes_per_item: 1024 * 1024,
+        execution_headroom_bytes: 0,
     };
     let budget = WorldResourceBudget::new(256 * 1024 * 1024);
     let root = prepared.root.join("isolated-processing-pending");
@@ -10247,6 +10254,13 @@ fn prepare_socket_fixture_with_managed_release(
     chain_id: u64,
     managed: Option<ManagedProcessFixture<'_>>,
 ) -> PreparedSocketFixture {
+    let ethereum=initial_world_state.protocol.get(synergy_aivm::ethereum_execution::EVM_POLICY_KEY).map(|bytes|{
+        assert_eq!(synergy_aivm::ethereum_execution::EvmCompatibilityPolicy::load(&initial_world_state).unwrap().chain_id,chain_id);
+        synergy_genesis::network::GenesisEthereumCompatibility{
+            profile_id:synergy_genesis::network::ETHEREUM_COMPATIBILITY_PROFILE_V1.into(),
+            policy_sha256:synergy_aegis::AegisProtectedPrimitives.sha256(bytes).iter().map(|byte|format!("{byte:02x}")).collect(),
+        }
+    });
     assert!(export.is_none() || epoch_end_override.is_none());
     assert!(epoch_end_override
         .is_none_or(|height| height == 20 || (10_000..=10_000_000).contains(&height)));
@@ -10308,6 +10322,10 @@ fn prepare_socket_fixture_with_managed_release(
     } else {
         None
     };
+    let genesis_engine=secure_engine.clone().or_else(||ethereum.as_ref().map(|_|{
+        let provider=provider.expect("EVM signed Genesis requires an explicit authenticated provider");
+        synergy_aegis::load_authenticated_native_engine(&provider.report_path,&provider.authenticated_report_sha256).unwrap()
+    }));
     let mut staged = Vec::new();
     eprintln!("socket qualification: starting five-validator setup");
     let mut validators = Vec::new();
@@ -10420,7 +10438,7 @@ fn prepare_socket_fixture_with_managed_release(
     let registry =
         FrozenValidatorRegistry::new(1, validators.iter().map(|v| v.record.clone()).collect())
             .unwrap();
-    let epoch_end_height = if managed.is_some() {
+    let epoch_end_height = if managed.is_some() || ethereum.is_some() {
         1000 // Signed Core autonomous E1 requires H1 through H1000.
     } else {
         epoch_end_override.unwrap_or_else(|| export.map_or(10_000, |value| value.epoch_end_height))
@@ -10516,18 +10534,19 @@ fn prepare_socket_fixture_with_managed_release(
         )
     }
     .unwrap();
-    let fixture_genesis_hash = if export.is_some() || secure {
+    let fixture_genesis_hash = if export.is_some() || secure || ethereum.is_some() {
         let policy = payload.protected.as_ref().unwrap();
         let unsigned = synergy_genesis::builder::UnsignedGenesis {
-            format_version: if secure { 2 } else { 1 },
+            format_version: if secure || ethereum.is_some() { 2 } else { 1 },
             network: synergy_genesis::network::GenesisNetwork {
                 chain_id: payload.chain_id,
                 network_id: payload.network_id.clone(),
                 protocol_version: preliminary.protocol_version.clone(),
                 activation_unix: policy.epoch_start_timestamp_ms / 1000,
-                autonomous_epoch_protocol: managed.as_ref().map(|_| {
+                autonomous_epoch_protocol: (managed.is_some() || ethereum.is_some()).then(|| {
                     synergy_genesis::network::AUTONOMOUS_EPOCH_PROTOCOL_V1.into()
                 }),
+                ethereum_compatibility: ethereum.clone(),
             },
             validators: payload
                 .validators
@@ -10547,7 +10566,7 @@ fn prepare_socket_fixture_with_managed_release(
             authority_trust_key_id: key_id.as_str().into(),
         };
         let signed = synergy_genesis::signing::sign(unsigned, &signer, key_id.clone()).unwrap();
-        if let Some(engine) = &secure_engine {
+        if let Some(engine) = &genesis_engine {
             let verifier = synergy_aegis::PqvmVerifier::with_apqe(
                 AegisPolicy {
                     allowed_algorithms: vec![SignatureAlgorithm::MlDsa65],
@@ -10607,10 +10626,10 @@ fn prepare_socket_fixture_with_managed_release(
         signer_key_id: key_id.as_str().to_owned(),
         signature,
     };
-    if export.is_some() || secure {
+    if export.is_some() || secure || ethereum.is_some() {
         let signed: synergy_genesis::signing::SignedGenesis =
             serde_json::from_slice(&fs::read(root.join("genesis.sgen")).unwrap()).unwrap();
-        if let Some(engine) = &secure_engine {
+        if let Some(engine) = &genesis_engine {
             let verifier = synergy_aegis::PqvmVerifier::with_apqe(
                 AegisPolicy {
                     allowed_algorithms: vec![SignatureAlgorithm::MlDsa65],
@@ -10657,7 +10676,7 @@ fn prepare_socket_fixture_with_managed_release(
             chain_id,
             network_id: network_id.into(),
             manifest_path: root.join("manifest.json"),
-            genesis_path: secure.then(|| root.join("genesis.sgen")),
+            genesis_path: (secure || ethereum.is_some()).then(|| root.join("genesis.sgen")),
             public_identity_path: dir.join("identity.json"),
             aegis_key_bindings_path: Some(root.join("bindings.json")),
             aegis_signing_key_path: Some(dir.join("transport.key")),
@@ -10695,7 +10714,7 @@ fn prepare_socket_fixture_with_managed_release(
                 minimum_free_bytes: 1024 * 1024,
                 prune_finalized_history_after_blocks: None,
             },
-            rpc: if export.is_some() || secure {
+            rpc: if export.is_some() || secure || ethereum.is_some() {
                 RpcConfiguration {
                     enabled: true,
                     listen_address: Some(if secure {
@@ -13044,3 +13063,6 @@ fn processing_apqe_progress_verifies_certified_original_once_and_rejects_invalid
 #[path = "socket_qualification_secure.rs"]
 mod secure_process_canary;
 use secure_process_canary::{finalize_secure_fixture, hex_decode};
+
+#[path = "ethereum_socket_qualification.rs"]
+mod ethereum_qualification;

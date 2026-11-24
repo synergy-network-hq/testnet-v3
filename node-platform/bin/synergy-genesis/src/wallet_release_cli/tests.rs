@@ -99,6 +99,7 @@ fn unsigned_origin(predecessor: &SimplifiedEpochContext, public_key: &[u8]) -> U
             protocol_version: predecessor.protocol_version.clone(),
             activation_unix: 1,
             autonomous_epoch_protocol: None,
+                    ethereum_compatibility: None,
         },
         validators: predecessor
             .leader_ring

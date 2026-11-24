@@ -108,6 +108,7 @@ fn exercise_native_recovery(read_only_transport: bool, long_boundary: bool, fres
                 protocol_version: synergy_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION.into(),
                 activation_unix: policy.epoch_start_timestamp_ms / 1000,
                 autonomous_epoch_protocol: fresh.then(|| synergy_genesis::network::AUTONOMOUS_EPOCH_PROTOCOL_V1.into()),
+                ethereum_compatibility: None,
             },
             validators: binding
                 .payload

@@ -90,6 +90,7 @@ pub(super) fn recover_before_reveal<T>(
     let limits = ProcessingStoreLimits {
         slots: 2,
         completion_bytes_per_item: 4 * 1024 * 1024,
+        execution_headroom_bytes: 0,
     };
     let budget = WorldResourceBudget::new(PROCESSING_INTAKE_HEADROOM_BYTES + 128 * 1024 * 1024);
     let verify_proofs = |context: &ProcessingContext, request: &CandidateAdmission| {

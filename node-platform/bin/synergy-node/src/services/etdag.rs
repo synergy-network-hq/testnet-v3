@@ -4031,6 +4031,9 @@ impl EtdagService {
                 }
             }
             EtdagNetworkMessage::ProcessingVertexV1(vertex) => self.processing_vertex(vertex)?,
+            EtdagNetworkMessage::ProcessingEthereumVertexV1(vertex) => {
+                self.processing_ethereum_vertex(vertex)?
+            }
             EtdagNetworkMessage::ProcessingProtectedWalletVertexV1(vertex) => {
                 self.processing_protected_wallet_vertex(vertex)?
             }
@@ -4392,6 +4395,7 @@ impl EtdagMessageSink for EtdagService {
                 | EtdagNetworkMessage::CutoffMarker(_)
                 | EtdagNetworkMessage::ProcessingVertexV1(_)
                 | EtdagNetworkMessage::ProcessingProtectedWalletVertexV1(_)
+                | EtdagNetworkMessage::ProcessingEthereumVertexV1(_)
                 | EtdagNetworkMessage::ProcessingAvailabilityVoteV1(_)
                 | EtdagNetworkMessage::ProcessingAvailabilityCertificateV1(_)
                 | EtdagNetworkMessage::ProcessingDecryptShareV1(_)
