@@ -14,6 +14,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 PAGE_BYTES = 65536
 MAX_PROOF_BYTES = 16 * 1024 * 1024
 MAX_PAGES = 2 * MAX_PROOF_BYTES // PAGE_BYTES
+MAX_HEIGHTS = 8
 HEX = re.compile(r"[0-9a-f]{64}")
 
 
@@ -82,6 +83,34 @@ def subject(result, chain, network, genesis, height):
     return commitments
 
 
+def consensus_position(result, verified_block):
+    # The native verifier has already hashed and validated this exact tuple.
+    _, parent, _, _, _, _ = json.loads(verified_block)
+    epoch = result.get("epoch")
+    root = result.get("epoch_context_root")
+    timestamp = result.get("consensus_timestamp_unix")
+    if (not isinstance(parent, str) or not HEX.fullmatch(parent)
+            or type(epoch) is not int or epoch < 0
+            or not isinstance(root, str) or not HEX.fullmatch(root)
+            or type(timestamp) is not int or timestamp < 0):
+        raise ValueError("missing or invalid verified consensus position")
+    return dict(parent_block_id=parent, epoch=epoch, epoch_context_root=root,
+                consensus_timestamp_unix=timestamp)
+
+
+def check_successor(previous, current):
+    if (current["height"] != previous["height"] + 1
+            or current["parent_block_id"] != previous["block_id"]):
+        raise ValueError("verified blocks do not form a contiguous chain")
+    if current["consensus_timestamp_unix"] < previous["consensus_timestamp_unix"]:
+        raise ValueError("verified consensus time regressed")
+    delta = current["epoch"] - previous["epoch"]
+    same_root = current["epoch_context_root"] == previous["epoch_context_root"]
+    if delta not in (0, 1) or same_root != (delta == 0):
+        raise ValueError("inconsistent verified epoch succession")
+    return delta
+
+
 def main():
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument("--observer", action="append", required=True)
@@ -91,7 +120,14 @@ def main():
     cli.add_argument("--network", required=True)
     cli.add_argument("--genesis", required=True)
     cli.add_argument("--height", type=int, required=True)
+    cli.add_argument("--through-height", type=int, help="verify up to eight consecutive heights")
+    cli.add_argument("--require-epoch-transition", action="store_true")
     args = cli.parse_args()
+    last = args.height if args.through_height is None else args.through_height
+    if not args.height <= last < args.height + MAX_HEIGHTS:
+        cli.error("select one to eight consecutive finalized heights")
+    if args.require_epoch_transition and last == args.height:
+        cli.error("an epoch transition requires at least two heights")
     endpoints = [urlsplit(value) for value in args.observer]
     if (not 1 <= len(endpoints) <= 8 or any(
             e.scheme != "https" or not e.hostname or e.username is not None or e.query or e.fragment
@@ -99,29 +135,49 @@ def main():
             or args.chain <= 0 or args.height <= 0 or not HEX.fullmatch(args.genesis)):
         cli.error("select distinct HTTPS observer hosts and an explicit network and finalized height")
 
-    agreed = None
+    range_mode = args.through_height is not None
+    observations = []
+    transitions = 0
     try:
+        node = args.node.resolve(strict=True)
+        config = args.config.resolve(strict=True)
         with tempfile.TemporaryDirectory(prefix="posy-finality-") as directory:
             finality = Path(directory, "finality.json")
             block = Path(directory, "block.json")
-            for endpoint in args.observer:
-                finality.write_bytes(fetch_proof(endpoint, args.height, "finality"))
-                block.write_bytes(fetch_proof(endpoint, args.height, "block_commitment"))
-                outcome = subprocess.run(
-                    [str(args.node.resolve(strict=True)), "finality-proof", "verify",
-                     str(args.config.resolve(strict=True)), str(finality), str(block)],
-                    check=True, capture_output=True, timeout=90,
-                )
-                observed = subject(json.loads(outcome.stdout), args.chain, args.network, args.genesis, args.height)
-                if agreed is not None and agreed != observed:
-                    raise ValueError("verified observer block commitments disagree")
-                agreed = observed
+            for height in range(args.height, last + 1):
+                agreed = None
+                for endpoint in args.observer:
+                    finality.write_bytes(fetch_proof(endpoint, height, "finality"))
+                    block_bytes = fetch_proof(endpoint, height, "block_commitment")
+                    block.write_bytes(block_bytes)
+                    outcome = subprocess.run(
+                        [str(node), "finality-proof", "verify", str(config), str(finality), str(block)],
+                        check=True, capture_output=True, timeout=90,
+                    )
+                    native = json.loads(outcome.stdout)
+                    observed = subject(native, args.chain, args.network, args.genesis, height)
+                    if range_mode:
+                        observed.update(consensus_position(native, block_bytes))
+                    if agreed is not None and agreed != observed:
+                        raise ValueError(f"verified observer commitments disagree at H{height}")
+                    agreed = observed
+                record = dict(height=height, **agreed)
+                if observations:
+                    transitions += check_successor(observations[-1], record)
+                observations.append(record)
+        if args.require_epoch_transition and transitions == 0:
+            raise ValueError("verified range contains no epoch transition")
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         cli.exit(1, f"Finality verification failed: {error}\n")
 
-    print(json.dumps({"verified": True, "chain_id": args.chain, "network_id": args.network,
-                      "genesis_hash": args.genesis, "height": args.height,
-                      "observer_count": len(endpoints), **agreed}, sort_keys=True))
+    result = dict(verified=True, chain_id=args.chain, network_id=args.network,
+                  genesis_hash=args.genesis, observer_count=len(endpoints))
+    if range_mode:
+        result.update(start_height=args.height, through_height=last, epoch_transitions=transitions,
+                      observations=observations)
+    else:
+        result.update(observations[0])
+    print(json.dumps(result, sort_keys=True))
 
 
 if __name__ == "__main__":

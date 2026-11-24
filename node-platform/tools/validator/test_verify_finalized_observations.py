@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
 import unittest
 
@@ -45,3 +46,26 @@ class FinalityObservationTests(unittest.TestCase):
                         {**result, "finalized": {**result["finalized"], "height": 8}}):
             with self.assertRaisesRegex(ValueError, "selected network or height"):
                 verifier.subject(invalid, 99999, "canary", "a" * 64, 7)
+
+    def test_authenticated_consecutive_blocks_cross_an_epoch_boundary(self):
+        before = dict(height=1000, block_id="a" * 64, epoch=4, epoch_context_root="b" * 64,
+                      consensus_timestamp_unix=100)
+        native = dict(epoch=5, epoch_context_root="c" * 64, consensus_timestamp_unix=101)
+        block = json.dumps([1001, before["block_id"], "d" * 64, "e" * 64, [], []])
+        after = dict(height=1001, **verifier.consensus_position(native, block))
+        self.assertEqual(verifier.check_successor(before, after), 1)
+        self.assertEqual(verifier.check_successor(before, {
+            **after, "epoch": 4, "epoch_context_root": before["epoch_context_root"]
+        }), 0)
+        for fields, error in (
+            (dict(height=1002), "contiguous"),
+            (dict(parent_block_id="f" * 64), "contiguous"),
+            (dict(consensus_timestamp_unix=99), "regressed"),
+            (dict(epoch=6), "succession"),
+            (dict(epoch=4), "succession"),
+            (dict(epoch_context_root=before["epoch_context_root"]), "succession"),
+        ):
+            with self.subTest(fields=fields), self.assertRaisesRegex(ValueError, error):
+                verifier.check_successor(before, {**after, **fields})
+        with self.assertRaisesRegex(ValueError, "invalid verified consensus position"):
+            verifier.consensus_position({**native, "epoch": None}, block)
