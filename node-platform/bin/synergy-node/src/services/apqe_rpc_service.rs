@@ -1531,6 +1531,49 @@ mod tests {
             .contains(std::str::from_utf8(&response[1..response.len() - 1]).unwrap()));
     }
     #[test]
+    fn ethereum_arrays_and_signed_transaction_bytes_survive_gateway_loopback() {
+        // Real HTTP sockets exercise the existing Gateway's canonical upstream
+        // carrier. Cryptographic Sentry admission and execution are qualified
+        // separately; this checks that their Ethereum payload is not rewritten.
+        let raw_transaction = format!("0x{}", "ab".repeat(512));
+        let requests = [
+            json!({"jsonrpc":"2.0","id":"chain","method":"eth_chainId","params":[]}),
+            json!({"jsonrpc":"2.0","id":2,"method":"eth_getBalance","params":["0x1111111111111111111111111111111111111111","finalized"]}),
+            json!({"jsonrpc":"2.0","id":3,"method":"eth_sendRawTransaction","params":[raw_transaction]}),
+            json!({"jsonrpc":"2.0","id":4,"method":"eth_getLogs","params":[{"fromBlock":"0x0","toBlock":"finalized","topics":[null,["0x2222222222222222222222222222222222222222222222222222222222222222"]]}]}),
+        ];
+        let responses = [
+            br#"{"jsonrpc":"2.0","id":"chain","result":"0x26f1"}"#.to_vec(),
+            br#"{"jsonrpc":"2.0","id":2,"result":"0xffffffffffffffffffffffffffffffff"}"#.to_vec(),
+            br#"{"jsonrpc":"2.0","id":3,"error":{"code":-32000,"message":"wrong chain"}}"#.to_vec(),
+            br#"{"jsonrpc":"2.0","id":4,"result":[]}"#.to_vec(),
+        ];
+        for (request, response) in requests.into_iter().zip(responses) {
+            let request = serde_json::to_vec(&request).unwrap();
+            validate_request(&request).unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let expected_request = request.clone();
+            let upstream_response = response.clone();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let received = read_http(&mut stream, Instant::now() + TIMEOUT).unwrap();
+                assert_eq!(received.line, "POST / HTTP/1.1");
+                assert_eq!(received.body, expected_request);
+                send_http(&mut stream, 200, &upstream_response, None).unwrap();
+            });
+            let returned = call_loopback(address, &request).unwrap();
+            server.join().unwrap();
+            assert_eq!(returned, response);
+            let bound = bind_response(&returned, 9969, "posy-testnet", "authenticated-genesis").unwrap();
+            assert!(bound.starts_with(&returned[..returned.len() - 1]));
+            let value: serde_json::Value = serde_json::from_slice(&bound).unwrap();
+            assert_eq!(value["chain_context"]["chain_id"], 9969);
+            assert_eq!(value["id"], serde_json::from_slice::<serde_json::Value>(&request).unwrap()["id"]);
+        }
+    }
+
+    #[test]
     fn binds_null_large_numbers_and_errors_without_reencoding() {
         for raw in [
             br#"{"jsonrpc":"2.0","id":1,"result":null}"#.as_slice(),
