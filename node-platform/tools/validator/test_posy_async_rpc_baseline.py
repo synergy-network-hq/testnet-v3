@@ -175,6 +175,10 @@ class AsyncProofTests(unittest.TestCase):
         self.assertFalse(report["wallet_effects_verified_all_five"])
         self.assertIsNone(report["steady_state"]["all_five_verified_finalized_transactions"])
         self.assertEqual(report["finalized_transactions"], 1)
+        self.assertIsNone(report["independently_verified_tps"])
+        self.assertFalse(report["independent_three_qc_verification"])
+        self.assertEqual(report["finality_measurement_basis"], "cross_observer_rpc_reconciliation")
+        self.assertGreater(report["finalized_tps"], 0)
         views = {name: {"authorization_binding": {"pin": 1}} for name in harness.CANARY_OBSERVERS}
         public = {"genesis_binding_commitment": {"pin": 1}}
         self.assertEqual(adapter.validate_wallet_authority(views, public,
