@@ -20,6 +20,283 @@ use synergy_genesis::authority::{
     WalletDispatchReleaseTrust, WALLET_RELEASE_ISSUER_DOMAIN,
 };
 
+fn fixture_release_policy(
+    origin: &VerifiedAuthority,
+    genesis_hash: &str,
+    artifacts: &[u8],
+    provider_manifest_sha256: String,
+    proof_artifact_sha256: [u8; 32],
+) -> ProtectedWalletDispatchPolicy {
+    let hash = apqe_transport::sha256;
+    let hex = |value: [u8; 32]| value.iter().map(|byte| format!("{byte:02x}")).collect();
+    let wire = crate::services::protected_accounts::inspection::candidate_wire_profile().unwrap();
+    ProtectedWalletDispatchPolicy {
+        version: 1,
+        chain_id: origin.epoch.chain_id,
+        network_id: origin.epoch.network_id.clone(),
+        genesis_hash: genesis_hash.into(),
+        activation_finalized_height: origin.epoch.epoch_end_height + 1,
+        managed_release_manifest_sha256: hash(artifacts),
+        off_chain_approval_sha256: hash(b"existing off-chain approval fixture"),
+        release_attestation_sha256: hash(b"release conformance attestation fixture"),
+        action_registry_sha256: hash(include_bytes!("protected_quick_setup_registry.json")),
+        wire_schema_sha256: hash(include_bytes!("protected_quick_setup_wire.cddl")),
+        action_vectors_sha256: hash(include_bytes!("protected_quick_setup_vectors.json")),
+        ownership_chain_id: format!("{:064x}", 1),
+        enrollment_wire_profile_fingerprint: hex(wire
+            .dual_enrollment_profile_fingerprint()
+            .unwrap()),
+        enrollment_commitment_profile_fingerprint: hex(
+            EnrollmentRegistryRelease::commitment_fingerprint(
+                UnactivatedCommitmentProfile::candidate_concat_v1(),
+            ),
+        ),
+        enrollment_provider_manifests: vec![provider_manifest_sha256],
+        enrollment_proof_provider_artifacts: vec![hex(proof_artifact_sha256)],
+        fee_collector: synergy_address::generate_fee_collector_address("protected-release-fixture")
+            .unwrap(),
+        fee_class: 1,
+        base_fee_per_gas_nwei: 1,
+        enroll_commit_gas: 10,
+        enroll_reveal_gas: 100,
+        transfer_gas: 20,
+    }
+}
+
+fn fixture_native_qualification(
+    engine: &CryptoEngine,
+    issuer: &EncodedKeyPair,
+    release: &VerifiedWalletDispatchRelease,
+    report_pin: &str,
+    attestation_pin: &str,
+) -> SignedNativeVerificationQualification {
+    let selected = engine.provider_provenance(Algorithm::MlDsa87).unwrap();
+    let target = match Target::current() {
+        Target::DarwinArm64 => "aarch64-apple-darwin",
+        Target::LinuxX86_64Gnu => "x86_64-unknown-linux-gnu",
+        Target::LinuxArm64Gnu => "aarch64-unknown-linux-gnu",
+        _ => panic!("fixture requires the selected native test platform"),
+    };
+    let qualification = NativeVerificationQualification {
+        version: 1,
+        target: target.into(),
+        artifact_sha256: selected.artifact_sha256,
+        report_sha256: synergy_posy::parse_hash_bytes(report_pin).unwrap(),
+        release_attestation_sha256: synergy_posy::parse_hash_bytes(attestation_pin).unwrap(),
+        release_context: release.enrollment().statement().release_context,
+        backend_abi: BACKEND_ABI,
+        backend_revision: MODULE_REVISION.into(),
+        selected_manifest_sha256: SELECTED_MANIFEST_SHA256.into(),
+        import_manifest_sha256: IMPORT_MANIFEST_SHA256.into(),
+        native_identity: selected.native_identity.clone(),
+    };
+    let signature = engine
+        .sign(
+            Algorithm::MlDsa65,
+            issuer.private_key.as_bytes(),
+            &qualification.signing_bytes().unwrap(),
+            SignOptions::default(),
+        )
+        .unwrap();
+    SignedNativeVerificationQualification {
+        qualification,
+        signature,
+    }
+}
+
+fn fixture_origin_endorsement(
+    genesis: &synergy_genesis::signing::SignedGenesis,
+    pins: &synergy_config::ManagedWalletDispatchReleaseConfiguration,
+    signer: &impl AegisSigner,
+) -> Vec<u8> {
+    let mut authorization = WalletDispatchReleaseIssuerAuthorization {
+        version: 1,
+        genesis_hash: genesis.genesis_hash.clone(),
+        attachment_sha256: pins.attachment_sha256.clone(),
+        issuer_sha256: pins.issuer_sha256.clone(),
+        issuer_key_id: pins.issuer_key_id.clone(),
+        signature: Vec::new(),
+    };
+    authorization.signature = signer
+        .sign(
+            &KeyId::new(genesis.unsigned.authority_trust_key_id.clone()).unwrap(),
+            &SigningContext {
+                domain: WALLET_RELEASE_ISSUER_DOMAIN.into(),
+                chain_id: genesis.unsigned.network.chain_id,
+                epoch: None,
+                height: None,
+            },
+            &authorization.signing_bytes().unwrap(),
+        )
+        .unwrap()
+        .bytes;
+    serde_json::to_vec(&authorization).unwrap()
+}
+
+/// Stage independently signed public inputs for the ordinary runtime process.
+/// The runtime still authenticates the current executable and consumes the
+/// release only when its original PoSy successor is actually certified.
+pub(crate) fn stage_process_wallet_release(
+    config: &NodeConfiguration,
+    binary: &std::path::Path,
+    provider_manifest_sha256: String,
+    engine: &Arc<Mutex<CryptoEngine>>,
+    origin_signer: &impl AegisSigner,
+) -> synergy_config::ManagedWalletDispatchReleaseConfiguration {
+    use std::io::{Read, Write};
+    use synergy_address_engine::apqe::{HashAlgorithm, Primitives};
+
+    let origin = load(config).unwrap().unwrap();
+    assert!(origin.autonomous_epochs_enabled());
+    assert!(origin.wallet_dispatch_policy().is_none());
+    let signed_genesis = crate::commands::selected_network::verified_genesis(config).unwrap();
+    let expected_report = &config
+        .aegis_provider
+        .as_ref()
+        .unwrap()
+        .authenticated_report_sha256;
+    let stamp = apqe_transport::Stamp::capture(binary).unwrap();
+    let executable = fs::File::open(binary).unwrap();
+    let executable_size = executable.metadata().unwrap().len();
+    assert!((1..=512 * 1024 * 1024).contains(&executable_size));
+    let mut executable = executable.take(executable_size + 1);
+    let mut hash = Primitives.hash_stream(HashAlgorithm::Sha256).unwrap();
+    let mut buffer = [0; 16 * 1024];
+    let mut read = 0;
+    loop {
+        let count = executable.read(&mut buffer).unwrap();
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+        read += count as u64;
+    }
+    assert!(read == executable_size && stamp.unchanged());
+    let hex = |value: &[u8]| {
+        value
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let artifacts = serde_json::to_vec(&ManagedArtifacts {
+        version: 1,
+        chain_id: origin.epoch.chain_id,
+        network_id: origin.epoch.network_id.clone(),
+        genesis_hash: signed_genesis.genesis_hash.clone(),
+        platforms: vec![PlatformArtifact {
+            target: Platform::current().unwrap(),
+            base_package_manifest_sha256: apqe_transport::sha256(
+                b"isolated five-process package fixture",
+            ),
+            executable_size,
+            executable_sha256: hex(&hash.finalize()),
+            apqe_report_sha256: expected_report.clone(),
+        }],
+    })
+    .unwrap();
+    let provider = engine.lock().unwrap();
+    let issuer = provider.generate_keypair(Algorithm::MlDsa65).unwrap();
+    let public_at = provider.provider_provenance(Algorithm::MlDsa87).unwrap();
+    let verifier_at = provider
+        .provider_provenance(Algorithm::MlDsa65)
+        .unwrap()
+        .artifact_sha256;
+    let signer_id = KeyId::new("isolated-protected-release-issuer").unwrap();
+    let policy = fixture_release_policy(
+        &origin,
+        &signed_genesis.genesis_hash,
+        &artifacts,
+        provider_manifest_sha256,
+        public_at.artifact_sha256,
+    );
+    let payload = WalletDispatchReleasePayload {
+        version: 1,
+        predecessor_context_root: origin.epoch.root().unwrap(),
+        signer_key_id: signer_id.as_str().into(),
+        policy,
+    };
+    let signer = |message: &[u8]| {
+        provider
+            .sign(
+                Algorithm::MlDsa65,
+                issuer.private_key.as_bytes(),
+                message,
+                SignOptions::default(),
+            )
+            .unwrap()
+    };
+    let release = SignedWalletDispatchRelease {
+        signature: signer(&payload.signing_bytes().unwrap()),
+        signature_algorithm: SignatureAlgorithm::MlDsa65,
+        payload,
+    };
+    let policy = &release.payload.policy;
+    let attachment = serde_json::to_vec(&release).unwrap();
+    let pins = synergy_config::ManagedWalletDispatchReleaseConfiguration {
+        from_sealed_package: false,
+        attachment_sha256: apqe_transport::sha256(&attachment),
+        issuer_key_id: signer_id.as_str().into(),
+        issuer_sha256: apqe_transport::sha256(&issuer.public_key),
+        release_verifier_artifact_sha256: hex(&verifier_at),
+        managed_release_manifest_sha256: policy.managed_release_manifest_sha256.clone(),
+        off_chain_approval_sha256: policy.off_chain_approval_sha256.clone(),
+        release_attestation_sha256: policy.release_attestation_sha256.clone(),
+    };
+    let trust = WalletDispatchReleaseTrust {
+        genesis_hash: &signed_genesis.genesis_hash,
+        release_signer_key_id: &signer_id,
+        release_signer_public_key: &issuer.public_key,
+        release_verifier_artifact_sha256: verifier_at,
+        managed_release_manifest_sha256: &pins.managed_release_manifest_sha256,
+        off_chain_approval_sha256: &pins.off_chain_approval_sha256,
+        release_attestation_sha256: &pins.release_attestation_sha256,
+    };
+    let release = VerifiedWalletDispatchRelease::verify(
+        &attachment,
+        &trust,
+        &origin.epoch,
+        &origin.protected.as_ref().unwrap().parameters,
+        &provider,
+    )
+    .unwrap();
+    let qualification = fixture_native_qualification(
+        &provider,
+        &issuer,
+        &release,
+        expected_report,
+        &pins.release_attestation_sha256,
+    );
+    // Release qualification and origin endorsement use distinct signing keys.
+    drop(provider);
+    let authorization = fixture_origin_endorsement(&signed_genesis, &pins, origin_signer);
+    let root = config.genesis_path.as_ref().unwrap().parent().unwrap();
+    for (name, bytes) in [
+        ("wallet-dispatch-release.json", attachment),
+        (
+            "wallet-dispatch-release-issuer.pub",
+            issuer.public_key.clone(),
+        ),
+        (
+            "wallet-dispatch-release-issuer-authorization.json",
+            authorization,
+        ),
+        (
+            "wallet-dispatch-ml-dsa-87-qualification.json",
+            serde_json::to_vec(&qualification).unwrap(),
+        ),
+        (wallet_release_artifacts::FILE_NAME, artifacts),
+    ] {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(root.join(name))
+            .unwrap();
+        file.write_all(&bytes).unwrap();
+        file.sync_all().unwrap();
+    }
+    pins
+}
+
 pub(super) fn qualify_signed_release(
     config: &NodeConfiguration,
     origin: &VerifiedAuthority,
@@ -53,7 +330,6 @@ pub(super) fn qualify_signed_release(
     .unwrap();
     let hash = |value: &[u8]| apqe_transport::sha256(value);
     let hex = |value: [u8; 32]| value.iter().map(|byte| format!("{byte:02x}")).collect();
-    let wire = crate::services::protected_accounts::inspection::candidate_wire_profile().unwrap();
     let expected_report = &config
         .aegis_provider
         .as_ref()
@@ -88,37 +364,13 @@ pub(super) fn qualify_signed_release(
                 .artifact_sha256,
         )
     };
-    let policy = ProtectedWalletDispatchPolicy {
-        version: 1,
-        chain_id: previous.chain_id,
-        network_id: previous.network_id.clone(),
-        genesis_hash: genesis_hash.clone(),
-        activation_finalized_height: previous.epoch_end_height + 1,
-        managed_release_manifest_sha256: hash(&artifacts_bytes),
-        off_chain_approval_sha256: hash(b"existing off-chain approval fixture"),
-        release_attestation_sha256: hash(b"release conformance attestation fixture"),
-        action_registry_sha256: hash(include_bytes!("protected_quick_setup_registry.json")),
-        wire_schema_sha256: hash(include_bytes!("protected_quick_setup_wire.cddl")),
-        action_vectors_sha256: hash(include_bytes!("protected_quick_setup_vectors.json")),
-        ownership_chain_id: format!("{:064x}", 1),
-        enrollment_wire_profile_fingerprint: hex(wire
-            .dual_enrollment_profile_fingerprint()
-            .unwrap()),
-        enrollment_commitment_profile_fingerprint: hex(
-            EnrollmentRegistryRelease::commitment_fingerprint(
-                UnactivatedCommitmentProfile::candidate_concat_v1(),
-            ),
-        ),
-        enrollment_provider_manifests: vec![hash(b"fixture provider")],
-        enrollment_proof_provider_artifacts: vec![hex(proof_sha256)],
-        fee_collector: synergy_address::generate_fee_collector_address("protected-release-fixture")
-            .unwrap(),
-        fee_class: 1,
-        base_fee_per_gas_nwei: 1,
-        enroll_commit_gas: 10,
-        enroll_reveal_gas: 100,
-        transfer_gas: 20,
-    };
+    let policy = fixture_release_policy(
+        origin,
+        genesis_hash,
+        &artifacts_bytes,
+        hash(b"fixture provider"),
+        proof_sha256,
+    );
     let payload = WalletDispatchReleasePayload {
         version: 1,
         predecessor_context_root: previous.root().unwrap(),
@@ -184,65 +436,18 @@ pub(super) fn qualify_signed_release(
         off_chain_approval_sha256: trust.off_chain_approval_sha256.into(),
         release_attestation_sha256: trust.release_attestation_sha256.into(),
     };
-    let mut authorization = WalletDispatchReleaseIssuerAuthorization {
-        version: 1,
-        genesis_hash: genesis_hash.clone(),
-        attachment_sha256: pins.attachment_sha256.clone(),
-        issuer_sha256: pins.issuer_sha256.clone(),
-        issuer_key_id: pins.issuer_key_id.clone(),
-        signature: vec![],
-    };
     let genesis = crate::commands::selected_network::verified_genesis(config).unwrap();
-    authorization.signature = origin_signer
-        .sign(
-            &KeyId::new(genesis.unsigned.authority_trust_key_id).unwrap(),
-            &SigningContext {
-                domain: WALLET_RELEASE_ISSUER_DOMAIN.into(),
-                chain_id: previous.chain_id,
-                epoch: None,
-                height: None,
-            },
-            &authorization.signing_bytes().unwrap(),
-        )
-        .unwrap()
-        .bytes;
-    let authorization_bytes = serde_json::to_vec(&authorization).unwrap();
+    let authorization_bytes = fixture_origin_endorsement(&genesis, &pins, origin_signer);
     fs::write(&authorization_path, &authorization_bytes).unwrap();
     selected_config.consensus.managed_wallet_dispatch_release = Some(pins.clone());
     assert!(load(&selected_config)
         .unwrap_err()
         .contains("production ML-DSA-87 qualification"));
-    let parse = |value: &str| synergy_posy::parse_hash_bytes(value).unwrap();
     let (qualifier, proof_fixture) = {
         let engine = engine.lock().unwrap();
-        let selected = engine.provider_provenance(Algorithm::MlDsa87).unwrap();
-        let target = match Target::current() {
-            Target::DarwinArm64 => "aarch64-apple-darwin",
-            Target::LinuxX86_64Gnu => "x86_64-unknown-linux-gnu",
-            Target::LinuxArm64Gnu => "aarch64-unknown-linux-gnu",
-            _ => panic!("fixture requires the selected native test platform"),
-        };
-        let qualification = NativeVerificationQualification {
-            version: 1,
-            target: target.into(),
-            artifact_sha256: proof_sha256,
-            report_sha256: parse(expected_report),
-            release_attestation_sha256: parse(&pins.release_attestation_sha256),
-            release_context: verified.enrollment().statement().release_context,
-            backend_abi: BACKEND_ABI,
-            backend_revision: MODULE_REVISION.into(),
-            selected_manifest_sha256: SELECTED_MANIFEST_SHA256.into(),
-            import_manifest_sha256: IMPORT_MANIFEST_SHA256.into(),
-            native_identity: selected.native_identity.clone(),
-        };
-        let signature = engine
-            .sign(
-                Algorithm::MlDsa65,
-                key.private_key.as_bytes(),
-                &qualification.signing_bytes().unwrap(),
-                SignOptions::default(),
-            )
-            .unwrap();
+        let qualification = fixture_native_qualification(
+            &engine, &key, &verified, expected_report, &pins.release_attestation_sha256,
+        );
         let proof = engine.generate_keypair(Algorithm::MlDsa87).unwrap();
         let proof_signature = engine
             .sign(
@@ -252,13 +457,7 @@ pub(super) fn qualify_signed_release(
                 SignOptions::default(),
             )
             .unwrap();
-        (
-            SignedNativeVerificationQualification {
-                qualification,
-                signature,
-            },
-            (proof, proof_signature),
-        )
+        (qualification, (proof, proof_signature))
     };
     let qualifier_bytes = serde_json::to_vec(&qualifier).unwrap();
     fs::write(&qualification_path, &qualifier_bytes).unwrap();
@@ -421,6 +620,8 @@ pub(super) fn qualify_signed_release(
         .unwrap_err()
         .contains("production ML-DSA-87 qualification"));
     fs::write(&qualification_path, &qualifier_bytes).unwrap();
+    let mut authorization: WalletDispatchReleaseIssuerAuthorization =
+        serde_json::from_slice(&authorization_bytes).unwrap();
     authorization.signature[0] ^= 1;
     fs::write(
         &authorization_path,

@@ -15,6 +15,8 @@ use synergy_posy::persistence::{FinalityStore, VerifiedQuorumCertificateStore};
 #[cfg(test)]
 #[path = "authority_wallet_dispatch_tests.rs"]
 mod wallet_dispatch_tests;
+#[cfg(test)]
+pub(crate) use wallet_dispatch_tests::stage_process_wallet_release;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

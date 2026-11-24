@@ -10224,9 +10224,33 @@ fn prepare_socket_fixture_profile_mode_endpoints(
     registry_endpoints: Option<&[std::net::SocketAddr; 5]>,
     chain_id: u64,
 ) -> PreparedSocketFixture {
+    prepare_socket_fixture_with_managed_release(
+        initial_world_state, export, processing_profile, epoch_end_override, provider,
+        secure, registry_endpoints, chain_id, None,
+    )
+}
+
+struct ManagedProcessFixture<'a> {
+    binary: &'a Path,
+    provider_manifest_sha256: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_socket_fixture_with_managed_release(
+    initial_world_state: synergy_state::WorldState,
+    export: Option<&IsolatedFixtureExport>,
+    processing_profile: bool,
+    epoch_end_override: Option<u64>,
+    provider: Option<&synergy_config::ApqeProviderConfiguration>,
+    secure: bool,
+    registry_endpoints: Option<&[std::net::SocketAddr; 5]>,
+    chain_id: u64,
+    managed: Option<ManagedProcessFixture<'_>>,
+) -> PreparedSocketFixture {
     assert!(export.is_none() || epoch_end_override.is_none());
     assert!(epoch_end_override
         .is_none_or(|height| height == 20 || (10_000..=10_000_000).contains(&height)));
+    assert!(managed.is_none() || secure && processing_profile && export.is_none() && epoch_end_override.is_none());
     let default_root = std::env::temp_dir().join(format!(
         "posy-socket-{}-{}",
         std::process::id(),
@@ -10264,7 +10288,7 @@ fn prepare_socket_fixture_profile_mode_endpoints(
     // Materialize once, then derive every fixture custody/storage/journal path
     // from its canonical directory. Production path checks stay strict.
     let root = fs::canonicalize(&root).unwrap();
-    let secure_network = format!("posy-apqe-canary-process-{}", std::process::id());
+    let secure_network = secure_fixture_network();
     let network_id = if secure {
         secure_network.as_str()
     } else {
@@ -10396,8 +10420,11 @@ fn prepare_socket_fixture_profile_mode_endpoints(
     let registry =
         FrozenValidatorRegistry::new(1, validators.iter().map(|v| v.record.clone()).collect())
             .unwrap();
-    let epoch_end_height =
-        epoch_end_override.unwrap_or_else(|| export.map_or(10_000, |value| value.epoch_end_height));
+    let epoch_end_height = if managed.is_some() {
+        1000 // Signed Core autonomous E1 requires H1 through H1000.
+    } else {
+        epoch_end_override.unwrap_or_else(|| export.map_or(10_000, |value| value.epoch_end_height))
+    };
     let preliminary = SimplifiedEpochContext::from_frozen_registry(
         chain_id,
         network_id.into(),
@@ -10498,7 +10525,9 @@ fn prepare_socket_fixture_profile_mode_endpoints(
                 network_id: payload.network_id.clone(),
                 protocol_version: preliminary.protocol_version.clone(),
                 activation_unix: policy.epoch_start_timestamp_ms / 1000,
-                autonomous_epoch_protocol: None,
+                autonomous_epoch_protocol: managed.as_ref().map(|_| {
+                    synergy_genesis::network::AUTONOMOUS_EPOCH_PROTOCOL_V1.into()
+                }),
             },
             validators: payload
                 .validators
@@ -10740,6 +10769,16 @@ fn prepare_socket_fixture_profile_mode_endpoints(
     } else {
         None
     };
+    if let Some(managed) = managed {
+        let pins = crate::services::authority::recovery::successor::stage_process_wallet_release(
+            &configurations[0], managed.binary, managed.provider_manifest_sha256,
+            secure_engine.as_ref().unwrap(), &signer,
+        );
+        for (index, config) in configurations.iter_mut().enumerate() {
+            config.consensus.managed_wallet_dispatch_release = Some(pins.clone());
+            write_json(&root.join(format!("node-{index}/config.json")), config);
+        }
+    }
     preparation_cleanup.0 = None;
     PreparedSocketFixture {
         registry_signer,
@@ -10748,6 +10787,10 @@ fn prepare_socket_fixture_profile_mode_endpoints(
         ids,
         listeners,
     }
+}
+
+fn secure_fixture_network() -> String {
+    format!("nodenetwork-formation-disposable-loopback-{}", std::process::id())
 }
 
 #[test]

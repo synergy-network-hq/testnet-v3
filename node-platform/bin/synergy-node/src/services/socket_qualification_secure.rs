@@ -247,6 +247,21 @@ pub(super) fn finalize_secure_fixture(
 #[test]
 #[ignore = "explicit native five independent processes; requires normal node binary"]
 fn actual_apqe_five_process_canary() {
+    qualify_actual_apqe_five_process_canary(FiveProcessScenario::Ordinary);
+}
+
+#[test]
+#[ignore = "explicit native five independent processes and signed managed activation"]
+fn actual_apqe_five_process_signed_wallet_release_stays_pending_in_e1() {
+    qualify_actual_apqe_five_process_canary(FiveProcessScenario::ManagedReleasePending);
+}
+
+enum FiveProcessScenario {
+    Ordinary,
+    ManagedReleasePending,
+}
+
+fn qualify_actual_apqe_five_process_canary(scenario: FiveProcessScenario) {
     let binary = PathBuf::from(
         std::env::var("SYNERGY_APQE_CANARY_BINARY").expect("normal node binary required"),
     );
@@ -255,11 +270,26 @@ fn actual_apqe_five_process_canary() {
         report_path: PathBuf::from(std::env::var("APQE_TRUSTED_NATIVE_REPORT").unwrap()),
         authenticated_report_sha256: std::env::var("APQE_AUTHENTICATED_REPORT_SHA256").unwrap(),
     };
-    let network_id = format!("posy-apqe-canary-process-{}", std::process::id());
-    let (transaction, world, mut account_secret) =
-        funded_transaction_fixture_for_network_provider(&network_id, 10_000_000, Some(&provider));
-    let mut prepared =
-        prepare_socket_fixture_profile_mode(world, None, true, None, Some(&provider), true);
+    let network_id = secure_fixture_network();
+    let managed = matches!(scenario, FiveProcessScenario::ManagedReleasePending);
+    let chain_id = if managed { 99_999 } else { 1266 };
+    let (transaction, world, mut account_secret) = funded_transaction_fixture_for_network_provider_chain(
+        &network_id, 10_000_000, Some(&provider), chain_id,
+    );
+    let mut prepared = prepare_socket_fixture_with_managed_release(
+        world,
+        None,
+        true,
+        None,
+        Some(&provider),
+        true,
+        None,
+        chain_id,
+        managed.then(|| ManagedProcessFixture {
+            binary: &binary,
+            provider_manifest_sha256: hash(b"fixture provider"),
+        }),
+    );
     struct Cleanup {
         root: PathBuf,
         children: Vec<std::process::Child>,
@@ -298,13 +328,13 @@ fn actual_apqe_five_process_canary() {
         root: prepared.root.clone(),
         children: Vec::new(),
     };
-    // Release reservations immediately before actual listeners bind.
-    prepared.listeners.clear();
-    for index in 0..5 {
-        let path = prepared.root.join(format!("node-{index}/config.json"));
+    let configurations: Vec<_> = (0..5)
+        .map(|index| prepared.root.join(format!("node-{index}/config.json")))
+        .collect();
+    for (index, path) in configurations.iter().enumerate() {
         let preflight = std::process::Command::new(&binary)
             .args(["preflight", "--config"])
-            .arg(&path)
+            .arg(path)
             .output()
             .unwrap();
         assert!(
@@ -312,6 +342,16 @@ fn actual_apqe_five_process_canary() {
             "preflight {index}: {}",
             String::from_utf8_lossy(&preflight.stderr)
         );
+        if managed {
+            let preflight: serde_json::Value = serde_json::from_slice(&preflight.stdout).unwrap();
+            assert_eq!(preflight["wallet_dispatch_release"]["state"], "verified_pending");
+            assert_eq!(preflight["wallet_dispatch_release"]["activation_finalized_height"], 1001);
+        }
+    }
+    // Public preflight opens no listener. Keep the reserved ports until all
+    // five peers passed it so their initial PoSy round starts together.
+    prepared.listeners.clear();
+    for (index, path) in configurations.iter().enumerate() {
         let output =
             fs::File::create(prepared.root.join(format!("node-{index}/process.log"))).unwrap();
         cleanup.children.push(
@@ -379,6 +419,14 @@ fn actual_apqe_five_process_canary() {
         std::thread::sleep(Duration::from_millis(1000));
     }
     let rpc_address = prepared.configurations[0].rpc.listen_address.unwrap();
+    if managed {
+        account_secret.fill(0);
+        wallet_activation::qualify_pending(&prepared.configurations);
+        return;
+    }
+    let authority = authority::load(&prepared.configurations[0])
+        .unwrap()
+        .unwrap();
     let response = process_rpc(
         rpc_address,
         "synergy_getProcessingContextV1",
@@ -388,9 +436,6 @@ fn actual_apqe_five_process_canary() {
     let context: synergy_etdag::ProcessingContext =
         serde_json::from_value(response["context"].clone()).unwrap();
     let transaction_height = context.authority.target_height;
-    let authority = authority::load(&prepared.configurations[0])
-        .unwrap()
-        .unwrap();
     let admission = processing_wallet_admission_fixture_provider(
         &transaction,
         &context,
@@ -513,6 +558,9 @@ fn actual_apqe_five_process_canary() {
 
 #[path = "socket_qualification_secure_recovery.rs"]
 mod recovery;
+
+#[path = "socket_qualification_secure_wallet.rs"]
+mod wallet_activation;
 
 fn process_rpc(
     address: std::net::SocketAddr,
@@ -679,7 +727,7 @@ fn export_apqe_vpn_canary_fixture() {
     assert!(chain_id > 0);
     private_directory(&output);
     let mut cleanup = ExportCleanup(Some(output.clone()));
-    let network_id = format!("posy-apqe-canary-process-{}", std::process::id());
+    let network_id = secure_fixture_network();
     let (transaction, world, secret_key) = funded_transaction_fixture_for_network_provider_chain(
         &network_id,
         10_000_000,
