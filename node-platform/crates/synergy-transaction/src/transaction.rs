@@ -51,7 +51,6 @@ impl UnsignedTransaction {
         self.network.validate()?;
         if self.sender.trim().is_empty()
             || self.receiver.trim().is_empty()
-            || self.sender == self.receiver
             || self.sender.len() > MAX_ADDRESS_BYTES
             || self.receiver.len() > MAX_ADDRESS_BYTES
             || !synergy_address::is_valid_address(&self.sender)
@@ -63,6 +62,18 @@ impl UnsignedTransaction {
             return Err(TransactionError::PayloadTooLarge);
         }
         let action = self.action()?;
+        // Native registration and authenticated governance/system operations
+        // have an explicit zero-value self target. They still need their
+        // owning protocol's authorization; an ordinary self transfer remains
+        // invalid and cannot create duplicate debit/credit entries.
+        if self.sender == self.receiver
+            && (self.amount_nwei != 0
+                || !matches!(action, TransactionAction::Native { .. }
+                    | TransactionAction::Governance { .. }
+                    | TransactionAction::System { .. }))
+        {
+            return Err(TransactionError::InvalidAddress);
+        }
         if action.requires_system_authority() != matches!(self.class, TransactionClass::System) {
             return Err(TransactionError::UnauthorizedTransactionClass);
         }

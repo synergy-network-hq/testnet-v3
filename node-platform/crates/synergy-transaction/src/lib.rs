@@ -54,6 +54,33 @@ mod tests {
     }
 
     #[test]
+    fn zero_value_protocol_self_targets_preserve_transfer_restrictions() {
+        for action in [
+            TransactionAction::Native {module:"identity".into(),method:"register_authorization".into(),input:b"{}".to_vec()},
+            TransactionAction::Governance {authorization_id:"reviewed-governance".into(),operation:b"{}".to_vec()},
+            TransactionAction::System {authorization_id:"reviewed-system".into(),operation:b"{}".to_vec()},
+        ] {
+            let mut transaction=unsigned(1);
+            transaction.receiver=transaction.sender.clone();
+            transaction.amount_nwei=0;
+            transaction.class=if action.requires_system_authority(){TransactionClass::System}else{TransactionClass::User};
+            transaction.payload=action.encode().unwrap();
+            assert!(transaction.signing_bytes().is_ok());
+            transaction.amount_nwei=1;
+            assert_eq!(transaction.validate_structure(),Err(TransactionError::InvalidAddress));
+        }
+        let mut transaction=unsigned(1);
+        transaction.receiver=transaction.sender.clone();
+        for amount in [0,1] {
+            transaction.amount_nwei=amount;
+            assert_eq!(transaction.validate_structure(),Err(TransactionError::InvalidAddress));
+        }
+        transaction.payload=TransactionAction::Synq{artifact:vec![1],input:vec![]}.encode().unwrap();
+        transaction.amount_nwei=0;
+        assert_eq!(transaction.validate_structure(),Err(TransactionError::InvalidAddress));
+    }
+
+    #[test]
     fn transaction_id_is_canonical_and_excludes_signature_encoding() {
         let transaction = unsigned(1);
         assert_eq!(transaction.id().unwrap(), transaction.id().unwrap());
