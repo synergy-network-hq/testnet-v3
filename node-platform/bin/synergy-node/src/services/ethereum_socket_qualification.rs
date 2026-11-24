@@ -88,8 +88,18 @@ fn receipt(
     hash: &serde_json::Value,
     root: &Path,
     children: &mut [std::process::Child],
+    submitted_at: Instant,
 ) -> serde_json::Value {
-    let deadline = Instant::now() + Duration::from_secs(180);
+    // Diagnostic functional qualification on the unchanged release artifact.
+    // The prior 180s wall-time failure remains a performance failure. Bound
+    // this investigation by wall time, actual finalized blocks and liveness.
+    let diagnostic =
+        std::env::var_os("SYNERGY_EVM_RECEIPT_DIAGNOSTIC").is_some_and(|value| value == "1");
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(if diagnostic { 600 } else { 180 });
+    let mut last_progress = started;
+    let mut first_height = None;
+    let mut diagnosed = false;
     let mut previous = 0;
     loop {
         for (index, child) in children.iter_mut().enumerate() {
@@ -120,6 +130,7 @@ fn receipt(
         {
             let first = rows[0].as_ref().unwrap();
             assert!(rows.iter().all(|row| row.as_ref().unwrap() == first));
+            eprintln!("Actual EVM submission-to-receipt={:?} receipt-wait={:?} inclusion={} first-observed-native-height={first_height:?} diagnostic={diagnostic}",submitted_at.elapsed(),started.elapsed(),first["blockNumber"]);
             return first.clone();
         }
         let heights = configs
@@ -144,16 +155,33 @@ fn receipt(
             .unwrap_or(0);
         if height > previous {
             previous = height;
+            first_height.get_or_insert(height);
+            last_progress = Instant::now();
             eprintln!("EVM actual-five-process finalized execution H{height}");
         }
-        if Instant::now() >= deadline {
+        if diagnostic && !diagnosed && started.elapsed() >= Duration::from_secs(120) {
+            diagnosed = true;
+            eprintln!(
+                "EVM diagnostic pending after {:?}, nativeH{height}, receipt observations={rows:?}",
+                started.elapsed()
+            );
+            diagnostic_public_world(&configs[0], height);
+        }
+        if Instant::now() >= deadline
+            || last_progress.elapsed() >= Duration::from_secs(180)
+            || (diagnostic && first_height.is_some_and(|first| height.saturating_sub(first) >= 32))
+        {
             for (index, config) in configs.iter().enumerate() {
                 let telemetry = process_rpc(
                     config.rpc.listen_address.unwrap(),
                     "synergy_chainTelemetry",
                     serde_json::json!({}),
                 );
-                eprintln!("EVM deadline node{index} telemetry={telemetry:?}");
+                let bounded=telemetry.as_ref().map(|v|serde_json::json!({
+                    "height":v["finalized_height"],"pipeline":v["chain"]["pipeline"],
+                    "cadence":v["chain"]["cadence"],"resource_budget":v["resource_budget"],
+                    "admission":v["admission"],"transport_peers":v["transport"]["apqe_session_count"]}));
+                eprintln!("EVM diagnostic deadline node{index} telemetry={bounded:?}");
                 let text = fs::read_to_string(root.join(format!("node-{index}/process.log")))
                     .unwrap_or_default();
                 let start = text
@@ -166,10 +194,106 @@ fn receipt(
                     &text[start..]
                 );
             }
+            diagnostic_public_world(&configs[0], height);
             panic!("EVM actual-five-process finalized receipt deadline: receipts={rows:?}, heights={heights:?}");
         }
         std::thread::sleep(Duration::from_millis(250));
     }
+}
+
+/// Stream only bounded, already-public finalized state for this immediate
+/// diagnosis. No files, pending/decrypted payloads, credentials or custody data.
+fn diagnostic_public_world(config: &NodeConfiguration, height: u64) {
+    use base64::Engine;
+    let result = (|| -> Result<serde_json::Value, String> {
+        let mut bytes = Vec::new();
+        let mut offset = 0;
+        let mut pin = None;
+        loop {
+            let mut params = serde_json::json!({"height":height,"kind":"world_state","offset":offset,"limit":65536});
+            if let Some(pin) = &pin {
+                params["expected_sha256"] = serde_json::json!(pin);
+            }
+            let page = process_rpc(
+                config.rpc.listen_address.unwrap(),
+                "synergy_getFinalizedProofPageV1",
+                params,
+            )?;
+            if page["total_bytes"].as_u64().is_none_or(|n| n > 1024 * 1024) {
+                return Err("diagnostic World bound".into());
+            }
+            let part = base64::engine::general_purpose::STANDARD
+                .decode(
+                    page["bytes_base64"]
+                        .as_str()
+                        .ok_or("diagnostic page encoding")?,
+                )
+                .map_err(|e| e.to_string())?;
+            bytes.extend(part);
+            if bytes.len() > 1024 * 1024 {
+                return Err("diagnostic World bound".into());
+            }
+            pin = Some(
+                page["sha256"]
+                    .as_str()
+                    .ok_or("diagnostic page digest")?
+                    .to_owned(),
+            );
+            match page["next_offset"].as_u64() {
+                Some(next) => offset = next as usize,
+                None => break,
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        let world: WorldState = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let accounts=world.accounts.iter().filter(|(k,_)|k.starts_with("0x")).take(8)
+            .map(|(k,v)|serde_json::json!({"address":k,"nonce":v.nonce,"balance":v.balance_nwei.to_string(),"code":v.code_hash.is_some()})).collect::<Vec<_>>();
+        let mut records = Vec::new();
+        for (key, value) in &world.protocol {
+            if records.len() == 16 {
+                break;
+            }
+            if key.starts_with("etdag-processing-ready-v1/")
+                || key.starts_with("etdag-processing-groups-v1/")
+                || key.starts_with("aivm/ethereum/v1/transaction/")
+            {
+                let decoded: serde_json::Value =
+                    serde_json::from_slice(value).map_err(|e| e.to_string())?;
+                let view = if key.starts_with("aivm/ethereum/v1/transaction/") {
+                    serde_json::json!({"height":decoded["height"],"has_receipt":!decoded["receipt"].is_null(),"rejection":decoded["rejection"]})
+                } else if key.contains("/claim/") {
+                    serde_json::json!({"group_number":decoded["group_number"],"order_position":decoded["order_position"],"sender":decoded["member"]["envelope"]["sender_id"],"nonce":decoded["member"]["envelope"]["nonce_slot"]})
+                } else if key.starts_with("etdag-processing-ready-v1/item/") {
+                    let ready: synergy_execution::ProcessingReadyRecord =
+                        serde_json::from_slice(value).map_err(|e| e.to_string())?;
+                    let meta: serde_json::Value =
+                        serde_json::from_slice(&world.protocol["etdag-processing-ready-v1/meta"])
+                            .map_err(|e| e.to_string())?;
+                    let namespace: synergy_etdag::EtdagDigest =
+                        serde_json::from_value(meta["namespace_root"].clone())
+                            .map_err(|e| e.to_string())?;
+                    let assignment = synergy_execution::verify_processing_record_assignment(
+                        &world, &namespace, &ready,
+                    )
+                    .err()
+                    .map(|e| e.to_string());
+                    serde_json::json!({"group":ready.item.group_number,"position":ready.item.order_position,
+                        "sender":ready.sender_wallet,"nonce":ready.sender_nonce,"gas":ready.item.gas_class_units,
+                        "encoded_bytes":ready.item.encoded_bytes,"assignment_error":assignment})
+                } else if key.contains("/group/") {
+                    serde_json::json!({"group":decoded["group_number"],"remaining":decoded["remaining"],
+                        "next_position":decoded["next_position"],"closed":!decoded["closed_by_successor"].is_null()})
+                } else {
+                    serde_json::json!({"last_number":decoded["last_number"],"generation":decoded["generation"],"count":decoded["count"]})
+                };
+                records.push(serde_json::json!({"key":key,"value":view}));
+            }
+        }
+        Ok(
+            serde_json::json!({"height":height,"world_bytes":bytes.len(),"accounts":accounts,"records":records}),
+        )
+    })();
+    eprintln!("Bounded actual finalized EVM/READY/group diagnostic={result:?}");
 }
 pub(super) fn qualify(
     configs: &[NodeConfiguration],
@@ -184,6 +308,7 @@ pub(super) fn qualify(
         process_rpc(rpc, "eth_chainId", serde_json::json!([])).unwrap(),
         "0x1869f"
     );
+    let submitted_at = Instant::now();
     let hash = process_rpc(
         rpc,
         "eth_sendRawTransaction",
@@ -203,7 +328,7 @@ pub(super) fn qualify(
     }
     // No manual reconnect: the actual production APQE network owner must
     // restore its authenticated routes and replay the original durable work.
-    let mut observed = vec![receipt(configs, &hash, root, children)];
+    let mut observed = vec![receipt(configs, &hash, root, children, submitted_at)];
     assert_eq!(observed[0]["status"], "0x1");
     if genesis_restart {
         verify_ethers_rpc(&module, rpc, &fixture, &observed, None);
@@ -212,6 +337,7 @@ pub(super) fn qualify(
         return;
     }
     for (index, status) in [(1, "0x1"), (2, "0x0"), (3, "0x1"), (4, "0x0"), (7, "0x1")] {
+        let submitted_at = Instant::now();
         let hash = process_rpc(
             rpc,
             "eth_sendRawTransaction",
@@ -219,7 +345,7 @@ pub(super) fn qualify(
         )
         .unwrap();
         assert_eq!(hash, fixture["transactions"][index]["hash"]);
-        let row = receipt(configs, &hash, root, children);
+        let row = receipt(configs, &hash, root, children, submitted_at);
         eprintln!(
             "EVM fixture{index} finalized at{} status{}",
             row["blockNumber"], row["status"]
@@ -272,6 +398,7 @@ pub(super) fn qualify(
         assert!(signed.status.success());
         let raw = String::from_utf8(signed.stdout).unwrap();
         assert!(raw.len() < 1024);
+        let submitted_at = Instant::now();
         let hash = process_rpc(rpc, "eth_sendRawTransaction", serde_json::json!([raw])).unwrap();
         assert!(
             process_rpc(rpc, "eth_getTransactionReceipt", serde_json::json!([hash]))
@@ -279,7 +406,7 @@ pub(super) fn qualify(
                 .is_null()
         );
         restart_admitter(children, binary, root);
-        let recovered = receipt(configs, &hash, root, children);
+        let recovered = receipt(configs, &hash, root, children, submitted_at);
         assert_eq!(recovered["status"], "0x1");
         assert_eq!(
             process_rpc(
