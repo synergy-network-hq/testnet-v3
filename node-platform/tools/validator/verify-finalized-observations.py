@@ -153,6 +153,28 @@ def match_world_state(world_bytes, state_root):
         raise ValueError("World preimage does not match the authenticated state root")
 
 
+def select_world_accounts(world_bytes, addresses):
+    # Call only after matching these exact bytes to the native-verified root.
+    world = json.loads(world_bytes)
+    accounts = world.get("accounts") if isinstance(world, dict) else None
+    if not isinstance(accounts, dict):
+        raise ValueError("invalid accounts map in authenticated World")
+    selected = {}
+    for address in addresses:
+        if address not in accounts:
+            selected[address] = None
+            continue
+        account = accounts[address]
+        balance = account.get("balance_nwei") if isinstance(account, dict) else None
+        nonce = account.get("nonce") if isinstance(account, dict) else None
+        if (type(balance) is not int or not 0 <= balance < 2**128
+                or type(nonce) is not int or not 0 <= nonce < 2**64):
+            raise ValueError("invalid account balance or nonce in authenticated World")
+        # Preserve integer precision when reports are consumed by JavaScript.
+        selected[address] = dict(balance_nwei=str(balance), nonce=str(nonce))
+    return selected
+
+
 def select_receipt(block_bytes, transaction_id):
     # The native verifier authenticated the exact block bytes before selection.
     _, _, _, _, transactions, receipts = json.loads(block_bytes)
@@ -206,6 +228,8 @@ def main():
                      help="authenticate retained three-QC finality without the original block preimage")
     cli.add_argument("--verify-world", action="store_true",
                      help="check original public World bytes against each authenticated block state root")
+    cli.add_argument("--account", action="append", default=[],
+                     help="exact account key to read from the authenticated World; repeat up to eight times")
     cli.add_argument("--receipt-id", help="select a transaction receipt from the authenticated block bytes")
     cli.add_argument("--through-height", type=int, help="verify up to eight consecutive heights")
     cli.add_argument("--require-epoch-transition", action="store_true")
@@ -213,7 +237,12 @@ def main():
     last = args.height if args.through_height is None else args.through_height
     if not args.height <= last < args.height + MAX_HEIGHTS:
         cli.error("select one to eight consecutive finalized heights")
-    if args.witness_only and args.verify_world:
+    if (len(args.account) > 8 or len(set(args.account)) != len(args.account)
+            or any(not address or len(address) > 128 or not address.isascii()
+                   or not address.isprintable() for address in args.account)):
+        cli.error("select up to eight distinct account keys")
+    verify_world = args.verify_world or bool(args.account)
+    if args.witness_only and verify_world:
         cli.error("World verification requires an original block preimage")
     if args.receipt_id is not None and (
             not HEX.fullmatch(args.receipt_id) or args.witness_only or last != args.height):
@@ -251,9 +280,11 @@ def main():
                                        witness_only=args.witness_only)
                     if args.receipt_id is not None:
                         observed["receipt"] = select_receipt(block_bytes, args.receipt_id)
-                    if args.verify_world:
-                        match_world_state(fetch_proof(endpoint, height, "world_state"),
-                                          observed["state_root"])
+                    if verify_world:
+                        world_bytes = fetch_proof(endpoint, height, "world_state")
+                        match_world_state(world_bytes, observed["state_root"])
+                        if args.account:
+                            observed["accounts"] = select_world_accounts(world_bytes, args.account)
                     if range_mode:
                         if args.witness_only:
                             observed.update(witness_position(proof_bytes, observed, args.chain,
@@ -276,7 +307,7 @@ def main():
                   genesis_hash=args.genesis, observer_count=len(endpoints))
     if args.witness_only:
         result["block_preimage_verified"] = False
-    if args.verify_world:
+    if verify_world:
         result["world_preimage_verified"] = True
     if range_mode:
         result.update(start_height=args.height, through_height=last, epoch_transitions=transitions,

@@ -164,6 +164,55 @@ class FinalityObservationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "authenticated state root"):
             verifier.match_world_state(world + b" ", commitment)
 
+    def test_account_reads_require_authenticated_world_and_preserve_large_integers(self):
+        genesis = "a" * 64
+        balance = 2**128 - 1
+        world = json.dumps({"accounts": {
+            "present": {"balance_nwei": balance, "nonce": 2**64 - 1, "code_hash": None},
+            "zero": {"balance_nwei": 0, "nonce": 0, "code_hash": None},
+        }, "protocol": {}}).encode()
+        root = hashlib.sha3_256(
+            b"SYNERGY_WORLD_STATE_ROOT_V1" + len(world).to_bytes(8, "big") + world
+        ).hexdigest()
+        native = dict(verified=True, chain_id=99999, network_id="canary", genesis_hash=genesis,
+                      state_root=root, finalized=dict(height=7, block_id="b" * 64,
+                                                      protected_execution_root="c" * 64))
+        args = ["verify", "--observer", "https://example.test", "--node", __file__,
+                "--config", __file__, "--chain", "99999", "--network", "canary",
+                "--genesis", genesis, "--height", "7", "--account", "present",
+                "--account", "zero", "--account", "missing"]
+
+        def proof(_endpoint, _height, kind):
+            return world if kind == "world_state" else b"native fixture input"
+
+        with (patch("sys.argv", args), patch.object(verifier, "fetch_proof", side_effect=proof),
+              patch.object(verifier, "verify_native", return_value=native),
+              redirect_stdout(io.StringIO()) as out):
+            verifier.main()
+        result = json.loads(out.getvalue())
+        self.assertTrue(result["world_preimage_verified"])
+        self.assertEqual(result["accounts"], {
+            "present": {"balance_nwei": str(balance), "nonce": str(2**64 - 1)},
+            "zero": {"balance_nwei": "0", "nonce": "0"},
+            "missing": None,
+        })
+
+        with (patch("sys.argv", args), patch.object(verifier, "fetch_proof", return_value=b"altered"),
+              patch.object(verifier, "verify_native", return_value=native),
+              patch.object(verifier, "select_world_accounts") as select,
+              self.assertRaises(SystemExit), patch("sys.stderr", new=io.StringIO())):
+            verifier.main()
+        select.assert_not_called()
+
+    def test_invalid_authenticated_account_values_are_rejected(self):
+        for balance, nonce in [(True, 0), (-1, 0), (2**128, 0), (0, 2**64), (0, "0")]:
+            with self.subTest(balance=balance, nonce=nonce):
+                world = json.dumps({"accounts": {"account": {
+                    "balance_nwei": balance, "nonce": nonce,
+                }}}).encode()
+                with self.assertRaisesRegex(ValueError, "invalid account balance or nonce"):
+                    verifier.select_world_accounts(world, ["account"])
+
     def test_exact_receipt_selection_rejects_missing_duplicate_and_invalid_status(self):
         txid = "a" * 64
         receipt = dict(transaction_id=txid, status="applied", gas_used=21000,
