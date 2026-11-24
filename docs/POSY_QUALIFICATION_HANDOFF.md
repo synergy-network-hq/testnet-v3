@@ -60,3 +60,6 @@ Run `python3 node-platform/tools/validator/review-replacement-formation.py PUBLI
 ## Atlas telemetry
 
 Atlas candidate `5bc8b04173670f901551fffb333676dcb7ec5b7a` is published on `codex/posy-atlas-20261123` in `/Volumes/SynergyBuilds/Source/posy-atlas-20261123`. The staff view starts a new chart history when the chain ID, network ID or Genesis changes and rejects observations with an incomplete identity or an older timestamp. The frontend and backend passed 152 Vitest checks, the link previews passed three Node tests, and the production build succeeded. Live anonymous checks returned 200 for the staff page shell and 401 for its telemetry endpoint. Staff-authenticated readings and deployment of the candidate remain unverified.
+
+
+Atlas candidate `214c8746b8c77d9fdda9abccd55b85a221ad5b0b` removes the fixed Val2–Val6 requirement from the protected profile reader, telemetry parser, fleet section and history. The selected network supplies its own unique roster. The replacement test includes Val1, excludes the old Val5 placeholder and covers a larger roster. Source-observed sessions remain distinct from independent finality. 154 Vitest checks, three Node link-preview tests, and both frontend and backend production builds passed. GitHub branch was verified, with live deployment and staff telemetry recovery still open.
