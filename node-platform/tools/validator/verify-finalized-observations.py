@@ -175,12 +175,18 @@ def select_world_accounts(world_bytes, addresses):
     return selected
 
 
-def select_receipt(block_bytes, transaction_id):
+def select_receipt(block_bytes, transaction_id, *, expected=True):
     # The native verifier authenticated the exact block bytes before selection.
     _, _, _, _, transactions, receipts = json.loads(block_bytes)
-    if not isinstance(transactions, list) or not isinstance(receipts, list) or len(transactions) != len(receipts):
+    if (not isinstance(transactions, list) or not isinstance(receipts, list)
+            or len(transactions) != len(receipts)
+            or any(not isinstance(receipt, dict) for receipt in receipts)):
         raise ValueError("invalid transaction and receipt alignment in verified block")
     matches = [receipt for receipt in receipts if receipt.get("transaction_id") == transaction_id]
+    if not expected:
+        if matches:
+            raise ValueError("requested receipt appears outside its expected finalized height")
+        return None
     if len(matches) != 1:
         raise ValueError("requested receipt does not occur exactly once in verified block")
     receipt = matches[0]
@@ -231,6 +237,8 @@ def main():
     cli.add_argument("--account", action="append", default=[],
                      help="exact account key to read from the authenticated World; repeat up to eight times")
     cli.add_argument("--receipt-id", help="select a transaction receipt from the authenticated block bytes")
+    cli.add_argument("--receipt-height", type=int,
+                     help="height at which the receipt must occur exactly once within the verified range")
     cli.add_argument("--through-height", type=int, help="verify up to eight consecutive heights")
     cli.add_argument("--require-epoch-transition", action="store_true")
     args = cli.parse_args()
@@ -244,9 +252,15 @@ def main():
     verify_world = args.verify_world or bool(args.account)
     if args.witness_only and verify_world:
         cli.error("World verification requires an original block preimage")
-    if args.receipt_id is not None and (
-            not HEX.fullmatch(args.receipt_id) or args.witness_only or last != args.height):
-        cli.error("receipt verification requires one finalized height and an exact transaction ID")
+    receipt_height = args.receipt_height
+    if args.receipt_id is not None:
+        if receipt_height is None and last == args.height:
+            receipt_height = args.height
+        if (not HEX.fullmatch(args.receipt_id) or args.witness_only or receipt_height is None
+                or not args.height <= receipt_height <= last):
+            cli.error("receipt verification requires original block bytes and an exact transaction ID and height")
+    elif receipt_height is not None:
+        cli.error("--receipt-height requires --receipt-id")
     if args.require_epoch_transition and last == args.height:
         cli.error("an epoch transition requires at least two heights")
     endpoints = [urlsplit(value) for value in args.observer]
@@ -279,7 +293,10 @@ def main():
                     observed = subject(native, args.chain, args.network, args.genesis, height,
                                        witness_only=args.witness_only)
                     if args.receipt_id is not None:
-                        observed["receipt"] = select_receipt(block_bytes, args.receipt_id)
+                        receipt = select_receipt(block_bytes, args.receipt_id,
+                                                 expected=height == receipt_height)
+                        if receipt is not None:
+                            observed["receipt"] = receipt
                     if verify_world:
                         world_bytes = fetch_proof(endpoint, height, "world_state")
                         match_world_state(world_bytes, observed["state_root"])
@@ -312,6 +329,8 @@ def main():
     if range_mode:
         result.update(start_height=args.height, through_height=last, epoch_transitions=transitions,
                       observations=observations)
+        if receipt_height is not None:
+            result["receipt_occurrences_in_verified_range"] = 1
     else:
         result.update(observations[0])
     print(json.dumps(result, sort_keys=True))

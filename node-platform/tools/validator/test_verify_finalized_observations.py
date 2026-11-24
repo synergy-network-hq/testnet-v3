@@ -213,6 +213,47 @@ class FinalityObservationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "invalid account balance or nonce"):
                     verifier.select_world_accounts(world, ["account"])
 
+    def test_receipt_occurs_at_one_expected_height_across_verified_boundary(self):
+        genesis, txid = "a" * 64, "b" * 64
+        ids = {1000: "c" * 64, 1001: "d" * 64, 1002: "e" * 64}
+        receipt = dict(transaction_id=txid, status="applied", gas_used=21000,
+                       state_root_after="f" * 64, error_code=None)
+        args = ["verify", "--observer", "https://example.test", "--node", __file__,
+                "--config", __file__, "--chain", "99999", "--network", "canary",
+                "--genesis", genesis, "--height", "1000", "--through-height", "1002",
+                "--require-epoch-transition", "--receipt-id", txid, "--receipt-height", "1001"]
+
+        def native(_command, height):
+            epoch = 1 if height == 1000 else 2
+            return dict(verified=True, chain_id=99999, network_id="canary", genesis_hash=genesis,
+                        state_root="f" * 64, epoch=epoch, epoch_context_root=str(epoch) * 64,
+                        consensus_timestamp_unix=height, finalized=dict(
+                            height=height, block_id=ids[height], protected_execution_root="9" * 64))
+
+        def proof(_endpoint, height, _kind):
+            matches = [receipt] if height in present else []
+            return json.dumps([height, ids.get(height - 1, "0" * 64),
+                               "0" * 64, "f" * 64, [{}] * len(matches), matches]).encode()
+
+        with (patch("sys.argv", args), patch.object(verifier, "fetch_proof", side_effect=proof),
+              patch.object(verifier, "verify_native", side_effect=native)):
+            present = {1001}
+            with redirect_stdout(io.StringIO()) as out:
+                verifier.main()
+            result = json.loads(out.getvalue())
+            self.assertEqual(result["receipt_occurrences_in_verified_range"], 1)
+            self.assertEqual(result["epoch_transitions"], 1)
+            self.assertEqual(result["observations"][1]["receipt"], receipt)
+            self.assertNotIn("receipt", result["observations"][0])
+            self.assertNotIn("receipt", result["observations"][2])
+            for present, reason in (({1000, 1001}, "outside its expected"),
+                                    ({1001, 1002}, "outside its expected"),
+                                    (set(), "does not occur exactly once")):
+                with (self.subTest(present=present), patch("sys.stderr", new=io.StringIO()) as err,
+                      self.assertRaises(SystemExit)):
+                    verifier.main()
+                self.assertIn(reason, err.getvalue())
+
     def test_exact_receipt_selection_rejects_missing_duplicate_and_invalid_status(self):
         txid = "a" * 64
         receipt = dict(transaction_id=txid, status="applied", gas_used=21000,
