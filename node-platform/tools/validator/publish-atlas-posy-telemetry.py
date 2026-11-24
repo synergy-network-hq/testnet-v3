@@ -107,9 +107,9 @@ def count_committed_transactions(root,observed,previous):
  complete=cursor['height']==height and (height==0 or cursor['block_id']==observed['finalized_block_id'])
  return cursor,cursor['transactions'] if complete else None
 
-configuration,_=read_json(Path('/opt/Synergy/config/node.json'),1024*1024)
+configuration,_=read_json(Path('/opt/synergy/config/node.json'),1024*1024)
 root=Path(configuration['storage']['data_directory'])
-if root!=Path('/opt/Synergy/data'):raise ValueError('unexpected active data directory')
+if root!=Path('/opt/synergy/data'):raise ValueError('unexpected active data directory')
 genesis,_=read_json(Path(configuration['genesis_path']),4*1024*1024)
 manifest,_=read_json(Path(configuration['manifest_path']),1024*1024)
 if manifest['network_id']!=configuration['network_id'] or manifest['genesis_hash']!=genesis['genesis_hash']:raise ValueError('selected network mismatch')
@@ -120,14 +120,14 @@ service=dict(x.split('=',1) for x in subprocess.check_output(['systemctl','show'
 pid=int(service['MainPID'])
 if pid:
  arguments=Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
- if b'/opt/Synergy/config/node.json' not in arguments:raise ValueError('running configuration mismatch')
+ if b'/opt/synergy/config/node.json' not in arguments:raise ValueError('running configuration mismatch')
 pointer=root/'state/execution/finalized-state.json'
 observed=read_json(pointer,4096)[0]['state'] if pointer.is_file() else {'finalized_height':0,'finalized_block_id':None}
 height=observed['finalized_height']
 result={'network_id':configuration['network_id'],'genesis_hash':genesis['genesis_hash'],'address':identity['node_address'],'vpn_ip':configuration['network']['listen_addresses'][0].rsplit(':',1)[0],'service':service,'height':height,'block':None,'wallets':None,'transactions':None,'release_id':None}
 result['registry_validity']=None
 try:
- policy,_=read_json(Path('/opt/Synergy/config/start-authorized.json'),128*1024)
+ policy,_=read_json(Path('/opt/synergy/config/start-authorized.json'),128*1024)
  transport=configuration['apqe_transport']
  registry_bytes=read_bytes(Path(transport['registry_path']),256*1024)
  trust_bytes=read_bytes(Path(transport['registry_trust_key_path']),4096)
@@ -184,7 +184,7 @@ except Exception:pass
 result['_transaction_cursor'],result['transactions']=count_committed_transactions(root,observed,previous)
 pid=int(service['MainPID'])
 if pid:
- try:result['release_id']=json.loads(Path('/opt/Synergy/package.json').read_bytes()).get('release_id')
+ try:result['release_id']=json.loads(Path('/opt/synergy/package.json').read_bytes()).get('release_id')
  except Exception:pass
 result['observed_at']=datetime.datetime.now(datetime.timezone.utc).isoformat()
 print(json.dumps(result))
@@ -492,10 +492,20 @@ def live_canary_checks(network_id, genesis_hash, nodes, timestamp, states=None):
     return checks
 
 
-def run(report=None, once=False, test_plan=None):
+def require_selected_chain(expected, observed):
+    fields = ('chain_id', 'network_id', 'genesis_hash')
+    if any(observed.get(field) != expected[field] for field in fields):
+        raise ValueError('Native observations differ from explicitly selected network')
+
+
+def run(report=None, once=False, test_plan=None, observe_only=None):
     ips = {}
     for n in range(2,7):
-        config = subprocess.check_output(['ssh','-G',f'synergy-val{n}'],stderr=subprocess.DEVNULL,text=True)
+        host = f'synergy-val{n}'
+        if host not in MASTER_SOCKETS:
+            ips[n] = None
+            continue
+        config = subprocess.check_output(['ssh','-G',host],stderr=subprocess.DEVNULL,text=True)
         ips[n] = next(line.split(' ',1)[1] for line in config.splitlines() if line.startswith('hostname '))
     previous = None
     transaction_cursors = {}
@@ -517,6 +527,8 @@ def run(report=None, once=False, test_plan=None):
             time.sleep(10)
             continue
         chain_fields=observed_chain_fields(states,verified)
+        if observe_only is not None:
+            require_selected_chain(observe_only, {**chain_fields, 'network_id':network_id, 'genesis_hash':genesis_hash})
         states=roster_observations(states,verified,network_id,genesis_hash)
         for n, state in states.items():
             cursor = state.pop('_transaction_cursor', None)
@@ -580,6 +592,9 @@ def run(report=None, once=False, test_plan=None):
             tip_state['_throughput']['accepted_tps']=sum(accepted_rates) if all(value is not None for value in accepted_rates) else None
         b=tip_state['block'] if tip_state else {}
         payload={'observed_at':timestamp,'chain':{**chain_fields,'network_id':network_id,'genesis_hash':genesis_hash,'proposer':current_proposer(states),'height':height,'finalized_height':height,'block_time_ms':speed,'transactions':tip_state['transactions'] if tip_state else None,'wallets':tip_state['wallets'] if tip_state else None,'finalized_block_id':b.get('block_hash'),'state_root':b.get('state_root'),'verified_quorum':None,'throughput':tip_state['_throughput'] if tip_state else None,'load_test':baseline_status(report,states,network_id,now)},'validators':nodes,'tests':tests}
+        if observe_only is not None:
+            print(json.dumps(payload), flush=True)
+            return payload
         data=json.dumps(payload).encode()
         try:
             owner.remote('synergy-index',MASTER_SOCKETS['synergy-index'],['python3','-c',PUBLISH],data)
@@ -598,6 +613,11 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--master-socket',action='append',default=[],metavar='HOST=PATH',help='Existing owner SSH master; one per host')
     parser.add_argument('--test-plan',type=Path,help='Current network-bound qualification status; reread each observation')
+    parser.add_argument('--observe-only', action='store_true',
+                        help='Print one native fleet report without accessing the Atlas index host')
+    parser.add_argument('--network-id')
+    parser.add_argument('--chain-id', type=int)
+    parser.add_argument('--genesis-hash')
     parser.add_argument('--once',action='store_true',help='Publish one observation and exit')
     parser.add_argument('--baseline-report',type=Path,help='Explicit canonical baseline JSON; no automatic discovery')
     parser.add_argument('--retired-network-id',help='Publish an explicit retirement record without probing validators')
@@ -609,14 +629,27 @@ if __name__=='__main__':
         if not separator or host in MASTER_SOCKETS:parser.error('unique HOST=PATH master required')
         MASTER_SOCKETS[host]=socket
     if any(value is not None for value in (args.retired_network_id,args.retired_genesis_hash,args.retired_chain_id)):
-        if not args.once or args.test_plan or args.baseline_report or set(MASTER_SOCKETS)!={'synergy-index'}:
+        if args.observe_only or not args.once or args.test_plan or args.baseline_report or set(MASTER_SOCKETS)!={'synergy-index'}:
             parser.error('Retirement requires --once, only the existing index master, and no live test inputs')
         try:payload=retired_payload(args.retired_network_id,args.retired_genesis_hash,args.retired_chain_id,datetime.datetime.now(datetime.timezone.utc).isoformat())
         except ValueError as error:parser.error(str(error))
         owner.remote('synergy-index',MASTER_SOCKETS['synergy-index'],['python3','-c',PUBLISH],json.dumps(payload).encode())
         print(json.dumps({'published_lifecycle':'retired','network_id':payload['chain']['network_id']}),flush=True)
         raise SystemExit(0)
-    if set(MASTER_SOCKETS)!={*[f'synergy-val{n}' for n in range(2,7)],'synergy-index'}:parser.error('explicit six existing owner masters required')
+    validators = {f'synergy-val{n}' for n in range(2, 7)}
+    observed_scope = None
+    if args.observe_only:
+        if not ({'synergy-val2', 'synergy-val3', 'synergy-val4', 'synergy-val6'}
+                <= set(MASTER_SOCKETS) <= validators):
+            parser.error('Read-only observation requires existing masters for Val2, Val3, Val4 and Val6')
+        if (args.chain_id is None or not 0 < args.chain_id <= 2**53 - 1
+                or not re.fullmatch(r'[A-Za-z0-9._-]{1,256}', args.network_id or '')
+                or not re.fullmatch(r'[a-f0-9]{64}', args.genesis_hash or '')):
+            parser.error('Read-only observation requires explicit chain ID, network ID and Genesis')
+        observed_scope = dict(chain_id=args.chain_id, network_id=args.network_id, genesis_hash=args.genesis_hash)
+    elif (any(value is not None for value in (args.chain_id, args.network_id, args.genesis_hash))
+          or set(MASTER_SOCKETS) != validators | {'synergy-index'}):
+        parser.error('Publishing requires six existing owner masters; scope flags are for --observe-only')
     report=None
     if args.baseline_report:
         path=args.baseline_report.resolve()
@@ -624,4 +657,4 @@ if __name__=='__main__':
             parser.error('baseline report must be a bounded canonical regular file')
         report=json.loads(path.read_bytes())
     if args.test_plan and (args.test_plan.is_symlink() or not args.test_plan.is_file() or args.test_plan.stat().st_size>65536):parser.error('bounded regular current test plan required')
-    run(report,args.once,args.test_plan)
+    run(report,args.once or args.observe_only,args.test_plan,observed_scope)

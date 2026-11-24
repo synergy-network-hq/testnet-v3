@@ -1,10 +1,13 @@
 """Regression checks for the collector's actual native history formats."""
+from contextlib import redirect_stdout
 import hashlib
+import io
 import importlib.util
 import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location(
     "collector", Path(__file__).with_name("publish-atlas-posy-telemetry.py"))
@@ -104,6 +107,32 @@ class RosterSelection(unittest.TestCase):
         self.states[4]['chain_telemetry']['process_id'] = 999
         with self.assertRaisesRegex(ValueError, 'four distinct running'):
             collector.active_network(self.states)
+
+    def test_read_only_report_refuses_foreign_scope_and_never_calls_index_writer(self):
+        self.states[5] = {'service': {}, 'block': None}
+        for state in self.states.values():
+            state.setdefault('wallets', None)
+            state.setdefault('transactions', None)
+            state.setdefault('release_id', None)
+        scope = dict(chain_id=99999, network_id=self.network, genesis_hash=self.genesis)
+        masters = {f'synergy-val{n}': f'/tmp/val{n}' for n in (2, 3, 4, 6)}
+
+        def observe(item):
+            number = item[0]
+            return number, self.states[number]
+
+        with patch.dict(collector.MASTER_SOCKETS, masters, clear=True), \
+                patch.object(collector.subprocess, 'check_output', return_value='hostname example.test'), \
+                patch.object(collector, 'read', side_effect=observe), \
+                patch.object(collector.owner, 'remote') as remote, redirect_stdout(io.StringIO()) as output:
+            report = collector.run(once=True, observe_only=scope)
+            self.assertEqual(report, json.loads(output.getvalue()))
+            self.assertEqual(report['chain']['genesis_hash'], self.genesis)
+            self.assertIsNone(report['validators'][3]['public_ip'])
+            self.assertIsNone(report['validators'][3]['finalized_height'])
+            with self.assertRaisesRegex(ValueError, 'explicitly selected network'):
+                collector.run(once=True, observe_only={**scope, 'genesis_hash': 'f' * 64})
+            remote.assert_not_called()
 
     def test_duplicate_identity_does_not_count_twice(self):
         self.states[5] = {}
