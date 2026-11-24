@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location(
     "formation_review", Path(__file__).with_name("review-replacement-formation.py")
@@ -108,3 +109,43 @@ class FormationReviewTests(unittest.TestCase):
         self.assertEqual(formation.review_allocations(recipe, approval), str(formation.TREASURY_NWEI))
         with self.assertRaisesRegex(ValueError, "distinct approved treasury"):
             formation.review_allocations(recipe, {})
+
+    def test_signed_output_matches_exact_review_and_requires_native_authentication(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            network = {"chain_id": 1266, "network_id": "replacement-fixture"}
+            world = {"accounts": {}, "protocol": {"published-policy": [1]}}
+            authority = {**network, "epoch": 1, "epoch_start_height": 1, "epoch_end_height": 1000,
+                         "validators": [], "protected": {"initial_world_state": world,
+                                                          "ingress_kem_registry": {"records": []}}}
+            recipe = {"authority": authority, "network": network, "authority_trust_key_id": "root"}
+            genesis = {"unsigned": {"format_version": 2, "network": network}, "genesis_hash": "a" * 64,
+                       "signer_key_id": "root"}
+            pins = {"apqe_report_sha256": "e" * 64}
+
+            def pin(name, data):
+                raw = json.dumps(data).encode()
+                (directory / name).write_bytes(raw)
+                pins[name] = hashlib.sha256(raw).hexdigest()
+
+            pin("genesis.json", genesis)
+            pin("authority.json", {"payload": authority})
+            pin("authority-root.pub", "fixture")
+            tool = directory / "authority-root.pub"
+            with patch.object(formation.subprocess, "run") as run:
+                run.return_value.returncode = 0
+                run.return_value.stdout = b"verified Genesis/authority binding genesis_hash=" + b"a" * 64
+                verify = lambda: formation.verify_signed_inputs(directory, {"allocations": {}}, recipe,
+                                                                 pins, tool, tool)
+                self.assertTrue(verify()["native_genesis_authority_binding_verified"])
+                invocation = run.call_args.args[0]
+                self.assertEqual(invocation[1], "verify-binding")
+                self.assertNotEqual(Path(invocation[2]).parent, directory)
+                self.assertEqual(invocation[-1], pins["apqe_report_sha256"])
+                run.return_value.returncode = 1
+                with self.assertRaisesRegex(ValueError, "native APQE"):
+                    verify()
+                pin("authority.json", {"payload": {**authority, "protected": {
+                    **authority["protected"], "initial_world_state": {"accounts": {}, "protocol": {}}}}})
+                with self.assertRaisesRegex(ValueError, "initial World"):
+                    verify()

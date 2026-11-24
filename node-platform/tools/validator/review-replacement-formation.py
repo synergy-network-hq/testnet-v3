@@ -5,6 +5,8 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import subprocess
+import tempfile
 
 
 HOSTS = {"val1", "val2", "val3", "val4", "val6"}
@@ -24,7 +26,7 @@ def unique_fields(pairs):
     return result
 
 
-def read_json(path, limit, expected=None):
+def read_bytes(path, limit, expected=None):
     if path.is_symlink() or not path.is_file():
         raise ValueError(f"{path.name} must be a regular public input")
     with path.open("rb") as stream:
@@ -33,7 +35,11 @@ def read_json(path, limit, expected=None):
         raise ValueError(f"{path.name} exceeds its byte limit")
     if expected is not None and hashlib.sha256(raw).hexdigest() != expected:
         raise ValueError(f"{path.name} does not match the reviewed SHA-256")
-    return json.loads(raw, object_pairs_hook=unique_fields)
+    return raw
+
+
+def read_json(path, limit, expected=None):
+    return json.loads(read_bytes(path, limit, expected), object_pairs_hook=unique_fields)
 
 
 def review_allocations(recipe, approved):
@@ -175,14 +181,105 @@ def review(directory, approval):
             "native_signature_verification_required": True}
 
 
+def match_signed_world(recipe, authority, allocations):
+    review_allocations({"authority": authority}, allocations)
+    prior = recipe["authority"]["protected"]["initial_world_state"]
+    signed = authority["protected"]["initial_world_state"]
+    expected_accounts = {address: {"code_hash": None, **account} for address, account in prior["accounts"].items()}
+    signed_protocol = dict(signed["protocol"])
+    expected_protocol = dict(prior["protocol"])
+    treasury = recipe.get("canary_testing_treasury")
+    if treasury is not None:
+        address = treasury["address"]
+        expected_accounts[address] = {"balance_nwei": TREASURY_NWEI, "nonce": 0, "code_hash": None}
+        binding = "identity_authorization_bindings"
+        old = json.loads(bytes(expected_protocol.pop(binding, b"{}")), object_pairs_hook=unique_fields)
+        new = json.loads(bytes(signed_protocol.pop(binding)), object_pairs_hook=unique_fields)
+        if address in old or address not in new or {k: v for k, v in new.items() if k != address} != old:
+            raise ValueError("signed treasury changed unrelated identity bindings")
+    if signed["accounts"] != expected_accounts or signed_protocol != expected_protocol:
+        raise ValueError("signed initial World differs from the reviewed formation recipe")
+
+
+def verify_signed_inputs(directory, approval, recipe, pins, tool, report):
+    files = {"genesis.json": 16 * 1024 * 1024, "authority.json": 1024 * 1024, "authority-root.pub": 8192}
+    expected_pins = set(files) | {"apqe_report_sha256"}
+    if set(pins) != expected_pins or any(
+            not isinstance(value, str) or not HEX.fullmatch(value) or value == "0" * 64
+            for value in pins.values()):
+        raise ValueError("exact signed artifact and APQE report pins required")
+    raw = {name: read_bytes(directory / name, limit, pins[name]) for name, limit in files.items()}
+    genesis = json.loads(raw["genesis.json"], object_pairs_hook=unique_fields)
+    authority = json.loads(raw["authority.json"], object_pairs_hook=unique_fields)["payload"]
+    unsigned = genesis["unsigned"]
+    logical_hash = genesis["genesis_hash"]
+    if not isinstance(logical_hash, str) or not HEX.fullmatch(logical_hash) or logical_hash == "0" * 64:
+        raise ValueError("invalid signed Genesis identity")
+    if (unsigned["format_version"] != 2 or unsigned["network"] != recipe["network"]
+            or genesis["signer_key_id"] != recipe["authority_trust_key_id"]):
+        raise ValueError("signed Genesis differs from the selected formation network or trust-key ID")
+    proposed = recipe["authority"]
+    if any(authority[key] != proposed[key] for key in ("chain_id", "network_id", "epoch",
+                                                      "epoch_start_height", "epoch_end_height")):
+        raise ValueError("signed authority coordinates differ from reviewed formation")
+    def members(entries):
+        return sorted(entries, key=lambda entry: entry["record"]["validator_id"])
+    if members(authority["validators"]) != members(proposed["validators"]):
+        raise ValueError("signed authority roster or weights differ from reviewed formation")
+    protected = authority["protected"]
+    approved_policy = proposed["protected"]
+    policy_fields = ("version", "cutoff_relationship", "epoch_start_timestamp_ms", "target_block_time_ms",
+                     "parameters", "assigned_cluster_id", "wallet_dispatch")
+    if any(protected.get(key) != approved_policy.get(key) for key in policy_fields):
+        raise ValueError("signed authority policy differs from reviewed formation")
+    def ingress(registry):
+        return sorted(registry["records"], key=lambda record: (record["validator_id"], record["key_id"]))
+    if ingress(protected["ingress_kem_registry"]) != ingress(approved_policy["ingress_kem_registry"]):
+        raise ValueError("signed authority ingress keys differ from reviewed formation")
+    match_signed_world(recipe, authority, approval["allocations"])
+
+    # The native verifier receives the exact pinned bytes above, never a mutable
+    # path from the approval package. It verifies independently with the root.
+    with tempfile.TemporaryDirectory(prefix="posy-signed-formation-") as staging:
+        root = Path(staging)
+        for name, contents in raw.items():
+            (root / name).write_bytes(contents)
+        result = subprocess.run(
+            [str(tool.resolve(strict=True)), "verify-binding", str(root / "genesis.json"),
+             str(root / "authority-root.pub"), str(root / "authority.json"),
+             "--apqe-report", str(report.resolve(strict=True)),
+             "--apqe-report-sha256", pins["apqe_report_sha256"]],
+            capture_output=True, timeout=60,
+        )
+        expected = f"verified Genesis/authority binding genesis_hash={logical_hash}".encode()
+        if result.returncode or result.stdout.strip() != expected:
+            raise ValueError("native APQE Genesis and authority binding verification failed")
+    return {"genesis_hash": logical_hash, "signed_artifact_sha256": pins,
+            "native_genesis_authority_binding_verified": True}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path, help="directory containing the pinned public inputs")
     parser.add_argument("expectations", type=Path, help="independently reviewed network, recipe and host pins")
+    parser.add_argument("--signed-directory", type=Path, help="public signed Genesis, authority and root")
+    parser.add_argument("--signed-pins", type=Path, help="independent signed artifact and provider SHA-256 pins")
+    parser.add_argument("--genesis-tool", type=Path, help="qualified native synergy-genesis verifier")
+    parser.add_argument("--apqe-report", type=Path, help="approved native APQE provider report")
     args = parser.parse_args()
+    signed = (args.signed_directory, args.signed_pins, args.genesis_tool, args.apqe_report)
+    if any(signed) and not all(signed):
+        parser.error("signed verification requires all four signed verification inputs")
     try:
-        result = review(args.directory, read_json(args.expectations, 16 * 1024))
-    except (KeyError, TypeError, ValueError, OSError) as error:
+        approval = read_json(args.expectations, 16 * 1024)
+        result = review(args.directory, approval)
+        if args.signed_directory:
+            recipe = read_json(args.directory / "recipe.json", 1024 * 1024, approval["recipe_sha256"])
+            result["signed_verification"] = verify_signed_inputs(
+                args.signed_directory, approval, recipe, read_json(args.signed_pins, 8192),
+                args.genesis_tool, args.apqe_report,
+            )
+    except (KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError) as error:
         parser.exit(1, f"Formation input review failed: {error}\n")
     print(json.dumps(result, sort_keys=True))
 
