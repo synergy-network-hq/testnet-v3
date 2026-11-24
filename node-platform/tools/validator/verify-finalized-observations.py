@@ -82,10 +82,14 @@ def fetch_proof(endpoint, height, kind, request=request_page):
     raise ValueError("proof exceeded the continuation page limit")
 
 
-def subject(result, chain, network, genesis, height):
+def subject(result, chain, network, genesis, height, *, witness_only=False):
     finalized = result.get("finalized", {})
-    commitments = dict(block_id=finalized.get("block_id"), state_root=result.get("state_root"),
+    commitments = dict(block_id=finalized.get("block_id"),
                        protected_execution_root=finalized.get("protected_execution_root"))
+    if witness_only:
+        commitments["finality_certificate_id"] = finalized.get("finality_certificate_id")
+    else:
+        commitments["state_root"] = result.get("state_root")
     if (result.get("verified") is not True or result.get("chain_id") != chain
             or result.get("network_id") != network or result.get("genesis_hash") != genesis
             or finalized.get("height") != height
@@ -131,12 +135,16 @@ def main():
     cli.add_argument("--network", required=True)
     cli.add_argument("--genesis", required=True)
     cli.add_argument("--height", type=int, required=True)
+    cli.add_argument("--witness-only", action="store_true",
+                     help="authenticate retained three-QC finality without the original block preimage")
     cli.add_argument("--through-height", type=int, help="verify up to eight consecutive heights")
     cli.add_argument("--require-epoch-transition", action="store_true")
     args = cli.parse_args()
     last = args.height if args.through_height is None else args.through_height
     if not args.height <= last < args.height + MAX_HEIGHTS:
         cli.error("select one to eight consecutive finalized heights")
+    if args.witness_only and args.through_height is not None:
+        cli.error("a linked range requires original block preimages")
     if args.require_epoch_transition and last == args.height:
         cli.error("an epoch transition requires at least two heights")
     endpoints = [urlsplit(value) for value in args.observer]
@@ -159,14 +167,18 @@ def main():
                 agreed = None
                 for endpoint in args.observer:
                     finality.write_bytes(fetch_proof(endpoint, height, "finality"))
-                    block_bytes = fetch_proof(endpoint, height, "block_commitment")
-                    block.write_bytes(block_bytes)
+                    command = [str(node), "finality-proof", "verify", str(config), str(finality)]
+                    if not args.witness_only:
+                        block_bytes = fetch_proof(endpoint, height, "block_commitment")
+                        block.write_bytes(block_bytes)
+                        command.append(str(block))
                     outcome = subprocess.run(
-                        [str(node), "finality-proof", "verify", str(config), str(finality), str(block)],
+                        command,
                         check=True, capture_output=True, timeout=90,
                     )
                     native = json.loads(outcome.stdout)
-                    observed = subject(native, args.chain, args.network, args.genesis, height)
+                    observed = subject(native, args.chain, args.network, args.genesis, height,
+                                       witness_only=args.witness_only)
                     if range_mode:
                         observed.update(consensus_position(native, block_bytes))
                     if agreed is not None and agreed != observed:
@@ -183,6 +195,8 @@ def main():
 
     result = dict(verified=True, chain_id=args.chain, network_id=args.network,
                   genesis_hash=args.genesis, observer_count=len(endpoints))
+    if args.witness_only:
+        result["block_preimage_verified"] = False
     if range_mode:
         result.update(start_height=args.height, through_height=last, epoch_transitions=transitions,
                       observations=observations)

@@ -2,6 +2,8 @@ import base64
 import hashlib
 import importlib.util
 import json
+import io
+from contextlib import redirect_stdout
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -83,3 +85,27 @@ class FinalityObservationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, r"block_commitment at H9704 .*not retained"):
                 verifier.request_page("https://observer", params)
             self.assertEqual(process.call_args.args[0].get_header("User-agent"), verifier.USER_AGENT)
+
+    def test_witness_only_invokes_native_verifier_without_block_preimage(self):
+        genesis = "a" * 64
+        args = ["verify", "--observer", "https://example.test", "--node", __file__,
+                "--config", __file__, "--chain", "99999", "--network", "canary",
+                "--genesis", genesis, "--height", "9704", "--witness-only"]
+        native = dict(verified=True, chain_id=99999, network_id="canary", genesis_hash=genesis,
+                      finalized=dict(height=9704, block_id="b" * 64,
+                                     protected_execution_root="c" * 64,
+                                     finality_certificate_id="d" * 64))
+        with (patch("sys.argv", args),
+              patch.object(verifier, "fetch_proof", return_value=b"original") as fetch,
+              patch.object(verifier.subprocess, "run") as run, redirect_stdout(io.StringIO()) as out):
+            run.return_value.stdout = json.dumps(native).encode()
+            verifier.main()
+            fetch.assert_called_once_with("https://example.test", 9704, "finality")
+            command = run.call_args.args[0]
+            self.assertEqual(command[1:3], ["finality-proof", "verify"])
+            self.assertEqual(len(command), 5)
+            self.assertEqual(Path(command[-1]).name, "finality.json")
+        result = json.loads(out.getvalue())
+        self.assertFalse(result["block_preimage_verified"])
+        self.assertNotIn("state_root", result)
+        self.assertEqual(result["finality_certificate_id"], "d" * 64)
