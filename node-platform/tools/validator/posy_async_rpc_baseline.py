@@ -312,7 +312,7 @@ def validate_block_views(views, height, error=ValueError, *, compare=True):
     for name, block in views.items():
         if (not isinstance(block, dict) or block.get("height") != height
                 or not all(isinstance(block.get(key), str) and block[key]
-                           for key in ("block_hash", "state_root", "finality_certificate_id", "protected_execution_root"))
+                           for key in ("block_hash", "parent_block_hash", "state_root", "finality_certificate_id", "protected_execution_root"))
                 or not isinstance(block.get("transactions"), list)
                 or not isinstance(block.get("receipts"), list)
                 or len(block["transactions"]) != len(block["receipts"])
@@ -335,6 +335,9 @@ def observe_intervals(previous, current):
     delta = current["height"] - previous["height"]
     if delta < 0:
         raise ValueError("validator finalized height regressed")
+    if delta == 0 and any(previous.get(key) != current.get(key)
+                          for key in ("block_id", "state_root", "finality_certificate_id")):
+        raise ValueError("validator changed a finalized commitment at the same height")
     return {"interval_seconds": current["observed_mono"] - previous["observed_mono"] if delta == 1 else None,
             "height_gap": max(0, delta - 1)}
 
@@ -510,6 +513,7 @@ def run_async(args, h):
     last_progress = start
     last_common = common
     scanned = common
+    scanned_commitment = tuple(state["val2"][field] for field in ("block_hash", "state_root", "finality_certificate_id"))
     block_previous = {}
     intervals = {name: BoundedDistribution() for name in endpoints}
     backlog_peak = {"authoring": 0, "submitted_unfinalized": 0}
@@ -629,12 +633,18 @@ def run_async(args, h):
             # from a persistent validator lag; no protocol wait is introduced.
             h.sample_fleet(endpoints, args.network_id, native_tips=True, expected_chain_id=chain_id,
                            native_prior_state=state)
+        tips = {}
         for name, item in readings.items():
             native = item["native"]
             commitment = native.get("common_finalized_commitment")
             height = native["finalized_height"]
             if not isinstance(commitment, dict) or commitment.get("height") != height:
                 raise E("async telemetry lacks exact latest finalized commitment")
+            tip = tuple(commitment.get(key) for key in ("block_id", "state_root", "finality_certificate_id"))
+            if not all(isinstance(value, str) and value for value in tip):
+                raise E("async telemetry has an incomplete finalized commitment")
+            if tips.setdefault(height, tip) != tip:
+                raise E("validators disagree at the same finalized telemetry height")
             current = {"height": height, "block_id": commitment.get("block_id"), "state_root": commitment.get("state_root"),
                        "finality_certificate_id": commitment.get("finality_certificate_id"), "observed_mono": item["observed_mono"],
                        "query_started_mono": item["query_started_mono"],
@@ -651,7 +661,7 @@ def run_async(args, h):
         backlog_peak["submitted_unfinalized"] = max(backlog_peak["submitted_unfinalized"], len(pending))
         append({"kind": "fleet_sample", "observed_mono": time.monotonic(), "by_validator": readings,
                 "backlog": {"authoring": len(jobs), "submitted_unfinalized": len(pending)}})
-        return min(heights)
+        return min(heights), tips
 
     def retire(record):
         with published_lock:
@@ -686,8 +696,10 @@ def run_async(args, h):
                 record["raw_admission_ref"] = reference
                 record.pop("raw_proof_ref", None)
 
-    def finalized_blocks(height):
-        nonlocal scanned
+    def finalized_blocks(height, tips):
+        nonlocal scanned, scanned_commitment
+        if scanned in tips and tips[scanned] != scanned_commitment:
+            raise E("async finalized block differs from the observed finalized tip")
         # Exact forward-only bounded reads, never global transaction-history scans.
         for block_height in range(scanned + 1, min(height, scanned + MAX_BLOCKS_PER_SAMPLE) + 1):
             # Keep one canonical block plus at most one comparison response,
@@ -709,6 +721,11 @@ def run_async(args, h):
                         "observed_mono": time.monotonic(), "height": block_height,
                         "canonical_sha256": fingerprint.hex(), "canonical_block_ref": next(iter(block_refs.values()))})
                 del view
+            if block["parent_block_hash"] != scanned_commitment[0]:
+                raise E("native finalized block does not extend the reconciled chain")
+            commitment = tuple(block[field] for field in ("block_hash", "state_root", "finality_certificate_id"))
+            if block_height in tips and tips[block_height] != commitment:
+                raise E("async finalized block differs from the observed finalized tip")
             append({"kind": "common_finalized_block", "observed_mono": time.monotonic(), "height": block_height,
                     "block_id": block["block_hash"], "transaction_count": len(block["transactions"])})
             by_wallet = {}
@@ -761,6 +778,7 @@ def run_async(args, h):
                         wallet["outstanding"].pop(record["nonce"], None)
                     retire(record)
             scanned = block_height
+            scanned_commitment = commitment
             compact_consumed()
 
     def harvest():
@@ -786,7 +804,7 @@ def run_async(args, h):
     receipt_cursor = 0
     def observe():
         nonlocal last_common, last_progress, receipt_cursor
-        common = sample()
+        common, tips = sample()
         if common < last_common:
             raise E("common finalized height regressed")
         if common > last_common:
@@ -794,7 +812,7 @@ def run_async(args, h):
             last_common = common
         elif time.monotonic() - last_progress > args.maximum_gap_seconds:
             raise E("async finality stalled beyond declared gap budget")
-        finalized_blocks(common)
+        finalized_blocks(common, tips)
         with published_lock:
             pending_snapshot = list(pending.values())
         receipt_started = time.monotonic()
@@ -919,6 +937,7 @@ def run_async(args, h):
             native_stage_measurement_basis="authenticated RPC latest-stage receipt observations only; polling can skip stages; actual native stage TPS/timestamps remain unknown",
             independently_verified_tps=None,
             finality_measurement_basis="cross_observer_rpc_reconciliation",
+            observed_finalized_range={"anchor_height": common, "scanned_through_height": scanned},
             independent_three_qc_verification=False,
             submitted_tps=None if closed else totals.counts["submitted_window"] / args.duration_seconds,
             admitted_tps=None if closed else totals.counts["admitted_window"] / args.duration_seconds,

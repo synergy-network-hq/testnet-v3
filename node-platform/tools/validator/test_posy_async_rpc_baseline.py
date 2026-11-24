@@ -132,7 +132,7 @@ class AsyncProofTests(unittest.TestCase):
         self.assertNotEqual(adapter.processing_receipt_id(encoded), adapter.processing_receipt_id(json.dumps(json.loads(encoded), sort_keys=True).encode()))
 
     def test_block_mismatch_and_duplicate_receipts_reject(self):
-        block = {"height": 100, "block_hash": "block", "state_root": "state", "finality_certificate_id": "qc",
+        block = {"height": 100, "block_hash": "block", "parent_block_hash": "parent", "state_root": "state", "finality_certificate_id": "qc",
                  "protected_execution_root": "execution", "transactions": [{}], "receipts": [{"transaction_id": "tx"}]}
         views = {name: copy.deepcopy(block) for name in harness.VALIDATORS}
         self.assertEqual(adapter.validate_block_views(views, 100)["height"], 100)
@@ -150,6 +150,9 @@ class AsyncProofTests(unittest.TestCase):
         self.assertEqual(adapter.observe_intervals(previous, {"height": 14, "observed_mono": 3.0}), {"interval_seconds": None, "height_gap": 3})
         with self.assertRaises(ValueError):
             adapter.observe_intervals(previous, {"height": 9, "observed_mono": 3.0})
+        with self.assertRaisesRegex(ValueError, "changed a finalized commitment"):
+            adapter.observe_intervals({**previous, "block_id": "previous"},
+                                      {**previous, "block_id": "conflict", "observed_mono": 3.0})
 
     def test_drain_default_is_unbounded_and_explicit_control_is_not_tx_latency(self):
         self.assertIsNone(harness.operational_drain_deadline(SimpleNamespace(), 10))
@@ -229,6 +232,11 @@ class AsyncProofTests(unittest.TestCase):
 
     def test_unhealthy_chain_stops_default_drain_without_resubmit(self):
         self.simulated_async(inclusion_delay=90, max_tx=1, stalled=True, failure="finality stalled")
+
+    def test_matching_rpc_blocks_cannot_replace_the_reconciled_parent(self):
+        report, _ = self.simulated_async(max_tx=1, corrupt="parent",
+                                         failure="does not extend the reconciled chain")
+        self.assertFalse(report["measurement_complete"])
 
     def test_future_nonces_share_one_finalized_block_without_fabricated_account_snapshots(self):
         report, rows = self.simulated_async(inclusion_delay=15, max_tx=4, per_wallet=4, batch=True)
@@ -362,7 +370,9 @@ class AsyncProofTests(unittest.TestCase):
                 return 100 + int((min(clock.monotonic(), 15) if stalled else clock.monotonic()) / cadence_seconds)
             def fleet(*args, **kwargs):
                 self.assertEqual(kwargs["expected_chain_id"], 9001)
-                return {name: {"common_height": height(), "height": height(), "native_epoch": 1} for name in observers}
+                return {name: {"common_height": height(), "height": height(), "native_epoch": 1,
+                               "block_hash": str(height()), "state_root": "state", "finality_certificate_id": "qc"}
+                        for name in observers}
             def account(endpoints, address, at, **kwargs):
                 own = [tx for tx in included if tx["height"] <= at]
                 sender = address in authored_by_sender
@@ -420,7 +430,8 @@ class AsyncProofTests(unittest.TestCase):
                 if method == "synergy_getBlock":
                     at = params["height"]
                     own = [tx for tx in included if tx["height"] == at]
-                    return {"height": at, "block_hash": str(at), "state_root": "state", "finality_certificate_id": "qc", "protected_execution_root": "execution",
+                    return {"height": at, "block_hash": str(at), "parent_block_hash": "foreign" if corrupt == "parent" and own else str(at - 1),
+                            "state_root": "state", "finality_certificate_id": "qc", "protected_execution_root": "execution",
                             "transactions": [tx["transaction"] for tx in own], "receipts": [tx["receipt"] for tx in own]}
                 self.fail("unexpected RPC: " + method)
             rows = []
