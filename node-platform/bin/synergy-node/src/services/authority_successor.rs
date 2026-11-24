@@ -747,7 +747,9 @@ fn check_treasury_processing_context(config: &NodeConfiguration, request_path: &
     let p = &request["parameters"];
     let text = p["processing_context_json"].as_str().ok_or("treasury processing bytes missing")?;
     let governance=request["operation"]=="ethereum_activation_fee_prepare";
-    if request["version"] != 1 || !(request["operation"] == "treasury_send_prepare"||governance)
+    let funding=request["operation"]=="ethereum_funding_prepare";
+    if request["version"] != 1 || !(request["operation"] == "treasury_send_prepare"||governance||funding)
+        || funding && (p["ethereum_funding"]!=true || !p["governance_execution"].is_null())
         || text.is_empty() || text.len() > 1024 * 1024
         || p["processing_context_sha256"] != apqe_transport::sha256(text.as_bytes())
     {
@@ -792,6 +794,27 @@ fn check_treasury_processing_context(config: &NodeConfiguration, request_path: &
         result["governance_execution_sha256"]=serde_json::json!(apqe_transport::sha256(&bytes));
         result["governance_gas_limit"]=serde_json::json!(gas);
         result["governance_maximum_fee_nwei"]=serde_json::json!((u128::from(gas)*40).to_string());
+    }
+    if funding {
+        let recipient=p["receiver"].as_str().ok_or("funding recipient absent")?;
+        let amount=p["amount_nwei"].as_str().ok_or("funding amount absent")?;
+        let value=amount.parse::<u128>().map_err(|_|"invalid funding amount")?;
+        if value.to_string()!=amount {return Err("canonical funding amount required".into());}
+        let funding=synergy_aivm::ethereum_execution::NativeEvmFunding::from_evm_address(recipient,value).map_err(|e|e.to_string())?;
+        let root=config.storage.data_directory.parent().ok_or("managed treasury root absent")?;
+        if config.storage.data_directory!=root.join("data") {return Err("canonical managed data directory required".into());}
+        let public:serde_json::Value=serde_json::from_slice(&apqe_transport::read(&root.join("keys/formation-treasury/treasury-public.json"),128*1024,false)?)
+            .map_err(|_|"managed treasury public identity invalid")?;
+        let payer=public["address"].as_str().ok_or("managed treasury payer absent")?;
+        let nonce=p["nonce"].as_u64().ok_or("funding nonce absent")?;
+        let SimplifiedFinalityParent::Genesis{genesis_hash,..}=&origin.anchor_parent else {
+            return Err("funding authority has no authenticated Genesis origin".into());
+        };
+        let query=crate::services::rpc::CanonicalQueryStore::load_with_world_budget(config.storage.data_directory.clone(),
+            synergy_state::world_resources::WorldResourceBudget::new(config.storage.world_memory_budget_bytes))?
+            .with_wallet_finalized_authority(genesis_hash,
+                Arc::new(std::sync::RwLock::new(Some(tip.clone()))));
+        result["ethereum_funding"]=query.ethereum_funding_review(funding,payer,nonce).map_err(|e|e.message)?;
     }
     Ok(result)
 }

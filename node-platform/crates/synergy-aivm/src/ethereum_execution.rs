@@ -336,6 +336,83 @@ pub fn execute_ordered_legacy_evm(
 pub fn conventional_evm_account_key(address: [u8; 20]) -> String {
     format!("0x{}", hex(&address))
 }
+
+/// Closed native value-transfer input. The ordinary native signature covers
+/// these exact bytes; it grants no ECDSA authority over the debited account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeEvmFunding {
+    pub recipient: [u8; 20],
+    pub amount_nwei: u128,
+}
+impl NativeEvmFunding {
+    pub const ENCODED_LENGTH: usize = 37;
+    /// Same two-account native value transition as an ordinary SNRG transfer.
+    pub const GAS_LIMIT: u64 = 21_000;
+    /// Reuse the canonical bytes20/EIP55 codec. Parsing never establishes a
+    /// protected registration or spending authority over either representation.
+    pub fn from_evm_address(recipient: &str, amount_nwei: u128) -> Result<Self, EvmExecutionError> {
+        let body = recipient.strip_prefix("0x").ok_or_else(|| EvmExecutionError::InvalidTransaction("checksummed EVM recipient required".into()))?;
+        let account = synergy_address::parse_protected_wallet_address(&format!("synw{body}"))
+            .map_err(EvmExecutionError::InvalidTransaction)?;
+        let value = Self { recipient: *account.as_bytes(), amount_nwei };
+        value.encode()?;
+        Ok(value)
+    }
+    pub fn encode(self) -> Result<[u8; Self::ENCODED_LENGTH], EvmExecutionError> {
+        if self.recipient == [0; 20] || self.amount_nwei == 0 {
+            return Err(EvmExecutionError::InvalidTransaction("positive EOA funding required".into()));
+        }
+        let mut bytes = [0; Self::ENCODED_LENGTH];
+        bytes[0] = 1;
+        bytes[1..21].copy_from_slice(&self.recipient);
+        bytes[21..].copy_from_slice(&self.amount_nwei.to_be_bytes());
+        Ok(bytes)
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self, EvmExecutionError> {
+        if bytes.len() != Self::ENCODED_LENGTH || bytes[0] != 1 {
+            return Err(EvmExecutionError::InvalidTransaction("invalid native EOA funding input".into()));
+        }
+        let request = Self {
+            recipient: bytes[1..21].try_into().map_err(|_| EvmExecutionError::InvalidContext)?,
+            amount_nwei: u128::from_be_bytes(bytes[21..].try_into().map_err(|_| EvmExecutionError::InvalidContext)?),
+        };
+        request.encode()?;
+        Ok(request)
+    }
+
+    /// Return an ordinary atomic native debit/credit in the SAME World. The
+    /// canonical native owner must first authenticate the signed transaction
+    /// and active governed EVM policy. Contract calls remain EVM execution.
+    pub fn prepare(
+        self, world: &WorldState, chain_id: u64, payer: &str, nonce: u64,
+    ) -> Result<synergy_state::StateDiff, EvmExecutionError> {
+        self.encode()?;
+        let policy = EvmCompatibilityPolicy::load(world)?;
+        if chain_id != policy.chain_id { return Err(EvmExecutionError::WrongNetwork); }
+        if !synergy_address::is_valid_address(payer) || payer.starts_with("synw") || nonce == u64::MAX {
+            return Err(EvmExecutionError::InvalidTransaction("ordinary native funding authority required".into()));
+        }
+        if protected(world, Address::from(self.recipient)) {
+            return Err(EvmExecutionError::ProtectedAccount);
+        }
+        let target = evm_account_key(world, self.recipient)?;
+        let source = world.accounts.get(payer).ok_or_else(|| EvmExecutionError::InvalidTransaction("native payer absent".into()))?;
+        if source.nonce != nonce || source.code_hash.is_some() || source.balance_nwei < self.amount_nwei {
+            return Err(EvmExecutionError::InvalidTransaction("native payer nonce or funds insufficient".into()));
+        }
+        if world.accounts.get(&target).is_some_and(|account| account.code_hash.is_some()) {
+            return Err(EvmExecutionError::InvalidTransaction("native funding requires a conventional EOA".into()));
+        }
+        use synergy_state::AccountChange;
+        Ok(synergy_state::StateDiff {
+            changes: vec![
+                AccountChange { account: payer.into(), debit_nwei: self.amount_nwei, credit_nwei: 0, expected_nonce: Some(nonce), code_hash: None },
+                AccountChange { account: target, debit_nwei: 0, credit_nwei: self.amount_nwei, expected_nonce: None, code_hash: None },
+            ],
+            protocol_changes: Vec::new(),
+        })
+    }
+}
 fn protected(world: &WorldState, address: Address) -> bool {
     world
         .protocol
@@ -861,6 +938,7 @@ fn run_kernel<'a>(
             // Only the separate read-only API can waive these checks. Its output
             // contains neither state nor an executable candidate/authorization.
             cfg.disable_base_fee = simulation;
+            cfg.disable_fee_charge = simulation;
             cfg.disable_eip3607 = simulation;
             cfg.disable_nonce_check = simulation;
         })
@@ -880,6 +958,7 @@ pub struct EvmCallRequest<'a> {
     pub value_wei: [u8; 32],
     pub data: &'a [u8],
     pub gas_limit: u64,
+    pub gas_price_wei: u128,
 }
 pub struct EvmCallOutput {
     pub success: bool,
@@ -898,8 +977,9 @@ impl std::ops::Deref for EvmCallResult {
 }
 /// Unsigned RPC simulation, with the same opcode, state and block semantics.
 /// The original native state is immutable, and no candidate or authorization
-/// can be extracted from the result. GASPRICE defaults to zero for this view;
-/// BASEFEE still reports the selected block's actual native denomination.
+/// can be extracted from the result. GASPRICE uses the supplied view price;
+/// BASEFEE reports the governed fee. The read-only kernel disables fee charging
+/// without changing the price visible to contract opcodes.
 pub fn call_evm(
     request: &EvmCallRequest<'_>,
     context: &EvmBlockContext<'_>,
@@ -935,7 +1015,7 @@ pub fn call_evm(
         tx_type: 0,
         caller: Address::from(request.from),
         gas_limit: request.gas_limit,
-        gas_price: 0,
+        gas_price: request.gas_price_wei,
         kind: request
             .recipient
             .map(Address::from)

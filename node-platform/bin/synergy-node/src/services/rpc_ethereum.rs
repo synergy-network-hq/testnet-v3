@@ -78,6 +78,30 @@ pub(super) fn decode_raw_params(params: &Value) -> Result<Vec<u8>, RpcError> {
 }
 
 impl CanonicalQueryStore {
+    /// Closed native authoring review over the same finalized owners as public
+    /// EVM reads. It emits no carrier, signature or candidate state.
+    pub(crate) fn ethereum_funding_review(
+        &self, funding: synergy_aivm::ethereum_execution::NativeEvmFunding,
+        payer: &str, nonce: u64,
+    ) -> Result<Value, RpcError> {
+        let height = self.latest_finalized_height()?.ok_or_else(|| fail("finalized funding source absent"))?;
+        let recipient = hex(&funding.recipient);
+        let code = self.canonical_ethereum_query("eth_getCode", &json!([recipient, format!("0x{height:x}")]))?;
+        if code != "0x" { return Err(fail("native funding cannot bypass contract execution")); }
+        let (candidate, _) = self.finalized_at(height)?.ok_or_else(|| fail("finalized funding source retired"))?;
+        let (_, live) = self.wallet_finalized_authority.as_ref().ok_or_else(|| fail("funding authority absent"))?;
+        let authority = live.read().map_err(|_|fail("funding authority unavailable"))?.clone().ok_or_else(||fail("funding authority absent"))?;
+        funding.prepare(&candidate.state, authority.epoch.chain_id, payer, nonce).map_err(fail)?;
+        let fee = u128::from(synergy_aivm::ethereum_execution::NativeEvmFunding::GAS_LIMIT)
+            * u128::from(crate::services::execution::TESTNET_V3_BASE_FEE_NWEI);
+        if funding.amount_nwei.checked_add(fee).is_none_or(|cost|candidate.state.accounts[payer].balance_nwei<cost) {
+            return Err(fail("native funding amount and fee exceed finalized funds"));
+        }
+        Ok(json!({"recipient":recipient,"amount_nwei":funding.amount_nwei.to_string(),
+            "gas_limit":synergy_aivm::ethereum_execution::NativeEvmFunding::GAS_LIMIT,"maximum_fee_nwei":fee.to_string(),
+            "finalized_height":height,"block_hash":candidate.block_id,"state_root":candidate.state_root,
+            "policy_sha256":hex(&synergy_aegis::AegisProtectedPrimitives.sha256(&candidate.state.protocol[EVM_POLICY_KEY])).trim_start_matches("0x")}))
+    }
     pub(super) fn canonical_ethereum_query(
         &self,
         method: &str,
@@ -341,9 +365,6 @@ impl CanonicalQueryStore {
         }) || request
             .get("type")
             .is_some_and(|value| quantity(value) != Ok(0))
-            || request
-                .get("gasPrice")
-                .is_some_and(|value| word_quantity(value) != Ok([0; 32]))
         {
             return Err(RpcError::invalid_params(
                 "unsupported call override or typed transaction",
@@ -354,6 +375,12 @@ impl CanonicalQueryStore {
             .map(fixed::<20>)
             .transpose()?
             .unwrap_or([0; 20]);
+        let gas_price_word = request.get("gasPrice").map(word_quantity).transpose()?.unwrap_or([0; 32]);
+        if gas_price_word[..16] != [0; 16] {
+            return Err(RpcError::invalid_params("simulation gas price exceeds uint128 bound"));
+        }
+        let gas_price_wei = u128::from_be_bytes(gas_price_word[16..].try_into()
+            .map_err(|_| RpcError::invalid_params("invalid simulation gas price"))?);
         let recipient = request.get("to").map(fixed::<20>).transpose()?;
         let value = request
             .get("value")
@@ -424,6 +451,7 @@ impl CanonicalQueryStore {
             value_wei: value,
             data: &data,
             gas_limit: gas,
+            gas_price_wei,
         };
         let result = if method == "eth_estimateGas" {
             json!(format!(
@@ -568,6 +596,10 @@ impl CanonicalQueryStore {
         self.ethereum_block_view(height, authority, params[1].as_bool().unwrap())
     }
     fn complete_ethereum_block_schema(mut block: Value, raws: &[&[u8]]) -> Result<Value, RpcError> {
+        // This governed projection supports legacy signed transactions. The
+        // optional Ethereum baseFeePerGas field would advertise EIP1559 fee
+        // support to ordinary clients; expose the actual execution base fee
+        // under its explicit native extension instead. BASEFEE is unchanged.
         let mut fields = Vec::with_capacity(16);
         for (name, quantity) in [
             ("parentHash", false),
@@ -585,7 +617,6 @@ impl CanonicalQueryStore {
             ("extraData", false),
             ("mixHash", false),
             ("nonce", false),
-            ("baseFeePerGas", true),
         ] {
             if quantity {
                 let number = block[name]
@@ -734,7 +765,7 @@ impl CanonicalQueryStore {
             "sha3Uncles":hex(&synergy_aivm::ethereum::ethereum_keccak256(&[0xc0])),
             "gasLimit":format!("0x{:x}",policy.block_gas_limit),"gasUsed":format!("0x{:x}",roots.gas_used),
             "miner":hex(&policy.fee_collector),"mixHash":format!("0x{}",original.epoch.finalized_epoch_seed_root),"prevRandao":format!("0x{}",original.epoch.finalized_epoch_seed_root),
-            "extraData":hex(original.epoch.protocol_version.as_bytes()),"baseFeePerGas":format!("0x{:x}",u128::from(policy.base_fee_nwei)*1_000_000_000),
+            "extraData":hex(original.epoch.protocol_version.as_bytes()),"synergyExecutionBaseFeePerGas":format!("0x{:x}",u128::from(policy.base_fee_nwei)*1_000_000_000),
             "stateRoot":hex(&synergy_aivm::ethereum_projection::ethereum_state_root(&world,&self.world_budget).map_err(fail)?),"transactionsRoot":hex(&roots.transactions_root),"receiptsRoot":hex(&roots.receipts_root),
             "logsBloom":hex(&roots.logs_bloom),"transactions":transactions,
             "synergyProjectionProfile":policy.rpc_projection_policy,"synergyNativeStateRoot":format!("0x{}",candidate.state_root),
@@ -770,7 +801,7 @@ impl CanonicalQueryStore {
             "sha3Uncles":hex(&synergy_aivm::ethereum::ethereum_keccak256(&[0xc0])),
             "gasLimit":format!("0x{:x}",policy.block_gas_limit),"gasUsed":"0x0","miner":hex(&policy.fee_collector),
             "mixHash":format!("0x{}",authority.autonomous_processing_origin().epoch.finalized_epoch_seed_root),"prevRandao":format!("0x{}",authority.autonomous_processing_origin().epoch.finalized_epoch_seed_root),
-            "extraData":hex(authority.epoch.protocol_version.as_bytes()),"baseFeePerGas":format!("0x{:x}",u128::from(policy.base_fee_nwei)*1_000_000_000),
+            "extraData":hex(authority.epoch.protocol_version.as_bytes()),"synergyExecutionBaseFeePerGas":format!("0x{:x}",u128::from(policy.base_fee_nwei)*1_000_000_000),
             "stateRoot":hex(&synergy_aivm::ethereum_projection::ethereum_state_root(&world,&self.world_budget).map_err(fail)?),"transactionsRoot":hex(&roots.transactions_root),"receiptsRoot":hex(&roots.receipts_root),"logsBloom":hex(&roots.logs_bloom),"transactions":[],
             "synergyProjectionProfile":policy.rpc_projection_policy,"synergyNativeStateRoot":format!("0x{}",authority.autonomous_processing_origin().initial_world_state_root().map_err(fail)?),
             "synergyFinalityCertificateId":null,"synergyFinalityKind":"signed-genesis"}),

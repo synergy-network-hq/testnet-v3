@@ -551,13 +551,21 @@ fn verify_ethers_rpc(
           }
           const block=await p.getBlock(input.receipts[0].blockHash);if(!block||block.hash!==input.receipts[0].blockHash)throw Error('native block projection');
           const rawBlock=await p.send('eth_getBlockByNumber',[e.toQuantity(block.number),false]);
+          if(rawBlock.baseFeePerGas!=null||!/^0x[0-9a-f]+$/.test(rawBlock.synergyExecutionBaseFeePerGas))throw Error('legacy fee advertisement');
+          const fees=await p.getFeeData();
+          if(fees.gasPrice==null||fees.maxFeePerGas!=null||fees.maxPriorityFeePerGas!=null)throw Error('legacy fee discovery');
+          const ordinary=await wallet.connect(p).populateTransaction({to:'0x'+'35'.repeat(20),value:0n,gasLimit:21000n});
+          if(ordinary.type!==0||ordinary.chainId!==99999n||ordinary.gasPrice!==fees.gasPrice)throw Error('default signer legacy selection');
+          const signedDefault=e.Transaction.from(await wallet.signTransaction(ordinary));
+          if(signedDefault.type!==0||signedDefault.from!==wallet.address)throw Error('default signer EIP155 authorization');
+
           // Geth core/types/gen_header_json.go required fields and fixed widths;
           // this validates a genuine RPC result, not an invented header hash.
           for(const field of ['hash','parentHash','sha3Uncles','stateRoot','transactionsRoot','receiptsRoot'])
             if(!e.isHexString(rawBlock[field],32))throw Error('Ethereum header hash field '+field);
           if(!e.isHexString(rawBlock.miner,20)||!e.isHexString(rawBlock.logsBloom,256)||!e.isHexString(rawBlock.extraData)||e.dataLength(rawBlock.extraData)>32)
             throw Error('Ethereum header address/bloom/extraData schema');
-          for(const field of ['number','difficulty','gasLimit','gasUsed','timestamp','baseFeePerGas','totalDifficulty','size'])
+          for(const field of ['number','difficulty','gasLimit','gasUsed','timestamp','totalDifficulty','size'])
             if(typeof rawBlock[field]!=='string'||!/^0x(?:0|[1-9a-f][0-9a-f]*)$/.test(rawBlock[field]))throw Error('Ethereum header quantity '+field);
           for(const field of ['gasLimit','gasUsed','timestamp'])if(BigInt(rawBlock[field])>0xffffffffffffffffn)throw Error('Ethereum uint64 '+field);
           if(BigInt(rawBlock.gasUsed)>BigInt(rawBlock.gasLimit)||!Array.isArray(rawBlock.transactions)||!Array.isArray(rawBlock.uncles))throw Error('Ethereum block structure');
@@ -571,8 +579,8 @@ fn verify_ethers_rpc(
             const r=await p.send('eth_getTransactionReceipt',[hash]);
             rcpts.push(e.encodeRlp([qb(r.status),qb(r.cumulativeGasUsed),r.logsBloom,r.logs.map(log=>[log.address,log.topics,log.data])]));}
           if(trieRoot(txs)!==rawBlock.transactionsRoot||trieRoot(rcpts)!==rawBlock.receiptsRoot)throw Error('independent Ethereum MPT root mismatch');
-          const headerFields=['parentHash','sha3Uncles','miner','stateRoot','transactionsRoot','receiptsRoot','logsBloom','difficulty','number','gasLimit','gasUsed','timestamp','extraData','mixHash','nonce','baseFeePerGas'];
-          const quantities=new Set(['difficulty','number','gasLimit','gasUsed','timestamp','baseFeePerGas']);
+          const headerFields=['parentHash','sha3Uncles','miner','stateRoot','transactionsRoot','receiptsRoot','logsBloom','difficulty','number','gasLimit','gasUsed','timestamp','extraData','mixHash','nonce'];
+          const quantities=new Set(['difficulty','number','gasLimit','gasUsed','timestamp']);
           const header=headerFields.map(field=>quantities.has(field)?qb(rawBlock[field]):rawBlock[field]);
           const projected=e.encodeRlp([header,txs.map(raw=>e.decodeRlp(raw)),[]]);
           if(BigInt(e.dataLength(projected))!==BigInt(rawBlock.size))throw Error('independent projected RLP block size mismatch');

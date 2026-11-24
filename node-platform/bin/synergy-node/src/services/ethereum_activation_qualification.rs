@@ -141,7 +141,7 @@ fn proposal_window(
 fn real_apqe_governance_evm_scope_native_settlement_history_and_restart() {
     let provider = trusted_apqe_provider();
     let network = secure_fixture_network();
-    let (mut transaction, mut initial, mut account_secret) =
+    let (mut transaction, initial, mut account_secret) =
         funded_transaction_fixture_for_network_provider_chain(
             &network,
             10_000_000_000,
@@ -152,14 +152,6 @@ fn real_apqe_governance_evm_scope_native_settlement_history_and_restart() {
     let sender: [u8; 20] = hex_decode(counter["sender"].as_str().unwrap().trim_start_matches("0x"))
         .try_into()
         .unwrap();
-    initial.accounts.insert(
-        synergy_aivm::ethereum_execution::conventional_evm_account_key(sender),
-        synergy_state::AccountState {
-            balance_nwei: 10_000_000_000_000,
-            nonce: 0,
-            code_hash: None,
-        },
-    );
     let prepared = prepare_socket_fixture_with_protocol(
         initial,
         None,
@@ -515,6 +507,45 @@ fn real_apqe_governance_evm_scope_native_settlement_history_and_restart() {
         .unwrap();
     assert!(activation::is_active(&recovered, &reopened).unwrap());
     assert_eq!(recovered.activation_height, 286);
+    // The EOA starts with no Genesis allocation. A genuine ML-DSA-87 native
+    // transaction funds the same World account that executes signed EIP155.
+    let mut funding = transaction.clone();
+    funding.unsigned.class = synergy_transaction::TransactionClass::User;
+    funding.unsigned.receiver = funding.unsigned.sender.clone();
+    funding.unsigned.amount_nwei = 0;
+    funding.unsigned.nonce = reopened.accounts[&funding.unsigned.sender].nonce;
+    funding.unsigned.fee_limit.gas_limit = 21_000;
+    funding.unsigned.timestamp_unix = authority.consensus_timestamp_unix(287).unwrap();
+    funding.unsigned.payload = synergy_transaction::TransactionAction::Native {
+        module: "ethereum".into(), method: "fund_account".into(),
+        input: synergy_aivm::ethereum_execution::NativeEvmFunding { recipient: sender, amount_nwei: 1_000_000_000 }
+            .encode().unwrap().to_vec(),
+    }.encode().unwrap();
+    funding.signature = fixture_sign(&account_secret, SignatureAlgorithm::MlDsa87, "transaction-presented-key",
+        "SYNERGY-TRANSACTION-SIGNING-V1", None, &funding.unsigned.signing_bytes().unwrap());
+    let mut insufficient_gas = funding.clone();
+    insufficient_gas.unsigned.fee_limit.gas_limit = 1;
+    insufficient_gas.signature = fixture_sign(&account_secret, SignatureAlgorithm::MlDsa87, "transaction-presented-key",
+        "SYNERGY-TRANSACTION-SIGNING-V1", None, &insufficient_gas.unsigned.signing_bytes().unwrap());
+    funding.unsigned.nonce += 1;
+    funding.signature = fixture_sign(&account_secret, SignatureAlgorithm::MlDsa87, "transaction-presented-key",
+        "SYNERGY-TRANSACTION-SIGNING-V1", None, &funding.unsigned.signing_bytes().unwrap());
+    assert!(!reopened.accounts.contains_key(&synergy_aivm::ethereum_execution::conventional_evm_account_key(sender)));
+    let native_before = reopened.accounts[&funding.unsigned.sender].clone();
+    let funded = crate::services::execution::qualification_native_transition(configuration, authority.clone(),
+        vec![insufficient_gas.clone(), funding.clone()], 287, &reopened).unwrap();
+    assert_eq!(funded.receipts[0].error_code.as_deref(), Some("async_out_of_gas_v1"));
+    assert_eq!(funded.receipts[0].gas_used, 1);
+    assert_eq!(funded.receipts[1].status, synergy_transaction::ReceiptStatus::Applied);
+    assert_eq!(funded.receipts[1].gas_used, 21_000);
+    assert_eq!(funded.total_fees_nwei, 840_040);
+    assert_eq!(native_before.balance_nwei-funded.state.accounts[&funding.unsigned.sender].balance_nwei, 1_000_840_040);
+    assert_eq!(funded.state.accounts[&synergy_aivm::ethereum_execution::conventional_evm_account_key(sender)].balance_nwei, 1_000_000_000);
+    let replay = crate::services::execution::qualification_native_transition(configuration, authority.clone(),
+        vec![insufficient_gas, funding], 288, &funded.state).unwrap();
+    assert_eq!(replay.total_fees_nwei, 0);
+    assert_eq!(replay.state.as_ref(), funded.state.as_ref());
+    let reopened = funded.state;
     let mut hashes = expected;
     hashes.insert(286, synergy_posy::parse_hash_bytes(&parent).unwrap());
     hashes.retain(|height, _| *height >= 31);

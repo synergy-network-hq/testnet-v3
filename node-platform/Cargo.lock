@@ -4437,6 +4437,7 @@ dependencies = [
  "synergy-address",
  "synergy-address-engine",
  "synergy-aegis",
+ "synergy-aivm",
  "synergy-config",
  "synergy-etdag",
  "synergy-genesis",

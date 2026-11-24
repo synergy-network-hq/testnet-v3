@@ -653,6 +653,38 @@ impl NativeOperation for CanonicalNativeOperation {
             provider_failed:&local,
         };
         match (module, method) {
+            ("ethereum", "fund_account") => {
+                use synergy_aivm::ethereum_execution::{NativeEvmFunding, EVM_POLICY_KEY};
+                if transaction.unsigned.receiver != transaction.unsigned.sender {
+                    return Err("native EOA funding requires its signed zero-value self target".into());
+                }
+                let funding = NativeEvmFunding::decode(input).map_err(|e| e.to_string())?;
+                let selected = self.authority.ethereum_activation(state, None).map_err(|e| {
+                    local.store(true, std::sync::atomic::Ordering::Relaxed); e
+                })?.ok_or("native EOA funding requires governed EVM activation")?;
+                let active = super::ethereum_activation::is_active(&selected, state).map_err(|e| {
+                    local.store(true, std::sync::atomic::Ordering::Relaxed); e
+                })?;
+                if !active || context.block_height < selected.activation_height {
+                    return Err("native EOA funding precedes governed EVM activation".into());
+                }
+                let pin = synergy_posy::parse_hash_bytes(&selected.descriptor.policy_sha256).map_err(|e| {
+                    local.store(true, std::sync::atomic::Ordering::Relaxed); e.to_string()
+                })?;
+                if state.protocol.get(EVM_POLICY_KEY).map(|p| synergy_aegis::AegisProtectedPrimitives.sha256(p)) != Some(pin) {
+                    local.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return Err("native EOA funding policy differs from authenticated authority".into());
+                }
+                let state_diff = funding.prepare(state, self.chain_id, &transaction.unsigned.sender,
+                    transaction.unsigned.nonce).map_err(|e| {
+                        if matches!(e, synergy_aivm::ethereum_execution::EvmExecutionError::InvalidPolicy
+                            | synergy_aivm::ethereum_execution::EvmExecutionError::CorruptState) {
+                            local.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        e.to_string()
+                    })?;
+                Ok(TransactionDispatch { state_diff, gas_used: NativeEvmFunding::GAS_LIMIT })
+            }
             ("identity", "register_authorization") => {
                 if input.len() > synergy_identity::registration::MAX_AUTHORIZATION_TABLE_BYTES {
                     return Err("identity registration exceeds the byte limit".into());

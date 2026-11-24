@@ -74,6 +74,71 @@ fn context<'a>(hashes: &'a BTreeMap<u64, [u8; 32]>) -> EvmBlockContext<'a> {
     }
 }
 #[test]
+fn native_funding_uses_one_ledger_and_denies_protected_aliases_and_contracts() {
+    let (mut world, _) = setup();
+    let payer = "syna1trr36xu7z866hwyv4njkkun5wy0qzl63vhys";
+    world.accounts.insert(payer.into(), AccountState { balance_nwei: 10_000, nonce: 7, code_hash: None });
+    let request = NativeEvmFunding { recipient: [0x99; 20], amount_nwei: 1_234 };
+    let encoded = request.encode().unwrap();
+    assert_eq!(NativeEvmFunding::decode(&encoded).unwrap(), request);
+    assert!(NativeEvmFunding::decode(&encoded[..36]).is_err());
+    assert!(NativeEvmFunding::decode(&[encoded.as_slice(), &[0]].concat()).is_err());
+    let original = world.clone();
+    let diff = request.prepare(&world, 9969, payer, 7).unwrap();
+    assert_eq!(world, original);
+    diff.apply(&mut world).unwrap();
+    assert_eq!(world.accounts[payer].balance_nwei, 8_766);
+    assert_eq!(world.accounts[payer].nonce, 8);
+    assert_eq!(read_evm_account(&world, request.recipient).unwrap().balance_wei,
+        synergy_aivm::ethereum::nwei_to_wei(1_234));
+    let applied = world.clone();
+    assert!(diff.apply(&mut world).is_err());
+    assert_eq!(world, applied, "replayed funding changed the one ledger");
+    assert!(request.prepare(&original, 99999, payer, 7).is_err());
+    assert!(request.prepare(&original, 9969, payer, 8).is_err());
+    let mut protected = original.clone();
+    protected.protocol.insert(format!("apqe-protected-account-candidate/v1/policy/{}", "99".repeat(20)), b"malformed".to_vec());
+    assert!(matches!(request.prepare(&protected, 9969, payer, 7), Err(EvmExecutionError::ProtectedAccount)));
+    let alias = synergy_address::protected_wallet_native_representation(request.recipient).unwrap();
+    let mut ambiguous = original.clone();
+    ambiguous.accounts.insert(alias.clone(), AccountState::default());
+    assert!(matches!(request.prepare(&ambiguous, 9969, payer, 7), Err(EvmExecutionError::AmbiguousAccount)));
+    assert!(request.prepare(&ambiguous, 9969, &alias, 0).is_err());
+    let mut contract = original.clone();
+    contract.accounts.insert(conventional_evm_account_key(request.recipient), AccountState {
+        code_hash: Some("11".repeat(32)), ..AccountState::default()
+    });
+    assert!(request.prepare(&contract, 9969, payer, 7).is_err());
+    assert!(NativeEvmFunding { recipient: [0;20], ..request }.encode().is_err());
+    assert!(NativeEvmFunding { amount_nwei: 0, ..request }.encode().is_err());
+}
+#[test]
+fn unsigned_simulation_exposes_gasprice_and_basefee_without_charging_native_assets() {
+    use sha3::{Digest, Keccak256};
+    let (mut world, budget) = setup();
+    let code = unhex("3a6000524860205260406000f3");
+    let hash = Keccak256::digest(&code).iter().map(|b|format!("{b:02x}")).collect::<String>();
+    world.protocol.insert(format!("aivm/ethereum/v1/code/{hash}"), code);
+    world.accounts.insert(conventional_evm_account_key([0x77;20]), AccountState {
+        balance_nwei: 0, nonce: 1, code_hash: Some(hash),
+    });
+    let original = world.clone();
+    let history = BTreeMap::new();
+    let request = EvmCallRequest {
+        from: [0;20], recipient: Some([0x77;20]), value_wei: [0;32], data: &[],
+        gas_limit: 100_000, gas_price_wei: 40_000_000_000,
+    };
+    let result = call_evm(&request, &context(&history), &world, &budget).unwrap();
+    assert!(result.success);
+    assert_eq!(result.output.len(),64);
+    assert_eq!(&result.output[..32],&synergy_aivm::ethereum::nwei_to_wei(40));
+    assert_eq!(&result.output[32..],&synergy_aivm::ethereum::nwei_to_wei(1));
+    assert!(result.gas_used>21_000);
+    drop(result);
+    assert!(estimate_evm_gas(&request,&context(&history),&world,&budget).unwrap()>21_000);
+    assert_eq!(world,original);
+}
+#[test]
 fn blockhash_opcode_uses_exact_native_history_window_and_refuses_missing_ancestors() {
     use sha3::{Digest, Keccak256};
     let (mut world, budget) = setup();
@@ -110,6 +175,7 @@ fn blockhash_opcode_uses_exact_native_history_window_and_refuses_missing_ancesto
         data[24..].copy_from_slice(&(number as u64).to_be_bytes());
         let result = call_evm(
             &EvmCallRequest {
+                gas_price_wei: 0,
                 from: [0x11; 20],
                 recipient: Some([0x77; 20]),
                 value_wei: [0; 32],
@@ -129,6 +195,7 @@ fn blockhash_opcode_uses_exact_native_history_window_and_refuses_missing_ancesto
     assert!(matches!(
         call_evm(
             &EvmCallRequest {
+                gas_price_wei: 0,
                 from: [0x11; 20],
                 recipient: Some([0x77; 20]),
                 value_wei: [0; 32],
@@ -327,6 +394,7 @@ fn unsigned_eth_call_and_estimate_gas_use_real_solidity_without_spending_or_retu
     let original = world.clone();
     let tx = synergy_aivm::ethereum::decode_eip155(&raw(&f, 3), 9969).unwrap();
     let request = EvmCallRequest {
+        gas_price_wei: 0,
         from: [0; 20],
         recipient: Some(address(&f, "address")),
         value_wei: [0; 32],
@@ -439,6 +507,7 @@ fn real_ecrecover_precompile_uses_apqe_and_preserves_unsigned_simulation_boundar
     let mut precompile = [0u8; 20];
     precompile[19] = 1;
     let request = EvmCallRequest {
+        gas_price_wei: 0,
         from: [0; 20],
         recipient: Some(precompile),
         value_wei: [0; 32],
@@ -652,6 +721,7 @@ fn full_governed_gas_simulation_fits_shared_native_history_budget() {
         synergy_aegis::AegisProtectedPrimitives.sha256(&world.protocol[EVM_POLICY_KEY]);
     let tx = synergy_aivm::ethereum::decode_eip155(&raw(&f, 3), 9969).unwrap();
     let request = EvmCallRequest {
+        gas_price_wei: 0,
         from: [0; 20],
         recipient: Some(address(&f, "address")),
         value_wei: [0; 32],
@@ -758,6 +828,7 @@ fn bounded_pending_intake_preserves_full_governed_execution_progress() {
     let base = budget.reserve(60 * 1024 * 1024).unwrap();
     let tx = synergy_aivm::ethereum::decode_eip155(&raw(&f, 3), 9969).unwrap();
     let request = EvmCallRequest {
+        gas_price_wei: 0,
         from: [0; 20],
         recipient: Some(address(&f, "address")),
         value_wei: [0; 32],

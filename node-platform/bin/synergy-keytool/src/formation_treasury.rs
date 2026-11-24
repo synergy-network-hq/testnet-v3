@@ -309,7 +309,10 @@ struct SendParameters {
     timestamp_unix: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     governance_execution: Option<synergy_governance::GovernanceExecution>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    ethereum_funding: bool,
 }
+fn is_false(value: &bool) -> bool { !*value }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SendRequest {
@@ -344,8 +347,8 @@ fn send_request(path: &Path, pin: &str) -> Result<(SendRequest, SecretBytes), St
     let request: SendRequest = decode(&raw)?;
     if digest(raw.as_bytes()) != pin
         || request.version != 1
-        || !matches!((request.operation.as_str(),request.parameters.governance_execution.is_some()),
-            ("treasury_send_prepare",false)|("ethereum_activation_fee_prepare",true))
+        || !matches!((request.operation.as_str(),request.parameters.governance_execution.is_some(),request.parameters.ethereum_funding),
+            ("treasury_send_prepare",false,false)|("ethereum_activation_fee_prepare",true,false)|("ethereum_funding_prepare",false,true))
     {
         return Err("Exact approved treasury send request required".into());
     }
@@ -466,6 +469,14 @@ fn authenticated_send_context(
 /// frozen vote is independently performed by the bundled native owner before
 /// this function may reserve a nonce or open account spending custody.
 fn send_action(p:&SendParameters,sender:&str)->Result<(synergy_transaction::TransactionClass,u64,Vec<u8>),String> {
+    if p.ethereum_funding {
+        if p.governance_execution.is_some() { return Err("funding cannot carry a governance operation".into()); }
+        let funding=synergy_aivm::ethereum_execution::NativeEvmFunding::from_evm_address(&p.receiver,decimal(&p.amount_nwei)?)
+            .map_err(|e|e.to_string())?;
+        let payload=synergy_transaction::TransactionAction::Native{module:"ethereum".into(),method:"fund_account".into(),
+            input:funding.encode().map_err(|e|e.to_string())?.to_vec()}.encode().map_err(|e|e.to_string())?;
+        return Ok((synergy_transaction::TransactionClass::User,synergy_aivm::ethereum_execution::NativeEvmFunding::GAS_LIMIT,payload));
+    }
     let Some(execution)=p.governance_execution.as_ref() else {
         if decimal(&p.amount_nwei)?==0 {return Err("ordinary treasury transfer must be positive".into())}
         return Ok((synergy_transaction::TransactionClass::User,21_000,Vec::new()))
@@ -490,6 +501,7 @@ fn checked_lineage_descriptor(
     let mut fields = vec!["schema","request_sha256","genesis_sha256","authority_sha256","authority_root_sha256",
         "processing_context_sha256","processing_context_root","epoch_context_root","epoch","chain_id","network_id"];
     if p.governance_execution.is_some(){fields.extend(["governance_execution_sha256","governance_gas_limit","governance_maximum_fee_nwei"]);}
+    if p.ethereum_funding { fields.push("ethereum_funding"); }
     let response: Value = serde_json::from_str(&p.processing_context_json).map_err(|_| "Invalid processing response")?;
     let context: synergy_etdag::ProcessingContext = serde_json::from_value(response["context"].clone()).map_err(|_| "Processing context missing")?;
     let registry: synergy_etdag::crypto::IngressKemKeyRegistry = serde_json::from_value(response["ingress_kem_registry"].clone()).map_err(|_| "Processing registry missing")?;
@@ -507,7 +519,7 @@ fn checked_lineage_descriptor(
         || digest(p.processing_context_json.as_bytes()) != p.processing_context_sha256
         || descriptor["processing_context_root"] != json!(context.root().map_err(|_| "Invalid processing root")?)
         || !descriptor["epoch_context_root"].as_str().is_some_and(|s|s.len()==64&&s.bytes().all(|b|b.is_ascii_hexdigit()&&!b.is_ascii_uppercase()))
-        || descriptor["epoch"] != context.authority.epoch || (context.authority.epoch <= 1&&p.governance_execution.is_none())
+        || descriptor["epoch"] != context.authority.epoch || (context.authority.epoch <= 1&&p.governance_execution.is_none()&&!p.ethereum_funding)
         || descriptor["chain_id"] != context.authority.chain_id
         || context.authority.chain_id != signed.unsigned.network.chain_id
         || descriptor["network_id"] != formation.network_id
@@ -522,6 +534,18 @@ fn checked_lineage_descriptor(
         if descriptor["governance_execution_sha256"]!=digest(&bytes)
             ||descriptor["governance_gas_limit"]!=gas||descriptor["governance_maximum_fee_nwei"]!=(u128::from(gas)*40).to_string() {
             return Err("native owner did not authorize this exact governance execution".into())
+        }
+    }
+    if p.ethereum_funding {
+        let funding=synergy_aivm::ethereum_execution::NativeEvmFunding::from_evm_address(&p.receiver,decimal(&p.amount_nwei)?)
+            .map_err(|e|e.to_string())?;
+        let review=&descriptor["ethereum_funding"];
+        if review["recipient"]!=format!("0x{}",hex(&funding.recipient))||review["amount_nwei"]!=p.amount_nwei
+            ||review["gas_limit"]!=synergy_aivm::ethereum_execution::NativeEvmFunding::GAS_LIMIT
+            ||review["maximum_fee_nwei"]!=(u128::from(synergy_aivm::ethereum_execution::NativeEvmFunding::GAS_LIMIT)*40).to_string()
+            ||review["finalized_height"].as_u64().is_none_or(|h|h==0)
+            ||!["block_hash","state_root","policy_sha256"].iter().all(|k|review[k].as_str().is_some_and(|s|s.len()==64&&s.bytes().all(|b|b.is_ascii_hexdigit()&&!b.is_ascii_uppercase()))) {
+            return Err("native owner did not verify this exact finalized EOA funding".into());
         }
     }
     Ok((context, registry))
@@ -627,7 +651,7 @@ pub fn prepare_send(
         engine.clone(),
     )?;
     let response: Value = serde_json::from_str(&p.processing_context_json).map_err(|_| "Invalid processing response")?;
-    let (context, registry) = if p.governance_execution.is_some()||response["context"]["authority"]["epoch"].as_u64().is_some_and(|epoch|epoch>1) {
+    let (context, registry) = if p.ethereum_funding||p.governance_execution.is_some()||response["context"]["authority"]["epoch"].as_u64().is_some_and(|epoch|epoch>1) {
         authenticated_lineage_context(formation_directory, request_path, request_pin, &formation, p, &exported)?
     } else { authenticated_send_context(&formation, p, &exported)? };
     let public: Public = decode(&read(&treasury.join("treasury-public.json"), LIMIT, true)?)?;
@@ -649,8 +673,8 @@ pub fn prepare_send(
         .map_err(|e| e.to_string())?,
         class,
         sender: public.address.clone(),
-        receiver: p.receiver.clone(),
-        amount_nwei: amount,
+        receiver: if p.ethereum_funding {public.address.clone()} else {p.receiver.clone()},
+        amount_nwei: if p.ethereum_funding {0} else {amount},
         nonce: p.nonce,
         fee_limit: synergy_transaction::FeeLimit {
             gas_limit,
@@ -904,8 +928,8 @@ pub fn send_status(
         || public.authorization != admission.identity_authorization
         || record.formation_sha256 != p.formation_sha256
         || record.genesis_sha256 != p.genesis_sha256
-        || record.unsigned.receiver != p.receiver
-        || record.unsigned.amount_nwei != decimal(&p.amount_nwei)?
+        || record.unsigned.receiver != if p.ethereum_funding {public.address.clone()} else {p.receiver.clone()}
+        || record.unsigned.amount_nwei != if p.ethereum_funding {0} else {decimal(&p.amount_nwei)?}
         || record.unsigned.timestamp_unix != p.timestamp_unix
         || record.unsigned.class!=class
         || record.unsigned.fee_limit.gas_limit != gas_limit
@@ -967,6 +991,12 @@ pub fn send_status(
         result["schema"]=json!("nodenetwork-ethereum-activation-fee-v1");
         result["governance_execution_sha256"]=json!(digest(&serde_json::to_vec(execution).map_err(|_|"invalid governance bytes")?));
         result["proposal_root"]=json!(execution.proposal.proposal_root);
+        result["gas_limit"]=json!(gas_limit);
+    }
+    if p.ethereum_funding {
+        result["schema"]=json!("nodenetwork-ethereum-funding-v1");
+        result["receiver"]=json!(p.receiver);
+        result["amount_nwei"]=json!(p.amount_nwei);
         result["gas_limit"]=json!(gas_limit);
     }
     Ok(result)
@@ -1238,6 +1268,30 @@ mod tests {
         fs,
         os::unix::fs::{DirBuilderExt, PermissionsExt},
     };
+
+    #[test]
+    fn reviewed_evm_funding_encodes_only_the_closed_native_value_transition() {
+        let mut p:SendParameters=serde_json::from_value(json!({
+            "formation_sha256":"a".repeat(64),"genesis_sha256":"b".repeat(64),
+            "processing_context_json":"{}","processing_context_sha256":"c".repeat(64),
+            "receiver":"0x72F57B74C0b2D556589CeB393103bea0f631933B","amount_nwei":"123456789",
+            "nonce":7,"observed_balance_nwei":"1000000000","timestamp_unix":1,"ethereum_funding":true
+        })).unwrap();
+        let (class,gas,payload)=send_action(&p,"syna1trr36xu7z866hwyv4njkkun5wy0qzl63vhys").unwrap();
+        assert_eq!(class,synergy_transaction::TransactionClass::User);
+        assert_eq!(gas,21_000);
+        let synergy_transaction::TransactionAction::Native{module,method,input}=synergy_transaction::TransactionAction::decode(&payload).unwrap() else {panic!("closed funding action required")};
+        assert_eq!((module.as_str(),method.as_str()),("ethereum","fund_account"));
+        let funding=synergy_aivm::ethereum_execution::NativeEvmFunding::decode(&input).unwrap();
+        assert_eq!(funding.amount_nwei,123456789);
+        assert_eq!(hex(&funding.recipient),"72f57b74c0b2d556589ceb393103bea0f631933b");
+        p.receiver="synw72F57B74C0b2D556589CeB393103bea0f631933B".into();
+        assert!(send_action(&p,"payer").is_err());
+        p.receiver="0x72f57B74C0b2D556589CeB393103bea0f631933B".into();
+        assert!(send_action(&p,"payer").is_err());
+        p.receiver="0x72F57B74C0b2D556589CeB393103bea0f631933B".into();
+        p.amount_nwei="0".into();assert!(send_action(&p,"payer").is_err());
+    }
 
     #[test]
     fn treasury_commands_require_explicit_provider_and_send_decimals_are_canonical() {
