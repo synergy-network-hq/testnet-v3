@@ -113,11 +113,31 @@ def consensus_position(result, verified_block):
                 consensus_timestamp_unix=timestamp)
 
 
+def witness_position(proof, commitments, chain, network, height):
+    # Read the first QC from the exact document accepted by the native verifier.
+    # Its signed context owns the finalized block even when later QCs cross epochs.
+    first, _, _ = json.loads(proof)["witness"]["quorum_certificates"]
+    context = first["context"]
+    parent = first.get("parent_block_id")
+    epoch = context.get("epoch")
+    root = context.get("epoch_context_root")
+    if ((context.get("chain_id"), context.get("network_id"), context.get("height"))
+            != (chain, network, height)
+            or first.get("block_id") != commitments["block_id"]
+            or first.get("protected_execution_root") != commitments["protected_execution_root"]
+            or not isinstance(parent, str) or not HEX.fullmatch(parent)
+            or type(epoch) is not int or epoch < 1
+            or not isinstance(root, str) or not HEX.fullmatch(root)):
+        raise ValueError("verified witness does not identify the selected consensus position")
+    return dict(parent_block_id=parent, epoch=epoch, epoch_context_root=root)
+
+
 def check_successor(previous, current):
     if (current["height"] != previous["height"] + 1
             or current["parent_block_id"] != previous["block_id"]):
         raise ValueError("verified blocks do not form a contiguous chain")
-    if current["consensus_timestamp_unix"] < previous["consensus_timestamp_unix"]:
+    if ("consensus_timestamp_unix" in current
+            and current["consensus_timestamp_unix"] < previous["consensus_timestamp_unix"]):
         raise ValueError("verified consensus time regressed")
     delta = current["epoch"] - previous["epoch"]
     same_root = current["epoch_context_root"] == previous["epoch_context_root"]
@@ -143,8 +163,6 @@ def main():
     last = args.height if args.through_height is None else args.through_height
     if not args.height <= last < args.height + MAX_HEIGHTS:
         cli.error("select one to eight consecutive finalized heights")
-    if args.witness_only and args.through_height is not None:
-        cli.error("a linked range requires original block preimages")
     if args.require_epoch_transition and last == args.height:
         cli.error("an epoch transition requires at least two heights")
     endpoints = [urlsplit(value) for value in args.observer]
@@ -166,7 +184,8 @@ def main():
             for height in range(args.height, last + 1):
                 agreed = None
                 for endpoint in args.observer:
-                    finality.write_bytes(fetch_proof(endpoint, height, "finality"))
+                    proof_bytes = fetch_proof(endpoint, height, "finality")
+                    finality.write_bytes(proof_bytes)
                     command = [str(node), "finality-proof", "verify", str(config), str(finality)]
                     if not args.witness_only:
                         block_bytes = fetch_proof(endpoint, height, "block_commitment")
@@ -180,7 +199,11 @@ def main():
                     observed = subject(native, args.chain, args.network, args.genesis, height,
                                        witness_only=args.witness_only)
                     if range_mode:
-                        observed.update(consensus_position(native, block_bytes))
+                        if args.witness_only:
+                            observed.update(witness_position(proof_bytes, observed, args.chain,
+                                                             args.network, height))
+                        else:
+                            observed.update(consensus_position(native, block_bytes))
                     if agreed is not None and agreed != observed:
                         raise ValueError(f"verified observer commitments disagree at H{height}")
                     agreed = observed

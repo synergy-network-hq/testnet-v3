@@ -109,3 +109,26 @@ class FinalityObservationTests(unittest.TestCase):
         self.assertFalse(result["block_preimage_verified"])
         self.assertNotIn("state_root", result)
         self.assertEqual(result["finality_certificate_id"], "d" * 64)
+
+    def test_witness_range_uses_first_verified_qc_context_at_boundary(self):
+        network = "canary"
+        block_id = "a" * 64
+        parent = "b" * 64
+        protected_root = "c" * 64
+        epoch_root = "d" * 64
+        commitments = dict(block_id=block_id, protected_execution_root=protected_root)
+        first = dict(block_id=block_id, parent_block_id=parent,
+                     protected_execution_root=protected_root,
+                     context=dict(chain_id=99999, network_id=network, height=9000, epoch=9,
+                                  epoch_context_root=epoch_root))
+        descendant = dict(context=dict(epoch=10))
+        proof = dict(witness=dict(quorum_certificates=[first, descendant, descendant]))
+        at_boundary = verifier.witness_position(json.dumps(proof), commitments, 99999, network, 9000)
+        self.assertEqual(at_boundary, dict(parent_block_id=parent, epoch=9, epoch_context_root=epoch_root))
+        next_block = dict(height=9001, parent_block_id=block_id, epoch=10, epoch_context_root="e" * 64)
+        previous = dict(height=9000, block_id=block_id, **at_boundary)
+        self.assertEqual(verifier.check_successor(previous, next_block), 1)
+        with self.assertRaisesRegex(ValueError, "contiguous"):
+            verifier.check_successor(previous, {**next_block, "parent_block_id": "f" * 64})
+        with self.assertRaisesRegex(ValueError, "selected consensus position"):
+            verifier.witness_position(json.dumps(proof), commitments, 99999, network, 9001)
