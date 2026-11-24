@@ -8,6 +8,7 @@ mod candidate_store;
 mod context;
 mod dispatcher;
 mod executor;
+pub mod ethereum_transfer;
 mod fees;
 mod processing_candidate;
 mod processing_epoch;

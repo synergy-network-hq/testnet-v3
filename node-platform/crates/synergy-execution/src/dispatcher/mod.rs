@@ -4,6 +4,7 @@ mod sxcp;
 mod synq;
 mod synq_adapter;
 mod system;
+pub(crate) use native::NATIVE_TRANSFER_GAS;
 
 use synergy_state::{StateDiff, WorldState};
 use synergy_transaction::{NetworkBinding, SignedTransaction, TransactionAction};

@@ -16,6 +16,7 @@ synergy-transaction = { path = "../synergy-transaction" }
 synergy-identity = { path = "../synergy-identity" }
 synergy-synq = { path = "../synergy-synq" }
 synergy-storage = { path = "../synergy-storage" }
+synergy-aivm = { path = "../synergy-aivm" }
 
 [dev-dependencies]
 hex = "0.4.3"
