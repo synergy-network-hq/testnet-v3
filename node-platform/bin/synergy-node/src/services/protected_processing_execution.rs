@@ -7,6 +7,8 @@ use super::{
     sponsor_settlement::SponsoredOutcome,
     sponsored_admission::VerifiedSponsoredAdmission,
     transfer_admission::VerifiedTransferAdmission,
+    fee_free_enrollment::VerifiedFeeFreeEnrollmentAdmission,
+    fee_free_synid::VerifiedFeeFreeSynIdAdmission,
     AccountIdentifier, CandidateProtectedAccounts, CandidateTransferExecution, ChainId,
     FinalizedSnapshot, Position, TransferCandidateContent,
 };
@@ -50,12 +52,15 @@ use synergy_state::{
 enum ActionAuthorization {
     Transfer(VerifiedTransferAdmission),
     SponsoredEnrollment(VerifiedSponsoredAdmission),
+    FeeFreeEnrollment(VerifiedFeeFreeEnrollmentAdmission),
+    FeeFreeSynId(VerifiedFeeFreeSynIdAdmission),
 }
 
 struct IntentTerms<'a> {
     valid_until_finalized_height: u64,
     digest: &'a [u8],
     policy: Option<&'a Pw13TransferResources>,
+    fee_free: bool,
 }
 
 impl<'a> From<&'a Pw13TransferResources> for IntentTerms<'a> {
@@ -63,7 +68,7 @@ impl<'a> From<&'a Pw13TransferResources> for IntentTerms<'a> {
         Self {
             valid_until_finalized_height: resources.valid_until_finalized_height,
             digest: &resources.native_intent_digest,
-            policy: Some(resources),
+            policy: Some(resources), fee_free: false,
         }
     }
 }
@@ -73,17 +78,23 @@ impl<'a> From<&'a Pw13SponsoredResources> for IntentTerms<'a> {
         Self {
             valid_until_finalized_height: resources.valid_until_finalized_height,
             digest: &resources.sponsor_intent_digest,
-            policy: None,
+            policy: None, fee_free: false,
         }
     }
 }
 
+impl<'a> From<&'a synergy_etdag::admission::Pw13FeeFreeEnrollmentResources> for IntentTerms<'a> {
+ fn from(r:&'a synergy_etdag::admission::Pw13FeeFreeEnrollmentResources)->Self {Self{valid_until_finalized_height:r.valid_until_finalized_height,digest:&r.enrollment_intent_digest,policy:None,fee_free:true}}
+}
+
+impl<'a> From<&'a synergy_etdag::admission::Pw13FeeFreeSynIdResources> for IntentTerms<'a> {fn from(r:&'a synergy_etdag::admission::Pw13FeeFreeSynIdResources)->Self{Self{valid_until_finalized_height:r.valid_until_finalized_height,digest:&r.intent_digest,policy:None,fee_free:true}}}
 impl IntentTerms<'_> {
     fn disposition(
         &self,
         record: &ProcessingReadyRecord,
         finalized: &FinalizedSnapshot<'_>,
     ) -> Result<Option<Disposition>, String> {
+        if self.fee_free { return Ok(None); }
         if finalized.position.height > self.valid_until_finalized_height {
             return Ok(Some(Disposition::Expired));
         }
@@ -135,6 +146,8 @@ impl AuthorizedCandidateAdmission {
         match &self.action {
             ActionAuthorization::Transfer(proof) => proof.resources().into(),
             ActionAuthorization::SponsoredEnrollment(proof) => proof.resources().into(),
+            ActionAuthorization::FeeFreeEnrollment(proof) => proof.resources().into(),
+            ActionAuthorization::FeeFreeSynId(proof)=>proof.resources().into(),
         }
     }
 }
@@ -156,6 +169,8 @@ impl CandidateProtectedAccounts<'_> {
         terms: CandidateAuthorizationContext<'_>,
     ) -> Result<AuthorizedCandidateAdmission, String> {
         let action = match &admission.authorization {
+            CandidateAuthorization::FeeFreeSynId(proof)=>ActionAuthorization::FeeFreeSynId(self.verify_fee_free_synid_admission(terms.provider,terms.source,context,&admission.envelope,proof,terms.parameters,terms.metered_gas)?),
+            CandidateAuthorization::FeeFreeEnrollment(proof)=>ActionAuthorization::FeeFreeEnrollment(self.verify_fee_free_enrollment_admission(terms.provider,terms.source,context,&admission.envelope,proof,terms.parameters,terms.metered_gas)?),
             CandidateAuthorization::Transfer(proof) => {
                 let verified = self.verify_transfer_admission(
                     terms.provider,
@@ -219,7 +234,8 @@ impl ProtectedMetering<'_> {
         use crate::services::protected_action_wire::{ENROLL_COMMIT, ENROLL_REVEAL};
         match self {
             Self::Governed(policy) => match &admission.authorization {
-                CandidateAuthorization::Transfer(_) => Ok(policy.transfer_gas),
+                CandidateAuthorization::Transfer(_) | CandidateAuthorization::FeeFreeSynId(_)=> Ok(policy.transfer_gas),
+                CandidateAuthorization::FeeFreeEnrollment(proof)=>match proof.resources.action {ENROLL_COMMIT=>Ok(policy.enroll_commit_gas),ENROLL_REVEAL=>Ok(policy.enroll_reveal_gas),_=>Err("invalid fee-free action".into())},
                 CandidateAuthorization::SponsoredEnrollment(proof) => match proof.resources.action {
                     ENROLL_COMMIT => Ok(policy.enroll_commit_gas),
                     ENROLL_REVEAL => Ok(policy.enroll_reveal_gas),
@@ -588,6 +604,8 @@ impl ProtectedJournalRecovery<'_> {
                     }
                     let terms: IntentTerms<'_> = match &admission.authorization {
                         CandidateAuthorization::Transfer(proof) => (&proof.resources).into(),
+                        CandidateAuthorization::FeeFreeSynId(proof)=>(&proof.resources).into(),
+                        CandidateAuthorization::FeeFreeEnrollment(proof)=>(&proof.resources).into(),
                         CandidateAuthorization::SponsoredEnrollment(proof) => {
                             (&proof.resources).into()
                         }
@@ -765,9 +783,11 @@ pub(super) enum CandidateActionOutcome {
     Transfer(CandidateTransferExecution),
     SponsoredEnrollment(SponsoredOutcome, u128),
     Disposition(Disposition),
+    FeeFreeEnrollment(synergy_etdag::admission::FeeFreeEnrollmentOutcome,String),
+    FeeFreeSynId(synergy_etdag::admission::FeeFreeSynIdOutcome,String),
 }
 
-const READY_RECORD_RESERVATION: usize = 32 * 1024;
+const READY_RECORD_RESERVATION: usize = 64 * 1024;
 
 /// Stage just the recognized authorization and availability result. Plaintext
 /// stays borrowed from the charged native opening for the life of this action.
@@ -926,6 +946,7 @@ impl<'a> PreparedProtectedAction<'a> {
             let outcome = self.execute(candidate, slot)?;
             let key = match &outcome {
                 CandidateActionOutcome::Transfer(transfer) => transfer.settlement_key.clone(),
+                CandidateActionOutcome::FeeFreeEnrollment(_,key)|CandidateActionOutcome::FeeFreeSynId(_,key)=>key.clone(),
                 CandidateActionOutcome::SponsoredEnrollment(..) => super::sponsor_settlement::receipt_key(
                     &self.record.sender_wallet,
                     self.record.sender_nonce,
@@ -946,6 +967,11 @@ impl<'a> PreparedProtectedAction<'a> {
         let inclusion = slot.inclusion;
         verify_processing_payload(&self.record, self.opened.plaintext(), candidate.budget())
             .map_err(debug)?;
+        if let ActionAuthorization::FeeFreeEnrollment(proof)=&self.dispatch.admission.action {
+            let (outcome,key)=self.dispatch.source.registry.execute_opened_fee_free_enrollment(self.dispatch.provider,self.dispatch.source,slot.finalized_parent,candidate,inclusion,self.opened,proof)?;
+            return Ok(CandidateActionOutcome::FeeFreeEnrollment(outcome,key));
+        }
+        if let ActionAuthorization::FeeFreeSynId(proof)=&self.dispatch.admission.action {let (outcome,key)=self.dispatch.source.registry.execute_opened_fee_free_synid(self.dispatch.source,slot.finalized_parent,candidate,inclusion,self.opened,proof)?;return Ok(CandidateActionOutcome::FeeFreeSynId(outcome,key));}
         let payer = self.record.sender_wallet.as_str();
         let expected_nonce = self.record.sender_nonce;
         if candidate.accounts.get(payer).map(|a| a.nonce) != Some(expected_nonce) {
@@ -957,6 +983,7 @@ impl<'a> PreparedProtectedAction<'a> {
         let dispatch = &self.dispatch;
         let registry = dispatch.source.registry;
         let outcome = match &dispatch.admission.action {
+            ActionAuthorization::FeeFreeEnrollment(_)|ActionAuthorization::FeeFreeSynId(_)=>unreachable!("handled before financial nonce lookup"),
             ActionAuthorization::Transfer(proof) => {
                 CandidateActionOutcome::Transfer(registry.execute_engineering_transfer(
                     dispatch.provider,
@@ -1025,6 +1052,7 @@ where
         record: &ProcessingReadyRecord,
         parent: &WorldState,
     ) -> Result<bool, String> {
+        if record.sender_wallet.starts_with("enroll:") || record.sender_wallet.starts_with("synid:") {return Ok(record.sender_nonce<=1);}
         Ok(parent
             .accounts
             .get(&record.sender_wallet)
@@ -1034,7 +1062,7 @@ where
     }
 
     fn retires_without_nonce(&self, record: &ProcessingReadyRecord) -> bool {
-        self.dispositions.contains_key(&record.item.envelope_id)
+        (record.sender_wallet.starts_with("enroll:") || record.sender_wallet.starts_with("synid:")) || self.dispositions.contains_key(&record.item.envelope_id)
     }
 }
 

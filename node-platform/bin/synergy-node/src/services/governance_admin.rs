@@ -12,6 +12,8 @@ use std::{
 use synergy_aegis::{AegisSigner, KeyId, SigningContext};
 use synergy_governance::{EthereumActivationDraft, GovernanceVote, VoteChoice, VoteVerifier};
 use synergy_storage::AtomicStore;
+#[path="governance_membership_admin.rs"]
+mod membership;
 
 pub(super) struct GovernanceApprovalOwner {
     validator_id: String,
@@ -19,6 +21,7 @@ pub(super) struct GovernanceApprovalOwner {
     signer: Arc<dyn AegisSigner>,
     store: AtomicStore,
     pending_recovery: Option<(EthereumActivationDraft, String, Instant)>,
+    pending_membership:Option<(synergy_governance::MembershipRetirementDraft,String,Instant)>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -56,7 +59,9 @@ impl GovernanceApprovalOwner {
         } else {
             None
         };
+        let pending_membership=membership::pending(&store)?;
         Ok(Self {
+            pending_membership,
             validator_id,
             key_id,
             signer,
@@ -71,6 +76,7 @@ impl GovernanceApprovalOwner {
         authority: &VerifiedAuthority,
         ingress: &AuthenticatedIngress,
     ) {
+        self.recover_membership_pending(authority,ingress);
         let Some((draft, root, next)) = self.pending_recovery.take() else {
             return;
         };

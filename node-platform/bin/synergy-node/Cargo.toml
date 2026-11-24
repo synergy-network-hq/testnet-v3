@@ -64,6 +64,7 @@ synergy-genesis = { path = "../synergy-genesis" }
 
 
 [dev-dependencies]
+k256 = { version = "0.13", features = ["ecdsa"] }
 sha2 = "0.10"
 aegis-pqvm = { path = "../../crates/aegis-pqvm", default-features = false, features = ["mldsa"] }
 pqrust-traits = { path = "../../crates/aegis-pqvm/vendor/pqcrypto-traits" }

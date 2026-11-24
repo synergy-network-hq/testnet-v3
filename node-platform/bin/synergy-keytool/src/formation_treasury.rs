@@ -348,7 +348,7 @@ fn send_request(path: &Path, pin: &str) -> Result<(SendRequest, SecretBytes), St
     if digest(raw.as_bytes()) != pin
         || request.version != 1
         || !matches!((request.operation.as_str(),request.parameters.governance_execution.is_some(),request.parameters.ethereum_funding),
-            ("treasury_send_prepare",false,false)|("ethereum_activation_fee_prepare",true,false)|("ethereum_funding_prepare",false,true))
+            ("treasury_send_prepare",false,false)|("ethereum_activation_fee_prepare",true,false)|("membership_retirement_fee_prepare",true,false)|("ethereum_funding_prepare",false,true))
     {
         return Err("Exact approved treasury send request required".into());
     }
@@ -482,9 +482,11 @@ fn send_action(p:&SendParameters,sender:&str)->Result<(synergy_transaction::Tran
         return Ok((synergy_transaction::TransactionClass::User,21_000,Vec::new()))
     };
     if p.receiver!=sender||decimal(&p.amount_nwei)?!=0
-        ||execution.mutation.action_kind!=synergy_governance::ETHEREUM_ACTIVATION_ACTION_V1
-        ||execution.mutation.target!=synergy_governance::ETHEREUM_ACTIVATION_TARGET_V1 {
-        return Err("treasury governance supports only an exact zero-value initial EVM amendment".into())
+        ||!((execution.mutation.action_kind==synergy_governance::ETHEREUM_ACTIVATION_ACTION_V1
+            &&execution.mutation.target==synergy_governance::ETHEREUM_ACTIVATION_TARGET_V1)
+            ||(execution.mutation.action_kind==synergy_governance::MEMBERSHIP_RETIREMENT_ACTION_V1
+               &&serde_json::from_slice::<synergy_governance::MembershipRetirementSpec>(&execution.mutation.value).ok().is_some_and(|s|s.mutation().is_ok_and(|m|m==execution.mutation)))) {
+        return Err("treasury governance supports only an exact zero-value EVM amendment or membership retirement".into())
     }
     let operation=serde_json::to_vec(execution).map_err(|_|"invalid governance execution")?;
     if operation.len()>256*1024 {return Err("governance execution exceeds signing bound".into())}
@@ -988,7 +990,7 @@ pub fn send_status(
     }
     let mut result=json!({"schema":"nodenetwork-formation-treasury-send-v1","request_sha256":record.request_sha256,"formation_sha256":record.formation_sha256,"genesis_sha256":record.genesis_sha256,"transaction_id":record.transaction_id,"receipt_id":record.receipt_id,"admission_sha256":record.admission_sha256,"sender":record.unsigned.sender,"receiver":record.unsigned.receiver,"amount_nwei":record.unsigned.amount_nwei.to_string(),"nonce":nonce,"fee_nwei":(u128::from(gas_limit)*40).to_string(),"state":if taken{"dispatch_unknown"}else{"prepared"},"automatic_retry":false});
     if let Some(execution)=p.governance_execution.as_ref() {
-        result["schema"]=json!("nodenetwork-ethereum-activation-fee-v1");
+        result["schema"]=json!(if execution.mutation.action_kind==synergy_governance::MEMBERSHIP_RETIREMENT_ACTION_V1{"nodenetwork-membership-retirement-fee-v1"}else{"nodenetwork-ethereum-activation-fee-v1"});
         result["governance_execution_sha256"]=json!(digest(&serde_json::to_vec(execution).map_err(|_|"invalid governance bytes")?));
         result["proposal_root"]=json!(execution.proposal.proposal_root);
         result["gas_limit"]=json!(gas_limit);

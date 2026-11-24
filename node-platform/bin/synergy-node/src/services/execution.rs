@@ -291,6 +291,11 @@ impl CanonicalGovernanceOperation {
             let state_diff=super::ethereum_activation::dispatch(self.authority.as_ref(),&execution,context.block_height,state)?;
             return Ok(TransactionDispatch{state_diff,gas_used:75_000u64.checked_add(operation.len() as u64).ok_or("EVM governance gas overflow")?});
         }
+        if execution.mutation.action_kind==super::membership_retirement::ACTION {
+            if authorization_id!=execution.authorization_root{return Err("membership authorization identity differs".into());}
+            let state_diff=super::membership_retirement::dispatch(self.authority.as_ref(),&execution,context.block_height,state)?;
+            return Ok(TransactionDispatch{state_diff,gas_used:75_000u64.checked_add(operation.len() as u64).ok_or("membership governance gas overflow")?});
+        }
         let key = execution.verify(
             self.authority.as_ref(),
             authorization_id,
@@ -332,7 +337,8 @@ impl GovernanceOperation for CanonicalGovernanceOperation {
             return Err("governance transaction cannot transfer value".into());
         }
         let governed:GovernanceExecution=serde_json::from_slice(operation).map_err(|error|error.to_string())?;
-        let evm_amendment=governed.mutation.action_kind==super::ethereum_activation::ACTION;
+        let evm_amendment=governed.mutation.action_kind==super::ethereum_activation::ACTION
+            ||governed.mutation.action_kind==super::membership_retirement::ACTION;
         drop(governed);
         let mut dispatched=self.execute(authorization_id, operation, context, state)?;
         // The EVM amendment travels as an authenticated asynchronous account

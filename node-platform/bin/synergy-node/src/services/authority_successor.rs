@@ -13,6 +13,12 @@ use synergy_genesis::authority::VerifiedWalletDispatchRelease;
 use synergy_posy::persistence::{FinalityStore, VerifiedQuorumCertificateStore};
 
 #[cfg(test)]
+#[path="membership_qualification.rs"]
+mod membership_qualification;
+#[cfg(test)]
+pub(crate) use membership_qualification::qualify_membership_transition;
+
+#[cfg(test)]
 #[path = "authority_wallet_dispatch_tests.rs"]
 mod wallet_dispatch_tests;
 #[cfg(test)]
@@ -37,6 +43,8 @@ struct DerivedEpochProof {
     witness: synergy_posy::FinalitySyncWitness,
     closing_material: synergy_etdag::execution::CandidateProtectedMaterial,
     next_validators: Vec<ValidatorRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    membership_execution: Option<synergy_governance::GovernanceExecution>,
 }
 
 #[derive(Deserialize)]
@@ -52,6 +60,7 @@ struct VerifiedDerivedEpoch {
     parent: SimplifiedFinalityParent,
     registry: FrozenValidatorRegistry,
     policy: ProtectedEpochPolicy,
+    membership:Option<Arc<synergy_genesis::membership::VerifiedMembershipRetirement>>,
 }
 
 /// A one-time protocol activation on an already certified chain. Its exact
@@ -73,8 +82,17 @@ fn native_autonomous_authority(
     verified: VerifiedDerivedEpoch,
     closure: VerifiedAutonomousClosure,
 ) -> Arc<VerifiedAuthority> {
+    let previous=if let Some(membership)=verified.membership.as_ref() {
+        let mut historical=previous.as_ref().clone();
+        historical.membership_retirement=Arc::new(std::sync::Mutex::new(Some(membership.clone())));
+        Arc::new(historical)
+    }else{previous};
     let mut native = previous.as_ref().clone();
+    native.membership_retirement=Arc::new(std::sync::Mutex::new(None));
     native.registry = verified.registry;
+    // Historical authorities retain the old keys for old votes/encrypted work.
+    // The new frozen owner must not present a retired key as current authority.
+    native.keys.retain(|id,_| native.registry.active_validator(id).is_ok());
     native.epoch = verified.context;
     native.anchor_parent = verified.parent;
     native.protected = Some(Arc::new(verified.policy));
@@ -267,6 +285,7 @@ fn verify_autonomous_bootstrap(
             parent,
             registry,
             policy,
+            membership:None,
         },
         VerifiedAutonomousClosure {
             authorization: subject,
@@ -305,6 +324,7 @@ fn verify_native_successor(
         previous.as_ref(),
         &proof,
         wallet_release,
+        crate::services::membership_retirement::genesis(previous.as_ref())?,
     )?;
     let subject_root = proof
         .authorization
@@ -344,8 +364,9 @@ pub(crate) fn persist_native_successor(
         .protected
         .as_ref()
         .ok_or("active processing policy missing")?;
+    let membership=current.pending_membership_retirement()?;
     let (authorization, _) = governed_successor_subject(
-        &current.epoch, &current.registry, policy, current.pending_wallet_release(&current.epoch),
+        &current.epoch, &current.registry, policy, current.pending_wallet_release(&current.epoch),membership.as_deref(),
     )?;
     let epoch = authorization.next_epoch;
     let proof = DerivedEpochProof {
@@ -353,7 +374,8 @@ pub(crate) fn persist_native_successor(
         finalized,
         witness,
         closing_material: candidate.protected_material.clone(),
-        next_validators: current.registry.active().cloned().collect(),
+        next_validators: membership.as_ref().map_or_else(||current.registry.active().cloned().collect(),|m|m.next_registry().active().cloned().collect()),
+        membership_execution:membership.as_ref().map(|m|m.execution().clone()),
     };
     let bytes = serde_json::to_vec(&proof).map_err(|e| e.to_string())?;
     let expected = verify_native_successor(Arc::clone(current), proof, None)?;
@@ -404,6 +426,7 @@ impl<'a> DerivedEpochVerifier<'a> {
             self,
             proof,
             self.origin.pending_wallet_release(&self.context),
+            crate::services::membership_retirement::genesis(self.origin)?,
         )?;
         self.context = verified.context;
         self.registry = verified.registry;
@@ -449,6 +472,20 @@ impl ConsensusSignatureVerifier for DerivedEpochVerifier<'_> {
     }
 }
 
+impl synergy_governance::VoteVerifier for DerivedEpochVerifier<'_> {
+    fn verify(&self,vote:&synergy_governance::GovernanceVote)->Result<(),String>{
+        vote.validate_shape()?;
+        let frozen=self.registry.active_validator(&vote.authority_id).map_err(|e|e.to_string())?;
+        let key=self.origin.keys.get(&vote.authority_id).ok_or("membership voter public key absent")?;
+        if frozen.consensus_key_id!=vote.key_id||key.algorithm!=SignatureAlgorithm::MlDsa65
+            ||key.validator.consensus_key_id!=vote.key_id{return Err("membership vote differs from original frozen key".into());}
+        self.origin.verifier.verify(&SigningContext{domain:"SYNERGY-GOVERNANCE-VOTE-V1".into(),chain_id:self.context.chain_id,
+            epoch:Some(self.context.epoch),height:None},&vote.signing_bytes()?,&Signature{algorithm:SignatureAlgorithm::MlDsa65,
+                key_id:KeyId::new(vote.key_id.clone()).map_err(|e|e.to_string())?,bytes:vote.signature.clone()},&key.public_key)
+            .map_err(|e|e.to_string())
+    }
+}
+
 #[cfg(test)]
 fn verify_derived_epoch(
     previous: &VerifiedAuthority,
@@ -463,9 +500,10 @@ fn verify_derived_epoch_in_scope(
     previous: &SimplifiedEpochContext,
     previous_registry: &FrozenValidatorRegistry,
     policy: &ProtectedEpochPolicy,
-    verifier: &impl ConsensusSignatureVerifier,
+    verifier: &(impl ConsensusSignatureVerifier + synergy_governance::VoteVerifier),
     proof: &DerivedEpochProof,
     wallet_release: Option<&VerifiedWalletDispatchRelease>,
+    genesis_hash:&str,
 ) -> Result<VerifiedDerivedEpoch, String> {
     if proof
         .next_validators
@@ -479,8 +517,14 @@ fn verify_derived_epoch_in_scope(
         proof.next_validators.clone(),
     )
     .map_err(|e| e.to_string())?;
+    let membership=proof.membership_execution.as_ref().map(|execution|
+        synergy_genesis::membership::VerifiedMembershipRetirement::verify(execution,genesis_hash,previous,previous_registry,verifier)
+            .map(Arc::new)).transpose()?;
+    if membership.as_ref().is_some_and(|m|m.next_registry()!=&next_registry){
+        return Err("successor registry differs from authenticated finalized retirement".into());
+    }
     let (expected, next_policy) =
-        governed_successor_subject(previous, previous_registry, policy, wallet_release)?;
+        governed_successor_subject(previous, previous_registry, policy, wallet_release,membership.as_deref())?;
     if proof.authorization != expected {
         return Err("epoch subject differs from independently derived rollover policy".into());
     }
@@ -511,6 +555,7 @@ fn verify_derived_epoch_in_scope(
         parent,
         registry: next_registry,
         policy: next_policy,
+        membership,
     })
 }
 
@@ -587,7 +632,12 @@ fn governed_successor_subject(
     previous_registry: &FrozenValidatorRegistry,
     policy: &ProtectedEpochPolicy,
     wallet_release: Option<&VerifiedWalletDispatchRelease>,
+    membership:Option<&synergy_genesis::membership::VerifiedMembershipRetirement>,
 ) -> Result<(EpochTransitionAuthorization, ProtectedEpochPolicy), String> {
+    if let Some(retirement)=membership {
+        let (subject,policy,_)=retirement.prepare_successor_with_wallet(previous,policy,previous_registry,wallet_release)?;
+        return Ok((subject,policy));
+    }
     match wallet_release {
         Some(release) => release.prepare_successor(previous, policy, previous_registry),
         None => unchanged_successor_subject(previous, previous_registry, policy),
@@ -614,6 +664,11 @@ fn unchanged_successor_subject(
 }
 
 impl VerifiedAuthority {
+    pub(crate) fn pending_membership_retirement(&self)->Result<Option<Arc<synergy_genesis::membership::VerifiedMembershipRetirement>>,String>{
+        let root=self.epoch.root().map_err(|e|e.to_string())?;
+        Ok(self.membership_retirement.lock().map_err(|_|"membership cache poisoned")?.as_ref()
+            .filter(|m|m.spec().frozen_epoch_context_root==root).cloned())
+    }
     pub(crate) fn epoch_close_subject_at(&self, height: u64) -> Result<Option<String>, String> {
         if !self.autonomous_epochs_enabled()
             || height.checked_add(2) != Some(self.epoch.epoch_end_height)
@@ -624,8 +679,9 @@ impl VerifiedAuthority {
             .protected
             .as_ref()
             .ok_or("active processing policy missing")?;
+        let membership=self.pending_membership_retirement()?;
         let (subject, _) = governed_successor_subject(
-            &self.epoch, &self.registry, policy, self.pending_wallet_release(&self.epoch),
+            &self.epoch, &self.registry, policy, self.pending_wallet_release(&self.epoch),membership.as_deref(),
         )?;
         subject
             .subject_root_v2()
@@ -746,7 +802,7 @@ fn check_treasury_processing_context(config: &NodeConfiguration, request_path: &
     let request: serde_json::Value = serde_json::from_slice(&raw).map_err(|_| "invalid treasury request")?;
     let p = &request["parameters"];
     let text = p["processing_context_json"].as_str().ok_or("treasury processing bytes missing")?;
-    let governance=request["operation"]=="ethereum_activation_fee_prepare";
+    let governance=request["operation"]=="ethereum_activation_fee_prepare"||request["operation"]=="membership_retirement_fee_prepare";
     let funding=request["operation"]=="ethereum_funding_prepare";
     if request["version"] != 1 || !(request["operation"] == "treasury_send_prepare"||governance||funding)
         || funding && (p["ethereum_funding"]!=true || !p["governance_execution"].is_null())
@@ -781,12 +837,12 @@ fn check_treasury_processing_context(config: &NodeConfiguration, request_path: &
     if governance {
         let execution:synergy_governance::GovernanceExecution=serde_json::from_value(p["governance_execution"].clone())
             .map_err(|_|"invalid exact governance execution")?;
-        let spec=crate::services::ethereum_activation::authorize_request(&tip,&execution)?;
+        let frozen_epoch=if execution.mutation.action_kind==crate::services::membership_retirement::ACTION {crate::services::membership_retirement::authorize_request(&tip,&execution)?.spec().frozen_epoch}else{crate::services::ethereum_activation::authorize_request(&tip,&execution)?.frozen_epoch};
         let layout=synergy_storage::NodeStorageLayout::new(config.storage.data_directory.clone()).map_err(|e|e.to_string())?;
         let store=synergy_state::FinalizedStateStore::load(layout.state().join("execution")).map_err(|e|format!("governance finalized scope unavailable: {e:?}"))?;
         let current=store.current().ok_or("governance finalized scope absent")?;
         if current.finalized_height>=execution.proposal.expires_at_height
-            || !tip.epoch.contains_height(current.finalized_height)||spec.frozen_epoch!=tip.epoch.epoch {
+            || !tip.epoch.contains_height(current.finalized_height)||frozen_epoch!=tip.epoch.epoch {
             return Err("governance signing window is no longer current".into())
         }
         let bytes=serde_json::to_vec(&execution).map_err(|_|"invalid governance execution")?;
@@ -1784,6 +1840,7 @@ fn signed_derived_test_proof(
             },
             closing_material: closing_material.into(),
             next_validators,
+            membership_execution:None,
         },
         closing_candidate,
     )

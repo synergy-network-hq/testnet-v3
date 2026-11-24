@@ -114,18 +114,15 @@ impl WalletSynIdRegistry {
     }
 }
 fn wallet_address(address: &str) -> bool {
-    (address.starts_with("synw1") || address.starts_with("syna1"))
-        && synergy_address::is_valid_address(address)
+    synergy_address::parse_protected_wallet_address(address).is_ok()
+        || ((address.starts_with("synw1") || address.starts_with("syna1")) && synergy_address::is_valid_address(address))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     fn address(byte: u8) -> String {
-        synergy_address::generate_wallet_address(&hex_key(byte)).unwrap()
-    }
-    fn hex_key(byte: u8) -> String {
-        format!("{byte:02x}").repeat(1793)
+        synergy_address::protected_wallet_native_representation([byte;20]).unwrap()
     }
     #[test]
     fn wallet_alias_is_immutable_and_survives_canonical_roundtrip() {

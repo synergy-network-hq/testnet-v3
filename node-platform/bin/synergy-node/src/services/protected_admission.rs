@@ -727,8 +727,9 @@ impl AdmissionHandle {
         genesis: &str,
         profile: &str,
     ) -> Result<Value, String> {
-        use synergy_etdag::admission::{PW13_SPONSOR_CANDIDATE_PROFILE_ID, PW13_TRANSFER_CANDIDATE_PROFILE_ID};
-        if !matches!(profile, PW13_SPONSOR_CANDIDATE_PROFILE_ID | PW13_TRANSFER_CANDIDATE_PROFILE_ID) {
+        use synergy_etdag::admission::{PW13_SPONSOR_CANDIDATE_PROFILE_ID, PW13_TRANSFER_CANDIDATE_PROFILE_ID, PW13_FEE_FREE_ENROLLMENT_PROFILE_ID, PW13_FEE_FREE_SYNID_PROFILE_ID};
+        if !cfg!(test) && profile==PW13_SPONSOR_CANDIDATE_PROFILE_ID {return Err("fee-paying enrollment profile is retired".into());}
+        if !matches!(profile, PW13_SPONSOR_CANDIDATE_PROFILE_ID | PW13_TRANSFER_CANDIDATE_PROFILE_ID | PW13_FEE_FREE_ENROLLMENT_PROFILE_ID | PW13_FEE_FREE_SYNID_PROFILE_ID) {
             return Err("unknown protected Wallet processing profile".into());
         }
         let release = authority.native_wallet_release()?;
@@ -841,6 +842,7 @@ impl AdmissionHandle {
         admission: synergy_etdag::admission::ProtectedWalletAdmission,
     ) -> Result<Value, String> {
         authority.native_wallet_release()?;
+        if !cfg!(test) && matches!(admission.authorization,synergy_etdag::admission::ProtectedWalletAuthorization::SponsoredEnrollment(_)) {return Err("fee-paying enrollment admission is retired".into());}
         let aad = &admission.envelope.aad;
         if aad.chain_id != authority.epoch.chain_id
             || aad.network_id != authority.epoch.network_id

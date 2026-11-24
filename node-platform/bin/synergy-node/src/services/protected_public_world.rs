@@ -123,7 +123,35 @@ pub(in crate::services) fn validate_public_wallet_record(
         }
         return Ok(true);
     }
-    if sponsor_settlement::owns_key(key) {
+    if let Some(id)=key.strip_prefix(synergy_etdag::admission::FEE_FREE_SYNID_SETTLEMENT_PREFIX) {
+        use synergy_etdag::admission::*;
+        let record:FeeFreeSynIdSettlement=decode(bytes,8192)?;
+        if encode(&record)?!=bytes||record.version!=1||record.genesis!=scope.network.genesis
+            ||record.account==[0;20]||record.fee_nwei!=0||record.gas_used==0||record.admission_digest.len()!=64
+            ||record.source_finalized_height==0||record.source_finalized_height>=record.included_height
+            ||record.deciding_finalized_height<record.source_finalized_height||record.deciding_finalized_height>=record.included_height
+            ||record.included_height>scope.height||record.included_height<scope.activation
+            ||record.envelope_id.0!=id||record.envelope_id.is_zero()||record.envelope_id.validate().is_err()
+            ||synergy_naming::normalize_wallet_syn_id(&record.syn_id)?!=record.syn_id {return Err("invalid public fee-free SynID record".into());}
+    } else if key.starts_with(synergy_etdag::admission::FEE_FREE_ENROLLMENT_SETTLEMENT_PREFIX) {
+        use synergy_etdag::admission::*;
+        let record:FeeFreeEnrollmentSettlement=decode(bytes,8192)?;
+        if encode(&record)?!=bytes || record.version!=1 || record.genesis!=scope.network.genesis
+            || record.account==[0;20] || record.commitment==[0;32] || record.session_id==[0;32]
+            || record.fee_nwei!=0 || record.gas_used==0 || record.admission_digest.len()!=64
+            || record.source_finalized_height==0 || record.source_finalized_height>=record.included_height
+            || record.deciding_finalized_height<record.source_finalized_height
+            || record.deciding_finalized_height>=record.included_height
+            || record.included_height>scope.height || record.included_height<scope.activation
+            || record.source_consensus_timestamp_unix==0
+            || record.inclusion_consensus_timestamp_unix<record.source_consensus_timestamp_unix
+            || fee_free_enrollment_settlement_key(&record.session_id,record.action).map_err(debug)?!=key
+            || record.envelope_id.is_zero() || record.envelope_id.validate().is_err()
+            || !matches!((record.action,&record.outcome),
+                (FEE_FREE_ENROLL_COMMIT,FeeFreeEnrollmentOutcome::CommitApplied|FeeFreeEnrollmentOutcome::CommitAlreadyPresent|FeeFreeEnrollmentOutcome::Expired)
+                |(FEE_FREE_ENROLL_REVEAL,FeeFreeEnrollmentOutcome::RevealApplied|FeeFreeEnrollmentOutcome::RevealRejectedCommitUsed|FeeFreeEnrollmentOutcome::Expired))
+        {return Err("invalid public fee-free enrollment settlement".into());}
+    } else if sponsor_settlement::owns_key(key) {
         sponsor_settlement::validate_public_record(scope, key, bytes)?;
     } else if settlement::owns_key(key) {
         settlement::validate_public_record(scope, key, bytes)?;

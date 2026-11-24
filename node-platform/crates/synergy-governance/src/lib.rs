@@ -9,6 +9,7 @@ pub mod constitution;
 pub mod emergency;
 pub mod ethereum_activation;
 pub mod execution;
+pub mod membership;
 pub mod proposal;
 pub mod vote;
 
@@ -22,6 +23,7 @@ pub use ethereum_activation::{
     ETHEREUM_ACTIVATION_TARGET_V1,
 };
 pub use execution::{GovernanceExecution, GovernedStateMutation};
+pub use membership::{MembershipRetirementSpec, MembershipRetirementDraft, MEMBERSHIP_RETIREMENT_ACTION_V1};
 pub use proposal::{GovernanceAction, GovernanceProposal, ProposalState};
 pub use vote::{GovernanceVote, VoteChoice, VoteVerifier};
 

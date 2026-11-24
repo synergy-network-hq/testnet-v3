@@ -1,11 +1,56 @@
 {
-  "format": "synergy-protected-wallet-dual-enrollment-v2",
+  "format": "synergy-protected-wallet-fee-free-enrollment-v3",
   "base_action_registry_sha256": "aee5e1e0cdc826fc00061d29696adfa291a878cd8689e8d247e49a2cef697bce",
   "additional_initial_enrollment": {
     "action_id": 28674,
     "enrollment_schema": 2,
-    "authorization": "D+P enrollment + ownership + two-party DKG + SPONSOR",
-    "native_spend": ["D", "P"],
+    "authorization": "D+P initial native enrollment proofs + AccountBinding + D/P envelope admission; optional R proof is preserved",
+    "native_spend": [
+      "D",
+      "P"
+    ],
     "recovery": "unset"
+  },
+  "economics": {
+    "wallet_creation_actual_protocol_fee_nwei": "0",
+    "initial_synid_actual_protocol_fee_nwei": "0",
+    "financial_payer_required": false,
+    "sponsor_or_treasury_debit": false,
+    "resource_metering": "positive bounded nonfinancial gas units",
+    "scope": "all networks permanently; normal transfer and contract fees remain governed"
+  },
+  "fee_free_enrollment": {
+    "profile_id": "etdag-pw13-fee-free-enrollment-v1",
+    "lane": "fee-free-enrollment",
+    "sender": "enroll:<native creation operation hex>",
+    "stage_nonce": {
+      "commit": 0,
+      "reveal": 1
+    },
+    "financial_account_nonce": "unchanged",
+    "outer_native_proofs": [
+      "D",
+      "P"
+    ],
+    "proof_context": "AEGIS.PW13.FEE-FREE.ENROLLMENT.ADMISSION.V1",
+    "opaque_slots": [
+      "canonical FeeFreeEnrollmentIntent JSON",
+      "canonical enrollment action CBOR",
+      "empty"
+    ],
+    "actual_fee_nwei": "0"
+  },
+  "initial_synid": {
+    "profile_id": "etdag-pw13-fee-free-synid-v1",
+    "lane": "fee-free-synid",
+    "authorization": "exact currently registered native D/P policy",
+    "proof_context": "AEGIS.PW13.FEE-FREE.SYNID.ADMISSION.V1",
+    "payload": "canonical FeeFreeSynIdIntent JSON only",
+    "sender": "synid:<protected account hex>",
+    "stage_nonce": 0,
+    "financial_account_nonce": "unchanged",
+    "replay": "exact envelope settlement; terminal failure permits a fresh signed attempt",
+    "successful_owner_aliases": 1,
+    "actual_fee_nwei": "0"
   }
 }

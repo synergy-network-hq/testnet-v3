@@ -145,6 +145,7 @@ pub(crate) fn qualification_authority_for_network(
         genesis_autonomous: false,
         ethereum_genesis: None,
         ethereum_activation_cache:Arc::new(Mutex::new(None)),
+        membership_retirement:Arc::new(Mutex::new(None)),
         managed_wallet_release: None,
         anchor_parent: SimplifiedFinalityParent::Genesis {
             genesis_hash: "c".repeat(64),
@@ -212,6 +213,7 @@ pub struct VerifiedAuthority {
     genesis_autonomous: bool,
     ethereum_genesis: Option<EthereumGenesisAuthority>,
     pub(super) ethereum_activation_cache:Arc<Mutex<Option<super::ethereum_activation::CachedActivation>>>,
+    pub(super) membership_retirement:Arc<Mutex<Option<Arc<synergy_genesis::membership::VerifiedMembershipRetirement>>>>,
     managed_wallet_release: Option<Arc<managed_wallet::ManagedWalletRelease>>,
     verifier: PqvmVerifier,
     wallet_verifier: PqvmVerifier,
@@ -453,6 +455,7 @@ impl Clone for VerifiedAuthority {
             genesis_autonomous: self.genesis_autonomous,
             ethereum_genesis:self.ethereum_genesis.clone(),
             ethereum_activation_cache:self.ethereum_activation_cache.clone(),
+            membership_retirement:self.membership_retirement.clone(),
             managed_wallet_release: self.managed_wallet_release.clone(),
             verifier: self.verifier.clone(),
             wallet_verifier: self.wallet_verifier.clone(),
@@ -506,6 +509,7 @@ impl VerifiedAuthority {
             assigned_cluster_id: 0,
             assigned_cluster_membership_root: self.epoch.active_validator_set_root.clone(),
             wallet_dispatch: None,
+            membership_authorization_root: None,
         }));
         authority
     }
@@ -1119,6 +1123,7 @@ fn verify_binding_with_explicit_key(
         genesis_autonomous: false,
         ethereum_genesis: None,
         ethereum_activation_cache:Arc::new(Mutex::new(None)),
+        membership_retirement:Arc::new(Mutex::new(None)),
         managed_wallet_release: None,
         anchor_parent: binding.payload.anchor_parent,
         verifier,

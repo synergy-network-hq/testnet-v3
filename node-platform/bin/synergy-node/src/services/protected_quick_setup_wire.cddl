@@ -1,8 +1,11 @@
-; Candidate dual-enrollment wire extension. The original action IDs, sponsor
-; intent/evidence, commit window, direct DPR and all other frames are unchanged.
-; Original CDDL SHA-256 a80223355b314d20388c51beb6bb6b9b44d509b8d6282694fcf48bfac3dc3324.
-; Original action payload still encloses exact enrollment_cbor and salt.
-dp-sponsored-reveal = [
+; Fee-free initial enrollment v3. Actual protocol fee is zero on all networks.
+; No sponsor, payer, fee cap, funding, deposit or financial nonce is present.
+; The three leading bstr slots are EXACT canonical FeeFreeEnrollmentIntent
+; JSON, canonical action CBOR, and empty bytes. D/P admission signatures bind
+; the encrypted envelope and bounded resources in the dedicated profile.
+; D/P/R initial proofs and AccountBinding remain mandatory for that role set.
+fee-free-enrollment-commit = [28673, bstr, bstr, bstr .size 0]
+dp-enrollment-reveal = [
   28674, bstr, bstr, bstr, [dp-pop-d, dp-pop-p],
   bstr .size 65, bstr .size 32
 ]

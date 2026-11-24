@@ -24,6 +24,10 @@ mod policy_variant;
 mod transfer_admission;
 #[path = "protected_sponsored_admission.rs"]
 mod sponsored_admission;
+#[path = "protected_fee_free_enrollment.rs"]
+mod fee_free_enrollment;
+#[path="protected_fee_free_synid.rs"]
+mod fee_free_synid;
 #[path = "protected_recovery.rs"]
 pub(super) mod recovery;
 #[path = "protected_native_recovery.rs"]

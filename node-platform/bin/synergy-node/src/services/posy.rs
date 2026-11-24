@@ -3808,6 +3808,11 @@ impl ManagedService for PosyService {
             else if let Some(owner)=self.governance_owner.as_mut() {
                 use synergy_admin_api::operations::GovernanceOperation;
                 match request.operation {
+                    GovernanceOperation::PrepareMembershipRetirement{retired_validator_id}=>owner.prepare_membership(&self.authority,&self.ingress,&retired_validator_id),
+                    GovernanceOperation::ReviewMembershipRetirement{draft}=>owner.review_membership(&self.authority,&self.ingress,&draft),
+                    GovernanceOperation::MembershipRetirementApprovalStatus{draft}=>owner.membership_approval_status(&self.authority,&draft),
+                    GovernanceOperation::ApproveMembershipRetirement{draft,review_root}=>owner.approve_membership(&self.authority,&self.ingress,&draft,&review_root),
+                    GovernanceOperation::AssembleMembershipRetirement{draft,review_root,votes}=>owner.assemble_membership(&self.authority,&self.ingress,&draft,&review_root,votes),
                     GovernanceOperation::PrepareEthereum{policy_json}=>owner.prepare(&self.authority,&self.ingress,&policy_json),
                     GovernanceOperation::EthereumApprovalStatus{draft}=>draft.review_root().and_then(|root|owner.approval_status(&self.authority,&draft,&root)),
                     GovernanceOperation::ReviewEthereum{draft}=>owner.review(&self.authority,&self.ingress,&draft),

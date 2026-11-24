@@ -128,6 +128,10 @@ pub struct ProtectedEpochPolicy {
     /// an epoch which predates protected Wallet dispatch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wallet_dispatch: Option<ProtectedWalletDispatchPolicy>,
+    /// Most recent certified membership authorization. Absence preserves the
+    /// original policy bytes and all historical unchanged-rollover proofs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub membership_authorization_root: Option<String>,
 }
 
 impl ProtectedEpochPolicy {
@@ -330,6 +334,7 @@ mod protected_key_schedule_tests {
             assigned_cluster_id: 0,
             assigned_cluster_membership_root: "d".repeat(64),
             wallet_dispatch: None,
+            membership_authorization_root: None,
         };
         assert_eq!(
             policy.timestamp_for_height_ms(1, 100, 1).unwrap(),

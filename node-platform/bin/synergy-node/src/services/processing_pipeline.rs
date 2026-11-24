@@ -87,6 +87,7 @@ pub(super) fn processing_namespace(
                 .root()
                 .map_err(err)?,
             authority
+                .autonomous_processing_origin()
                 .protected_ingress_registry()?
                 .root()
                 .map_err(err)?,
@@ -107,7 +108,7 @@ pub(super) fn try_processing_namespace(
         Err(WorldResourceError::Capacity { .. }) => return Ok(None),
         Err(error) => return Err(err(error)),
     };
-    let registry = authority.protected_ingress_registry()?;
+    let registry = authority.autonomous_processing_origin().protected_ingress_registry()?;
     let size = encoded_len(&(&authority.epoch, &registry))?;
     match scratch.grow(size.checked_mul(16).ok_or("processing size overflow")?) {
         Ok(()) => {}
@@ -170,11 +171,11 @@ impl std::ops::Deref for ProcessingSourceWorld<'_> {
 }
 pub(super) fn is_pw13_context(context: &ProcessingContext) -> bool {
     use synergy_etdag::admission::{
-        PW13_SPONSOR_CANDIDATE_PROFILE_ID, PW13_TRANSFER_CANDIDATE_PROFILE_ID,
+        PW13_SPONSOR_CANDIDATE_PROFILE_ID, PW13_TRANSFER_CANDIDATE_PROFILE_ID, PW13_FEE_FREE_ENROLLMENT_PROFILE_ID, PW13_FEE_FREE_SYNID_PROFILE_ID,
     };
     matches!(
         context.profile_id.as_str(),
-        PW13_SPONSOR_CANDIDATE_PROFILE_ID | PW13_TRANSFER_CANDIDATE_PROFILE_ID
+        PW13_SPONSOR_CANDIDATE_PROFILE_ID | PW13_TRANSFER_CANDIDATE_PROFILE_ID | PW13_FEE_FREE_ENROLLMENT_PROFILE_ID | PW13_FEE_FREE_SYNID_PROFILE_ID
     )
 }
 

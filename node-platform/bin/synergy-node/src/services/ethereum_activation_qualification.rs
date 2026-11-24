@@ -181,6 +181,9 @@ fn real_apqe_governance_evm_scope_native_settlement_history_and_restart() {
         .take(4)
         .map(|config| posy::qualification_protocol_signer(config, &authority).unwrap())
         .collect::<Vec<_>>();
+    let mut membership_signers=signers.clone();
+    membership_signers.push(posy::qualification_protocol_signer(&prepared.configurations[4],&authority).unwrap());
+    crate::services::authority::recovery::successor::qualify_membership_transition(authority.clone(), &membership_signers);
     let budget = WorldResourceBudget::new(512 * 1024 * 1024);
     let initial = authority.initial_world_state_budgeted(&budget).unwrap();
     // Real native dispatcher and actual APQE authorization. A registration

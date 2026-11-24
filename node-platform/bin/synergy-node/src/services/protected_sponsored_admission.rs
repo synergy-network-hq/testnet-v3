@@ -46,6 +46,9 @@ impl CandidateProtectedAccounts<'_> {
         fee_schedule: &FeeSchedule,
         gas: u64,
     ) -> Result<VerifiedSponsoredAdmission, String> {
+        // Retained only for historical decoding and explicit legacy fixtures.
+        // No production route may authorize a financial enrollment payer.
+        if !cfg!(test) { return Err("fee-paying enrollment is retired; use the closed fee-free enrollment profile".into()); }
         transfer_admission::require_source(finalized, context)?;
         request.validate_context(envelope, context).map_err(debug)?;
         let resources = &request.resources;

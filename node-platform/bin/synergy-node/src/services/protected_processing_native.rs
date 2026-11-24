@@ -454,6 +454,7 @@ impl ProcessingReadinessVerifier for NativeProtectedDispatch<'_> {
         if !std::ptr::eq(parent, self.parent.as_ref()) {
             return Err("protected eligibility belongs to a different parent".into());
         }
+        if record.sender_wallet.starts_with("enroll:") || record.sender_wallet.starts_with("synid:") {return Ok(record.sender_nonce<=1);}
         Ok(parent
             .accounts
             .get(&record.sender_wallet)
@@ -463,11 +464,13 @@ impl ProcessingReadinessVerifier for NativeProtectedDispatch<'_> {
     }
 
     fn retires_without_nonce(&self, record: &ProcessingReadyRecord) -> bool {
-        self.dispositions.contains_key(&record.item.envelope_id)
+        (record.sender_wallet.starts_with("enroll:") || record.sender_wallet.starts_with("synid:")) || self.dispositions.contains_key(&record.item.envelope_id)
     }
 }
 
 impl ProcessingNativeWalletActions for NativeProtectedDispatch<'_> {
+    fn external_nonce_owner(&self,record:&ProcessingReadyRecord)->bool {self.owns(record)&&(record.sender_wallet.starts_with("enroll:") || record.sender_wallet.starts_with("synid:"))&&record.sender_nonce<=1}
+
     fn owns(&self, record: &ProcessingReadyRecord) -> bool {
         self.owned.contains(&record.item.envelope_id)
     }

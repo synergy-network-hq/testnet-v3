@@ -48,7 +48,6 @@ struct PrepareAuthorityInput {
 }
 
 pub const CRYPTO_PROFILE_DOMAIN: &str = "SYNERGY_FRESH_CRYPTO_PROFILE_V1";
-const PROCESSING_CRYPTO_PROFILE_DOMAIN: &str = "SYNERGY_ASYNC_CRYPTO_PROFILE_V1";
 const PROCESSING_SCHEDULE_DOMAIN: &str = "SYNERGY_ASYNC_AUTHORIZATION_SCHEDULE_V1";
 pub const CLUSTER_MAP_DOMAIN: &str = "SYNERGY_FRESH_SINGLE_CLUSTER_MAP_V1";
 pub const HEIGHT_SCHEDULE_DOMAIN: &str = "SYNERGY_FRESH_TARGET_SCHEDULE_V1";
@@ -358,15 +357,11 @@ fn derive_genesis(
     };
     bind_expected_root(
         &mut policy.cryptographic_profile_root,
-        synergy_posy::canonical_hash(
-            if processing {
-                PROCESSING_CRYPTO_PROFILE_DOMAIN
-            } else {
-                CRYPTO_PROFILE_DOMAIN
-            },
-            &crypto,
-        )
-        .map_err(|e| e.to_string())?,
+        if processing {
+            synergy_genesis::membership::processing_crypto_profile(registry.active_count())?
+        } else {
+            synergy_posy::canonical_hash(CRYPTO_PROFILE_DOMAIN, &crypto).map_err(|e| e.to_string())?
+        },
     )?;
     let cluster = ClusterMapDescriptor {
         version: 1,

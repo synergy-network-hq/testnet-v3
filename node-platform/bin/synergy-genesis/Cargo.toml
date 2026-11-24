@@ -13,6 +13,7 @@ sha3.workspace = true
 synergy-aegis = { path = "../../crates/synergy-aegis" }
 synergy-etdag = { path = "../../crates/synergy-etdag" }
 synergy-posy = { path = "../../crates/synergy-posy" }
+synergy-governance = { path = "../../crates/synergy-governance" }
 synergy-storage = { path = "../../crates/synergy-storage" }
 
 synergy-state = { path = "../../crates/synergy-state" }

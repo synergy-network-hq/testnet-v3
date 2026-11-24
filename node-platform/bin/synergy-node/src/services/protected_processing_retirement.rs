@@ -50,7 +50,9 @@ fn receipt_digest(world: &WorldState, key: &str) -> Result<EtdagDigest, String> 
     if key.len() > 384
         || !(settlement::owns_key(key)
             || sponsor_settlement::owns_key(key)
-            || processing_disposition::owns_key(key))
+            || processing_disposition::owns_key(key)
+            || key.starts_with(synergy_etdag::admission::FEE_FREE_ENROLLMENT_SETTLEMENT_PREFIX)
+            || key.starts_with(synergy_etdag::admission::FEE_FREE_SYNID_SETTLEMENT_PREFIX))
     {
         return Err("invalid protected processing receipt key".into());
     }

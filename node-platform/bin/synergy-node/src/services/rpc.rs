@@ -1100,7 +1100,9 @@ impl RpcDispatcher for RuntimeDispatcher {
                     if profile != synergy_etdag::PROCESSING_PROFILE_ID {
                         if !matches!(profile,
                             synergy_etdag::admission::PW13_SPONSOR_CANDIDATE_PROFILE_ID
-                            | synergy_etdag::admission::PW13_TRANSFER_CANDIDATE_PROFILE_ID)
+                            | synergy_etdag::admission::PW13_TRANSFER_CANDIDATE_PROFILE_ID
+                            | synergy_etdag::admission::PW13_FEE_FREE_ENROLLMENT_PROFILE_ID
+                            | synergy_etdag::admission::PW13_FEE_FREE_SYNID_PROFILE_ID)
                         {
                             return Err(RpcError::invalid_params("unknown processing profile"));
                         }

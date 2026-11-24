@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 pub enum ProtectedWalletAuthorization {
     Transfer(Pw13TransferAdmission),
     SponsoredEnrollment(Pw13SponsoredAdmission),
+    FeeFreeEnrollment(super::Pw13FeeFreeEnrollmentAdmission),
+    FeeFreeSynId(super::Pw13FeeFreeSynIdAdmission),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +33,8 @@ impl ProtectedWalletAdmission {
         match &self.authorization {
             ProtectedWalletAuthorization::Transfer(proof) => proof.resources.gas_limit,
             ProtectedWalletAuthorization::SponsoredEnrollment(proof) => proof.resources.gas_limit,
+            ProtectedWalletAuthorization::FeeFreeEnrollment(proof) => proof.resources.gas_limit,
+            ProtectedWalletAuthorization::FeeFreeSynId(proof)=>proof.resources.gas_limit,
         }
     }
 
@@ -42,6 +46,8 @@ impl ProtectedWalletAdmission {
             ProtectedWalletAuthorization::SponsoredEnrollment(proof) => {
                 proof.validate_context(&self.envelope, context)
             }
+            ProtectedWalletAuthorization::FeeFreeEnrollment(proof) => proof.validate_context(&self.envelope, context),
+            ProtectedWalletAuthorization::FeeFreeSynId(proof)=>proof.validate_context(&self.envelope, context),
         }
     }
 }

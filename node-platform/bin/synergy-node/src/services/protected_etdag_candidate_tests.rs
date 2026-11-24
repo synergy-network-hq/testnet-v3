@@ -106,6 +106,8 @@ pub(super) struct OpenedCandidateEnvelope {
 pub(super) enum CandidateEnvelopeProfile {
     Transfer,
     SponsoredEnrollment,
+    FeeFreeEnrollment,
+    FeeFreeSynId,
 }
 impl OpenedCandidateEnvelope {
     pub(super) fn plaintext(&self) -> &[u8] {
@@ -974,6 +976,7 @@ fn qualify_retained_replay(
     qualify_runtime_wallet_carrier(authority, context, &retained.vertex, &request_bytes)?;
     let mut pending = open()?;
     let identity = match &retained.vertex.admission.authorization {
+        CandidateAuthorization::FeeFreeEnrollment(_)|CandidateAuthorization::FeeFreeSynId(_)=>pending.admit(context,snapshot.consensus_time,&request_bytes,&recovery).map_err(err)?,
         CandidateAuthorization::SponsoredEnrollment(_) => {
             let first = intake.admit_sponsored_enrollment(&mut pending, &request_bytes).map_err(err)?;
             let retried = intake.admit_sponsored_enrollment(&mut pending, &request_bytes).map_err(err)?;
@@ -1583,6 +1586,8 @@ pub(super) fn open_candidate_envelope<T>(
     };
     registry.validate_protected_profile().map_err(err)?;
     let (profile, lane, network) = match profile {
+        CandidateEnvelopeProfile::FeeFreeEnrollment=>(synergy_etdag::admission::PW13_FEE_FREE_ENROLLMENT_PROFILE_ID,synergy_etdag::admission::PW13_FEE_FREE_ENROLLMENT_LANE,"isolated-fee-free-enrollment"),
+        CandidateEnvelopeProfile::FeeFreeSynId=>(synergy_etdag::admission::PW13_FEE_FREE_SYNID_PROFILE_ID,synergy_etdag::admission::PW13_FEE_FREE_SYNID_LANE,"isolated-fee-free-synid"),
         CandidateEnvelopeProfile::Transfer => (
             PW13_TRANSFER_CANDIDATE_PROFILE_ID,
             PW13_TRANSFER_CANDIDATE_LANE,

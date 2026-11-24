@@ -310,6 +310,9 @@ pub(super) fn processing_transaction(
     if authorization_id != execution.authorization_root {
         return Err("EVM governance authorization identity differs".into());
     }
+    if execution.mutation.action_kind==super::membership_retirement::ACTION {
+        return Ok(Some(super::membership_retirement::authorize_request(authority,&execution)?.spec().install_not_before_finalized_height));
+    }
     Ok(Some(
         authorize_request(authority, &execution)?.install_height,
     ))

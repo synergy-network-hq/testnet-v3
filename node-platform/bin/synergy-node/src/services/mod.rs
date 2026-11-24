@@ -5,6 +5,7 @@ mod apqe_rpc;
 pub(crate) mod apqe_rpc_service;
 pub(super) mod apqe_transport;
 pub mod authority;
+mod membership_retirement;
 pub(crate) mod checkpoint;
 pub(crate) mod delivery_stage;
 mod cut_recovery;

@@ -40,7 +40,7 @@ impl NamingAuthorizationVerifier for Verifier {
 }
 
 fn wallet(seed: u8) -> String {
-    synergy_address::generate_wallet_address(&format!("{seed:02x}").repeat(1_793)).unwrap()
+    synergy_address::protected_wallet_native_representation([seed;20]).unwrap()
 }
 
 fn authorization(wallet: String, nonce: u64) -> NamingAuthorization {

@@ -7,6 +7,9 @@ mod protected_transfer;
 mod request;
 mod resource_limits;
 mod sponsored_enrollment;
+mod fee_free_enrollment;
+mod fee_free_synid;
+pub use fee_free_synid::*;
 mod target_height;
 mod validator;
 mod verifier;
@@ -34,6 +37,14 @@ pub use request::{
 pub use resource_limits::AdmissionResourceLimits;
 pub use sponsored_enrollment::{
     Pw13SponsoredAdmission, Pw13SponsoredResources, PW13_SPONSOR_ADMISSION_CONTEXT,
+};
+pub use fee_free_enrollment::{
+    FeeFreeEnrollmentIntent, Pw13FeeFreeEnrollmentResources, Pw13FeeFreeEnrollmentAdmission,
+    InitialEnrollmentProof, FeeFreeEnrollmentOutcome, FeeFreeEnrollmentSettlement,
+    fee_free_enrollment_candidate_digest, fee_free_enrollment_settlement_key,
+    PW13_FEE_FREE_ENROLLMENT_PROFILE_ID, PW13_FEE_FREE_ENROLLMENT_LANE,
+    PW13_FEE_FREE_ENROLLMENT_ADMISSION_CONTEXT, FEE_FREE_ENROLL_COMMIT, FEE_FREE_ENROLL_REVEAL,
+    FEE_FREE_ENROLLMENT_SETTLEMENT_PREFIX,
 };
 pub use target_height::{
     protected_target_height, protected_target_height_with_offset,

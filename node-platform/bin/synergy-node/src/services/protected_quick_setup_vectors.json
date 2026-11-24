@@ -1,12 +1,17 @@
 {
-  "format": "synergy-protected-wallet-dual-enrollment-v2-framing",
+  "format": "synergy-protected-wallet-fee-free-enrollment-v3-framing",
   "base_action_vectors_sha256": "4dfd6d62c1745785362ff494ae39f637f6f244aa52df5e3da239b251f387372f",
   "fixture": {
-    "opaque_slots": ["opaque sponsor?", "unassigned binding", ""],
+    "opaque_slots": [
+      "opaque sponsor?",
+      "unassigned binding",
+      ""
+    ],
     "role_descriptor": "version 1, algorithm 1, key version 1, role i, participant byte i+1, digest byte i+10, signature byte i+20",
     "ownership_fill": 30,
     "salt_fill": 40,
-    "cryptographic_authority": false
+    "cryptographic_authority": false,
+    "legacy_unassigned_framing_only": true
   },
   "dp_sponsored_reveal": {
     "encoded_bytes": 9612,
@@ -15,5 +20,12 @@
   "dpr_sponsored_reveal": {
     "encoded_bytes": 14347,
     "sha256": "22cc6e4fadf9228ce8cef61185fdf66e8f560757c8496248a68d29125d330945"
+  },
+  "fee_free_economics": {
+    "commit_fee_nwei": "0",
+    "reveal_fee_nwei": "0",
+    "initial_synid_fee_nwei": "0",
+    "financial_nonce_consumed": false,
+    "payer_required": false
   }
 }

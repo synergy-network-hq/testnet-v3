@@ -2230,6 +2230,9 @@ impl AuthenticatedIngress {
             .0
             .lock()
             .map_err(|_| "runtime pipeline lock poisoned")?;
+        if let Some(authority)=queues.finality_history.as_ref().and_then(|history|history.authority.autonomous_authority_at(height)) {
+            super::membership_retirement::refresh_finalized(authority,height,&world)?;
+        }
         if queues
             .processing_finalized_world
             .as_ref()

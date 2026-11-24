@@ -26,6 +26,8 @@ impl RuntimeProcessingAdmission {
             Self::Ordinary(_) => PROCESSING_PROFILE_ID,
             Self::Ethereum(_) => ETHEREUM_PROCESSING_PROFILE_ID,
             Self::Protected(value) => match &value.authorization {
+                ProtectedWalletAuthorization::FeeFreeSynId(_)=>PW13_FEE_FREE_SYNID_PROFILE_ID,
+                ProtectedWalletAuthorization::FeeFreeEnrollment(_)=>PW13_FEE_FREE_ENROLLMENT_PROFILE_ID,
                 ProtectedWalletAuthorization::Transfer(_) => PW13_TRANSFER_CANDIDATE_PROFILE_ID,
                 ProtectedWalletAuthorization::SponsoredEnrollment(_) => {
                     PW13_SPONSOR_CANDIDATE_PROFILE_ID
