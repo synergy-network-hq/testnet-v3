@@ -125,13 +125,35 @@ class RosterSelection(unittest.TestCase):
                 patch.object(collector.subprocess, 'check_output', return_value='hostname example.test'), \
                 patch.object(collector, 'read', side_effect=observe), \
                 patch.object(collector.owner, 'remote') as remote, redirect_stdout(io.StringIO()) as output:
-            report = collector.run(once=True, observe_only=scope)
+            report = collector.run(once=True, selected=scope, observe_only=True)
             self.assertEqual(report, json.loads(output.getvalue()))
             self.assertEqual(report['chain']['genesis_hash'], self.genesis)
+            self.assertEqual(report['chain']['lifecycle'], 'active')
             self.assertIsNone(report['validators'][3]['public_ip'])
             self.assertIsNone(report['validators'][3]['finalized_height'])
             with self.assertRaisesRegex(ValueError, 'explicitly selected network'):
-                collector.run(once=True, observe_only={**scope, 'genesis_hash': 'f' * 64})
+                collector.run(once=True, selected={**scope, 'genesis_hash': 'f' * 64}, observe_only=True)
+            remote.assert_not_called()
+
+    def test_selected_publish_uses_existing_index_owner_and_refuses_wrong_genesis(self):
+        self.states[5] = {'service': {}, 'block': None}
+        for state in self.states.values():
+            state.update(wallets=None, transactions=None, release_id=None)
+        scope = dict(chain_id=99999, network_id=self.network, genesis_hash=self.genesis)
+        owners = {'synergy-index': '/tmp/index'}
+
+        with patch.dict(collector.MASTER_SOCKETS, owners, clear=True), \
+                patch.object(collector, 'read', side_effect=lambda item: (item[0], self.states[item[0]])), \
+                patch.object(collector.owner, 'remote', return_value=b'') as remote, redirect_stdout(io.StringIO()):
+            report = collector.run(once=True, selected=scope)
+            remote.assert_called_once()
+            host, socket, command, data = remote.call_args.args
+            self.assertEqual((host, socket, command), ('synergy-index', '/tmp/index',
+                                                      ['python3', '-c', collector.PUBLISH, '99999', self.network, self.genesis]))
+            self.assertEqual(json.loads(data), report)
+            remote.reset_mock()
+            with self.assertRaisesRegex(ValueError, 'explicitly selected network'):
+                collector.run(once=True, selected={**scope, 'genesis_hash': 'f' * 64})
             remote.assert_not_called()
 
     def test_duplicate_identity_does_not_count_twice(self):

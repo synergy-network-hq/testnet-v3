@@ -190,14 +190,39 @@ result['observed_at']=datetime.datetime.now(datetime.timezone.utc).isoformat()
 print(json.dumps(result))
 '''
 PUBLISH = r'''
-import os,sys,json,grp
+import os,sys,json,grp,stat,tempfile
 from pathlib import Path
-p=Path('/var/lib/synergy-atlas-posy/telemetry.json');data=sys.stdin.buffer.read(262145)
-assert len(data)<=262144;json.loads(data);assert not p.is_symlink()
-p.parent.mkdir(mode=0o750,exist_ok=True);gid=grp.getgrnam('synergy-atlas-v3').gr_gid;os.chown(p.parent,0,gid)
-tmp=p.parent/'.telemetry-next';fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o640)
-with os.fdopen(fd,'wb') as f:f.write(data);f.flush();os.fsync(f.fileno())
-os.chown(tmp,0,gid);os.replace(tmp,p)
+p=Path('/var/lib/synergy-atlas-posy/telemetry.json')
+data=sys.stdin.buffer.read(262145)
+if not 0<len(data)<=262144 or p.is_symlink():raise ValueError('bounded telemetry file required')
+report=json.loads(data)
+profile=p.parent/'live-profile.json'
+def check_selection():
+ if len(sys.argv)==1:return
+ fields=('chain_id','network_id','genesis_hash')
+ expected=dict(zip(fields,(int(sys.argv[1]),sys.argv[2],sys.argv[3])))
+ fd=os.open(profile,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+ with os.fdopen(fd,'rb') as source:
+  metadata=os.fstat(source.fileno())
+  if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid!=0 or metadata.st_mode&0o022:
+   raise ValueError('protected Atlas network profile required')
+  raw=source.read(16385)
+ if not 0<len(raw)<=16384:raise ValueError('bounded Atlas network profile required')
+ selection=json.loads(raw)
+ if any(selection.get(key)!=expected[key] or report['chain'].get(key)!=expected[key] for key in fields):
+  raise ValueError('publication differs from installed Atlas network selection')
+check_selection()
+p.parent.mkdir(mode=0o750,exist_ok=True)
+gid=grp.getgrnam('synergy-atlas-v3').gr_gid
+os.chown(p.parent,0,gid)
+fd,tmp=tempfile.mkstemp(prefix='.telemetry-next.',dir=p.parent)
+try:
+ with os.fdopen(fd,'wb') as f:
+  f.write(data);os.fchown(f.fileno(),0,gid);os.fchmod(f.fileno(),0o640);f.flush();os.fsync(f.fileno())
+ check_selection()
+ os.replace(tmp,p)
+finally:
+ if os.path.exists(tmp):os.unlink(tmp)
 '''
 
 def read(item):
@@ -498,7 +523,7 @@ def require_selected_chain(expected, observed):
         raise ValueError('Native observations differ from explicitly selected network')
 
 
-def run(report=None, once=False, test_plan=None, observe_only=None):
+def run(report=None, once=False, test_plan=None, *, selected=None, observe_only=False):
     ips = {}
     for n in range(2,7):
         host = f'synergy-val{n}'
@@ -521,14 +546,14 @@ def run(report=None, once=False, test_plan=None, observe_only=None):
             states = dict(pool.map(read, [(n, transaction_cursors.get(n), anchor_height) for n in range(2,7)]))
         try:
             network_id,genesis_hash,verified=active_network(states)
+            chain_fields=observed_chain_fields(states,verified)
+            if selected is not None:
+                require_selected_chain(selected, {**chain_fields, 'network_id':network_id, 'genesis_hash':genesis_hash})
         except ValueError as error:
             print(json.dumps({"telemetry_unverified":str(error)}),flush=True)
             if once:raise
             time.sleep(10)
             continue
-        chain_fields=observed_chain_fields(states,verified)
-        if observe_only is not None:
-            require_selected_chain(observe_only, {**chain_fields, 'network_id':network_id, 'genesis_hash':genesis_hash})
         states=roster_observations(states,verified,network_id,genesis_hash)
         for n, state in states.items():
             cursor = state.pop('_transaction_cursor', None)
@@ -591,13 +616,16 @@ def run(report=None, once=False, test_plan=None, observe_only=None):
             accepted_rates=[state['_throughput'].get('accepted_tps') for state in states.values()]
             tip_state['_throughput']['accepted_tps']=sum(accepted_rates) if all(value is not None for value in accepted_rates) else None
         b=tip_state['block'] if tip_state else {}
-        payload={'observed_at':timestamp,'chain':{**chain_fields,'network_id':network_id,'genesis_hash':genesis_hash,'proposer':current_proposer(states),'height':height,'finalized_height':height,'block_time_ms':speed,'transactions':tip_state['transactions'] if tip_state else None,'wallets':tip_state['wallets'] if tip_state else None,'finalized_block_id':b.get('block_hash'),'state_root':b.get('state_root'),'verified_quorum':None,'throughput':tip_state['_throughput'] if tip_state else None,'load_test':baseline_status(report,states,network_id,now)},'validators':nodes,'tests':tests}
-        if observe_only is not None:
+        payload={'observed_at':timestamp,'chain':{**chain_fields,'lifecycle':'active','network_id':network_id,'genesis_hash':genesis_hash,'proposer':current_proposer(states),'height':height,'finalized_height':height,'block_time_ms':speed,'transactions':tip_state['transactions'] if tip_state else None,'wallets':tip_state['wallets'] if tip_state else None,'finalized_block_id':b.get('block_hash'),'state_root':b.get('state_root'),'verified_quorum':None,'throughput':tip_state['_throughput'] if tip_state else None,'load_test':baseline_status(report,states,network_id,now)},'validators':nodes,'tests':tests}
+        if observe_only:
             print(json.dumps(payload), flush=True)
             return payload
         data=json.dumps(payload).encode()
         try:
-            owner.remote('synergy-index',MASTER_SOCKETS['synergy-index'],['python3','-c',PUBLISH],data)
+            command = ['python3', '-c', PUBLISH]
+            if selected is not None:
+                command.extend(str(selected[key]) for key in ('chain_id', 'network_id', 'genesis_hash'))
+            owner.remote('synergy-index', MASTER_SOCKETS['synergy-index'], command, data)
         except (owner.ProvisionError, OSError) as error:
             # A disconnected existing master must not permanently kill live data.
             # Retry only via the same owner socket; never create a second connection.
@@ -637,19 +665,19 @@ if __name__=='__main__':
         print(json.dumps({'published_lifecycle':'retired','network_id':payload['chain']['network_id']}),flush=True)
         raise SystemExit(0)
     validators = {f'synergy-val{n}' for n in range(2, 7)}
-    observed_scope = None
-    if args.observe_only:
-        if not ({'synergy-val2', 'synergy-val3', 'synergy-val4', 'synergy-val6'}
-                <= set(MASTER_SOCKETS) <= validators):
-            parser.error('Read-only observation requires existing masters for Val2, Val3, Val4 and Val6')
+    active = {'synergy-val2', 'synergy-val3', 'synergy-val4', 'synergy-val6'}
+    index = set() if args.observe_only else {'synergy-index'}
+    scope = None
+    if args.observe_only or any(value is not None for value in (args.chain_id, args.network_id, args.genesis_hash)):
+        if not (active | index <= set(MASTER_SOCKETS) <= validators | index):
+            parser.error('Selected Canary requires existing masters for Val2, Val3, Val4 and Val6, plus the index only when publishing')
         if (args.chain_id is None or not 0 < args.chain_id <= 2**53 - 1
                 or not re.fullmatch(r'[A-Za-z0-9._-]{1,256}', args.network_id or '')
                 or not re.fullmatch(r'[a-f0-9]{64}', args.genesis_hash or '')):
-            parser.error('Read-only observation requires explicit chain ID, network ID and Genesis')
-        observed_scope = dict(chain_id=args.chain_id, network_id=args.network_id, genesis_hash=args.genesis_hash)
-    elif (any(value is not None for value in (args.chain_id, args.network_id, args.genesis_hash))
-          or set(MASTER_SOCKETS) != validators | {'synergy-index'}):
-        parser.error('Publishing requires six existing owner masters; scope flags are for --observe-only')
+            parser.error('Selected Canary requires explicit chain ID, network ID and Genesis')
+        scope = dict(chain_id=args.chain_id, network_id=args.network_id, genesis_hash=args.genesis_hash)
+    elif set(MASTER_SOCKETS) != validators | index:
+        parser.error('Specify all five validator masters or pin a selected chain')
     report=None
     if args.baseline_report:
         path=args.baseline_report.resolve()
@@ -657,4 +685,4 @@ if __name__=='__main__':
             parser.error('baseline report must be a bounded canonical regular file')
         report=json.loads(path.read_bytes())
     if args.test_plan and (args.test_plan.is_symlink() or not args.test_plan.is_file() or args.test_plan.stat().st_size>65536):parser.error('bounded regular current test plan required')
-    run(report,args.once or args.observe_only,args.test_plan,observed_scope)
+    run(report,args.once or args.observe_only,args.test_plan,selected=scope,observe_only=args.observe_only)
