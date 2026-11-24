@@ -6,6 +6,7 @@ use crate::{
     PosyError, PosyResult,
 };
 use sha3::{Digest, Sha3_512};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidateClusterSchedule {
@@ -51,9 +52,30 @@ impl CandidateClusterSchedule {
         for (position, (_, id)) in ranked.into_iter().enumerate() {
             clusters[position % count].validator_ids.push(id);
         }
+        let weights = registry
+            .active()
+            .map(|v| (v.validator_id.as_str(), v.frozen_voting_weight))
+            .collect::<BTreeMap<_, _>>();
         // Canonical ID order for membership lookup; rank determines placement.
         for cluster in &mut clusters {
             cluster.validator_ids.sort();
+            // POSY-00C §0C.10: even the largest possible fault cohort
+            // must have strictly less than one third of its cluster's weight.
+            let mut assigned = cluster
+                .validator_ids
+                .iter()
+                .map(|id| weights[id.as_str()])
+                .collect::<Vec<_>>();
+            assigned.sort_unstable_by(|a, b| b.cmp(a));
+            let total = assigned.iter().sum::<u128>();
+            let fault_count = (assigned.len() - 1) / 3;
+            let top_fault_weight = assigned[..fault_count].iter().sum::<u128>();
+            if top_fault_weight > (total - 1) / 3 {
+                return Err(PosyError::invalid(format!(
+                    "candidate cluster {} fails the top-f frozen-weight bound",
+                    cluster.cluster_id
+                )));
+            }
         }
         Ok(Self {
             epoch: registry.epoch(),
@@ -221,7 +243,7 @@ mod tests {
         .is_err());
     }
     #[test]
-    fn candidate_quorum_is_frozen_cluster_scoped_and_weighted() {
+    fn candidate_quorum_is_frozen_and_cluster_scoped() {
         let map = CandidateClusterSchedule::derive(&registry(10), &"01".repeat(32)).unwrap();
         let c = &map.clusters[0];
         assert!(map.verify_cluster_quorum(c, &c.validator_ids[..4]).is_ok());
@@ -237,18 +259,28 @@ mod tests {
         signers = c.validator_ids[..3].to_vec();
         signers.push(map.clusters[1].validator_ids[0].clone());
         assert!(map.verify_cluster_quorum(c, &signers).is_err());
-        let mut rs = records(5);
-        rs[0].frozen_voting_weight = 1000;
-        let weighted = CandidateClusterSchedule::derive(
-            &FrozenValidatorRegistry::new_candidate_cluster_profile(7, rs).unwrap(),
-            &"01".repeat(32),
-        )
-        .unwrap();
-        assert!(weighted
-            .verify_cluster_quorum(
-                &weighted.clusters[0],
-                &weighted.clusters[0].validator_ids[1..]
-            )
-            .is_err());
+    }
+
+    #[test]
+    fn candidate_rejects_weight_concentration_at_both_split_points() {
+        // Each offending cohort is below one third of global weight, yet
+        // reaches exactly one third within its deterministic assigned cluster.
+        for (n, at_limit) in [(10, vec![(0, 200)]), (21, vec![(1, 125), (2, 125)])] {
+            let mut rs = records(n);
+            for &(index, weight) in &at_limit {
+                rs[index].frozen_voting_weight = weight;
+            }
+            let seed = "01".repeat(32);
+            let registry =
+                FrozenValidatorRegistry::new_candidate_cluster_profile(7, rs.clone()).unwrap();
+            assert!(CandidateClusterSchedule::derive(&registry, &seed)
+                .unwrap_err()
+                .to_string()
+                .contains("top-f frozen-weight bound"));
+
+            rs[at_limit[0].0].frozen_voting_weight -= 1;
+            let registry = FrozenValidatorRegistry::new_candidate_cluster_profile(7, rs).unwrap();
+            assert!(CandidateClusterSchedule::derive(&registry, &seed).is_ok());
+        }
     }
 }
