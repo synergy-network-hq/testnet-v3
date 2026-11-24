@@ -2868,6 +2868,12 @@ impl AuthenticatedIngress {
             // protocol cannot terminate the shared networking service.
             return Ok(());
         }
+        if frame.protocol == ProtocolKind::Etdag && queue.contains(&frame) {
+            // Keep the first exact retry in its original position. The bounded
+            // queue compares both authenticated peer/session and payload bytes;
+            // removing a frame permits the next retry to be delivered normally.
+            return Ok(());
+        }
         queue.push_back(frame);
         Ok(())
     }
@@ -3295,23 +3301,81 @@ mod outbound_tests {
         ingress
             .admit_session(peer.node_address.to_string(), peer.session_id)
             .unwrap();
-        for _ in 0..128 {
+        for sequence in 0..128u8 {
             ingress
-                .publish(InboundFrame::new(peer.clone(), ProtocolKind::Etdag, vec![1], 8).unwrap())
+                .publish(
+                    InboundFrame::new(peer.clone(), ProtocolKind::Etdag, vec![sequence], 8)
+                        .unwrap(),
+                )
                 .unwrap();
         }
-        ingress
-            .publish(InboundFrame::new(peer, ProtocolKind::Posy, vec![2], 8).unwrap())
-            .unwrap();
-        assert_eq!(
-            ingress.take(ProtocolKind::Posy).unwrap().unwrap().payload,
-            vec![2]
-        );
-        let mut admitted = 0;
-        while ingress.take(ProtocolKind::Etdag).unwrap().is_some() {
-            admitted += 1;
+        let posy = InboundFrame::new(peer, ProtocolKind::Posy, vec![2], 8).unwrap();
+        ingress.publish(posy.clone()).unwrap();
+        ingress.publish(posy.clone()).unwrap();
+        assert_eq!(ingress.take(ProtocolKind::Posy).unwrap(), Some(posy.clone()));
+        assert_eq!(ingress.take(ProtocolKind::Posy).unwrap(), Some(posy));
+        for sequence in 0..64u8 {
+            assert_eq!(
+                ingress.take(ProtocolKind::Etdag).unwrap().unwrap().payload,
+                [sequence]
+            );
         }
-        assert_eq!(admitted, 64);
+        assert!(ingress.take(ProtocolKind::Etdag).unwrap().is_none());
+    }
+
+    #[test]
+    fn queued_etdag_retries_coalesce_within_the_original_authenticated_session() {
+        let ingress = AuthenticatedIngress::default();
+        let first = AuthenticatedPeer::new(
+            "synv11lrh6jcxaejkj4zv994j7qwn2rk6u3ar4emn",
+            SessionId(1),
+            vec![],
+        )
+        .unwrap();
+        let other = AuthenticatedPeer::new(
+            "synv31lrh6jcxaejkj4zv994j7qwn2rk6u3shpu9n",
+            SessionId(1),
+            vec![],
+        )
+        .unwrap();
+        for peer in [&first, &other] {
+            ingress
+                .admit_session(peer.node_address.to_string(), peer.session_id)
+                .unwrap();
+        }
+        let frame = |peer: &AuthenticatedPeer, byte| {
+            InboundFrame::new(peer.clone(), ProtocolKind::Etdag, vec![byte], 8).unwrap()
+        };
+        let original = frame(&first, 1);
+        for _ in 0..MAX_PER_PROTOCOL * 2 {
+            ingress.publish(original.clone()).unwrap();
+        }
+        let fresh = frame(&first, 2);
+        let other_sender = frame(&other, 1);
+        ingress.publish(fresh.clone()).unwrap();
+        ingress.publish(other_sender.clone()).unwrap();
+        let take = || ingress.take(ProtocolKind::Etdag).unwrap();
+        assert_eq!(take(), Some(original.clone()));
+        ingress.publish(original.clone()).unwrap();
+        assert_eq!(take(), Some(fresh));
+        assert_eq!(take(), Some(other_sender));
+        assert_eq!(take(), Some(original.clone()));
+        assert_eq!(take(), None);
+
+        ingress.publish(original.clone()).unwrap();
+        let reconnected = AuthenticatedPeer {
+            session_id: SessionId(2),
+            ..first
+        };
+        ingress
+            .admit_session(reconnected.node_address.to_string(), reconnected.session_id)
+            .unwrap();
+        ingress.publish(original).unwrap();
+        let current = frame(&reconnected, 1);
+        ingress.publish(current.clone()).unwrap();
+        ingress.publish(current.clone()).unwrap();
+        assert_eq!(take(), Some(current));
+        assert_eq!(take(), None);
     }
 
     #[test]
