@@ -15,22 +15,6 @@ pub(super) const MAX_DOCUMENT: usize = 1024 * 1024;
 // table. Charge parser scratch plus page/base64/JSON response simultaneously.
 pub(crate) const PROOF_SCRATCH: usize = MAX_DOCUMENT * 2 + MAX_PAGE * 4;
 
-// Endpoint policy only: refuse expensive retained timeout searches rather than
-// changing consensus validation or silently returning an incomplete witness.
-pub(crate) fn charge_timeout_search(
-    remaining: &mut u64,
-    rounds: u64,
-    lease: u64,
-) -> Result<(), String> {
-    let work = rounds
-        .checked_mul(lease)
-        .ok_or("proof timeout work overflow")?;
-    *remaining = remaining
-        .checked_sub(work)
-        .ok_or("proof timeout verification capacity exhausted")?;
-    Ok(())
-}
-
 #[derive(Default)]
 pub(super) struct ProofThrottle {
     window: Option<Instant>,
@@ -1208,15 +1192,6 @@ mod tests {
                 .collect::<String>(),
             synergy_state::state_root(&world).unwrap()
         );
-    }
-    #[test]
-    fn proof_timeout_work_is_aggregate_checked_and_fail_closed() {
-        let mut remaining = 128;
-        charge_timeout_search(&mut remaining, 3, 10).unwrap();
-        assert_eq!(remaining, 98);
-        assert!(charge_timeout_search(&mut remaining, 10, 10).is_err());
-        assert_eq!(remaining, 98);
-        assert!(charge_timeout_search(&mut remaining, u64::MAX, 2).is_err());
     }
     #[test]
     #[ignore = "requires explicitly authenticated immutable APQE native artifacts"]

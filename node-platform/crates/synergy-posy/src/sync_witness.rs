@@ -16,6 +16,156 @@ pub struct FinalitySyncWitness {
     pub timeout_certificates: Vec<SimplifiedTimeoutCertificate>,
 }
 
+#[cfg(test)]
+mod bounded_proof_tests {
+    use super::*;
+    use crate::{
+        ConsensusObjectContext, ParticipantSignature, SimplifiedFinalityParent, TimeoutVote,
+        ValidatorRecord, ValidatorStatus,
+    };
+
+    struct TestVerifier;
+    impl ConsensusSignatureVerifier for TestVerifier {
+        fn verify_consensus_signature(
+            &self,
+            _: &str,
+            _: &[u8],
+            _: &ValidatorRecord,
+            _: &str,
+            _: u64,
+            signature: &[u8],
+        ) -> PosyResult<()> {
+            if signature == [1] {
+                Ok(())
+            } else {
+                Err(PosyError::invalid("test signature refused"))
+            }
+        }
+    }
+    struct Fixture(std::path::PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn sparse_lease_proof_retains_actual_work_budget_and_exact_authority() {
+        let root = Fixture(
+            std::env::temp_dir().join(format!(
+                "posy-bounded-proof-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )),
+        );
+        let registry = FrozenValidatorRegistry::new(
+            7,
+            (0..5)
+                .map(|i| ValidatorRecord {
+                    validator_id: format!("validator-{i}"),
+                    consensus_key_id: format!("key-{i}"),
+                    frozen_voting_weight: 1,
+                    status: ValidatorStatus::Active,
+                })
+                .collect(),
+        )
+        .unwrap();
+        let epoch = SimplifiedEpochContext::from_frozen_registry(
+            99999,
+            "canary-proof-fixture".into(),
+            7,
+            1,
+            512,
+            "a".repeat(64),
+            "b".repeat(64),
+            &registry,
+        )
+        .unwrap();
+        epoch.validate_against(&registry).unwrap();
+        let parent = SimplifiedFinalityParent::Genesis {
+            genesis_hash: "c".repeat(64),
+            block_id: "genesis".into(),
+            reference_id: "d".repeat(64),
+        };
+        let mut certificates: Vec<SimplifiedTimeoutCertificate> = Vec::new();
+        for round in 0..5 {
+            let predecessor = certificates.last().map(|tc| tc.id().unwrap());
+            let tc = SimplifiedTimeoutCertificate::from_votes(
+                (0..4)
+                    .map(|i| TimeoutVote {
+                        context: ConsensusObjectContext::for_height(&epoch, 1, round).unwrap(),
+                        lease_index: 0,
+                        timed_out_proposer: epoch.authorized_proposer(1, round).unwrap().into(),
+                        highest_parent: parent.clone(),
+                        previous_tc_id: predecessor.clone(),
+                        last_voted_candidate: None,
+                        validator_id: format!("validator-{i}"),
+                        key_id: format!("key-{i}"),
+                        signature: vec![1],
+                    })
+                    .collect(),
+            )
+            .unwrap();
+            certificates.push(tc);
+        }
+        let qc = SimplifiedQuorumCertificate {
+            context: ConsensusObjectContext::for_height(&epoch, 1, 5).unwrap(),
+            block_id: "block-one".into(),
+            parent_block_id: "genesis".into(),
+            parent,
+            takeover_tc_id: Some(certificates.last().unwrap().id().unwrap()),
+            protected_execution_root: "e".repeat(64),
+            participants: (0..4)
+                .map(|i| ParticipantSignature {
+                    validator_id: format!("validator-{i}"),
+                    key_id: format!("key-{i}"),
+                    signature: vec![1],
+                })
+                .collect(),
+        };
+        let store = VerifiedTimeoutCertificateStore::new(&root.0).unwrap();
+        for tc in &certificates {
+            store
+                .put_verified(tc, &epoch, &registry, &TestVerifier)
+                .unwrap();
+        }
+        certificates.reverse();
+        let collect = |qc: &SimplifiedQuorumCertificate, budget: &mut u64| {
+            FinalitySyncWitness::collect_verified_timeouts_bounded(
+                qc,
+                &store,
+                &epoch,
+                &registry,
+                &TestVerifier,
+                budget,
+            )
+        };
+        // Three QCs at round five previously charged 150 hypothetical lease
+        // slot reads. Their actual timeout closures require 15 verifications.
+        assert!(qc.context.round * epoch.leader_lease_blocks * 3 > 128);
+        let mut budget = 15;
+        for remaining in [10, 5, 0] {
+            assert_eq!(collect(&qc, &mut budget).unwrap(), certificates);
+            assert_eq!(budget, remaining);
+        }
+        assert_eq!(budget, 0);
+        assert!(matches!(
+            collect(&qc, &mut budget),
+            Err(PosyError::ResourcePressure(_))
+        ));
+        assert_eq!(budget, 0);
+        let mut substituted = qc.clone();
+        substituted.takeover_tc_id = Some("f".repeat(64));
+        assert!(collect(&substituted, &mut 128).is_err());
+        let mut bad_signature = qc;
+        bad_signature.participants[0].signature[0] = 2;
+        assert!(collect(&bad_signature, &mut 128).is_err());
+    }
+}
+
 impl FinalitySyncWitness {
     /// R1 recovery proof only. This verifies evidence without changing any
     /// driver, journal, lock, timeout store, or durable finalized record. The
@@ -147,6 +297,70 @@ impl FinalitySyncWitness {
                         found = Some(tc);
                         break;
                     }
+                }
+            }
+            let tc = found.ok_or_else(|| {
+                PosyError::NotReady(
+                    "Sync witness lacks the referenced lease timeout closure".into(),
+                )
+            })?;
+            last = tc.context.height;
+            expected = tc.previous_tc_id.clone();
+            timeouts.push(tc);
+        }
+        if expected.is_some() {
+            return Err(PosyError::invalid(
+                "Sync timeout chain does not start at round zero",
+            ));
+        }
+        Ok(timeouts)
+    }
+
+    /// Public proof collection uses the existing bounded slot index, then
+    /// authenticates only actual candidate records. Empty governed lease slots
+    /// must not exhaust a signature-verification budget. The budget is shared
+    /// by the caller across the complete three-QC witness.
+    pub fn collect_verified_timeouts_bounded(
+        qc: &SimplifiedQuorumCertificate,
+        store: &VerifiedTimeoutCertificateStore,
+        epoch: &SimplifiedEpochContext,
+        validators: &FrozenValidatorRegistry,
+        verifier: &impl ConsensusSignatureVerifier,
+        remaining: &mut u64,
+    ) -> PosyResult<Vec<SimplifiedTimeoutCertificate>> {
+        qc.verify(epoch, validators, verifier)?;
+        if qc.context.round == 0 {
+            return Ok(Vec::new());
+        }
+        let before = qc
+            .context
+            .height
+            .checked_add(1)
+            .ok_or_else(|| PosyError::invalid("timeout proof height overflow"))?;
+        let slots =
+            store.get_slots_for_lease_before(qc.context.height, before, epoch, validators)?;
+        let mut timeouts = Vec::new();
+        let mut last = qc.context.height;
+        let mut expected = qc.takeover_tc_id.clone();
+        for round in (0..qc.context.round).rev() {
+            let mut found = None;
+            for &(height, candidate_round) in slots.iter().rev() {
+                if candidate_round != round || height > last {
+                    continue;
+                }
+                *remaining = remaining.checked_sub(1).ok_or_else(|| {
+                    PosyError::ResourcePressure(
+                        "proof timeout verification capacity exhausted".into(),
+                    )
+                })?;
+                let tc = store
+                    .get_verified(height, round, epoch, validators, verifier)?
+                    .ok_or_else(|| {
+                        PosyError::NotReady("indexed timeout record disappeared".into())
+                    })?;
+                if Some(tc.id()?) == expected {
+                    found = Some(tc);
+                    break;
                 }
             }
             let tc = found.ok_or_else(|| {

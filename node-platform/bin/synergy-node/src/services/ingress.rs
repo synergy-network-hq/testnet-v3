@@ -2381,10 +2381,8 @@ impl AuthenticatedIngress {
             let selected = history.authority.authenticated_history_at(certified_height)
                 .ok_or("finality proof lies outside authenticated history")?;
             let owner = super::authority::VerifiedAuthority::worker_context(selected)?;
-            super::rpc::proofs::charge_timeout_search(&mut timeout_work,
-                qc.context.round, owner.epoch.leader_lease_blocks)?;
-            for tc in synergy_posy::FinalitySyncWitness::collect_verified_timeouts(
-                &qc, &tcs, &owner.epoch, &owner.registry, owner.as_ref()
+            for tc in synergy_posy::FinalitySyncWitness::collect_verified_timeouts_bounded(
+                &qc, &tcs, &owner.epoch, &owner.registry, owner.as_ref(), &mut timeout_work
             ).map_err(|error| error.to_string())? {
                 timeouts.insert((tc.context.height, tc.context.round), tc);
             }
