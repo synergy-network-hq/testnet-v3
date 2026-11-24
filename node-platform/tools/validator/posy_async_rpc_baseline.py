@@ -128,6 +128,71 @@ class WorkloadTotals:
             for stage in NATIVE_PROCESSING_STAGES}
 
 
+class NativeCounterWindow:
+    """Per-validator process deltas within the measured window."""
+    STAGES = ("accepted", "ordered", "executed", "finalized")
+    QUEUES = ("queued_requests", "queued_bytes")
+
+    def __init__(self, start, deadline, genesis_hash):
+        self.start = start
+        self.deadline = deadline
+        self.genesis_hash = genesis_hash
+        self.pid = None
+        self.process_changes = 0
+        self.counter_resets = dict.fromkeys(self.STAGES, 0)
+        self.first = {}
+        self.last = {}
+        self.queues = {}
+
+    @staticmethod
+    def counter(value):
+        return value if type(value) is int and 0 <= value < 2**64 else None
+
+    def observe(self, telemetry, admission, observed):
+        pid = self.counter(telemetry.get("process_id"))
+        if not self.genesis_hash or telemetry.get("genesis_hash") != self.genesis_hash or not pid:
+            return
+        if isinstance(admission, dict) and admission.get("scope") == "process_lifetime":
+            for name in self.QUEUES:
+                value = self.counter(admission.get(name))
+                if value is not None:
+                    prior = self.queues.get(name)
+                    self.queues[name] = {"peak": max(prior["peak"], value) if prior else value,
+                                         "last": value, "last_observed_mono": observed}
+        if not self.start <= observed <= self.deadline:
+            return
+        if self.pid is not None and self.pid != pid:
+            self.process_changes += 1
+            self.first.clear()
+            self.last.clear()
+        self.pid = pid
+        totals = telemetry.get("tps")
+        for stage in self.STAGES:
+            total = self.counter(totals.get(stage + "_total")) if isinstance(totals, dict) else None
+            previous = self.last.get(stage)
+            if total is None:
+                self.first.pop(stage, None)
+                self.last.pop(stage, None)
+                continue
+            if previous and total < previous[1]:
+                self.counter_resets[stage] += 1
+                self.first.pop(stage, None)
+            self.first.setdefault(stage, (observed, total))
+            self.last[stage] = observed, total
+
+    def summary(self):
+        stages = {}
+        for stage in self.STAGES:
+            first, last = self.first.get(stage), self.last.get(stage)
+            seconds = last[0] - first[0] if first and last else 0
+            delta = last[1] - first[1] if seconds > 0 else None
+            stages[stage] = {"delta": delta, "window_seconds": seconds if delta is not None else None,
+                             "reported_tps": delta / seconds if delta is not None else None,
+                             "counter_resets": self.counter_resets[stage]}
+        return {"process_id": self.pid, "process_changes": self.process_changes,
+                "stages": stages, "queues": dict(self.queues)}
+
+
 def record_lifecycle_stage(record, receipt, observed):
     """Receipt polling can miss milestones. Never infer earlier stage times/rates."""
     stage = receipt.get("lifecycle_status")
@@ -505,6 +570,8 @@ def run_async(args, h):
     if not math.isfinite(warmup_seconds) or not 0 <= warmup_seconds < args.duration_seconds:
         raise E("warmup must be finite and shorter than offered window")
     totals = WorkloadTotals(deadline, start + warmup_seconds)
+    native_counters = {name: NativeCounterWindow(start + warmup_seconds, deadline,
+                      getattr(args, "expected_genesis_hash", None)) for name in endpoints}
     published = {}
     published_lock = threading.RLock()
     proof_lock = threading.Lock()
@@ -636,6 +703,7 @@ def run_async(args, h):
         tips = {}
         for name, item in readings.items():
             native = item["native"]
+            native_counters[name].observe(native, item["admission_stats"], item["observed_mono"])
             commitment = native.get("common_finalized_commitment")
             height = native["finalized_height"]
             if not isinstance(commitment, dict) or commitment.get("height") != height:
@@ -992,6 +1060,10 @@ def run_async(args, h):
         except BaseException:
             if failure is None:
                 raise
+        report["native_process_measurement"] = {
+            "basis": "validator-reported cumulative process counters, timed by the client; includes all traffic on each validator",
+            "by_validator": {name: counters.summary() for name, counters in native_counters.items()},
+        }
         report["generator_resources"] = generator_resources.summary()
         report["generator_observer"] = {"maximum_concurrent_reads": 1,
             "cycle_seconds": observer.durations.summary(),

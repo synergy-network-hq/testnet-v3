@@ -77,6 +77,41 @@ class AsyncProofTests(unittest.TestCase):
             observer.executor.shutdown(wait=True)
 
 
+    def test_native_stage_counters_are_process_scoped_and_window_bounded(self):
+        genesis = "a" * 64
+        tracker = adapter.NativeCounterWindow(10, 30, genesis)
+
+        def observe(at, accepted, ordered, executed, finalized, *, pid=5, hash=genesis, queue=3):
+            tracker.observe({"genesis_hash": hash, "process_id": pid, "tps": {
+                "accepted_total": accepted, "ordered_total": ordered,
+                "executed_total": executed, "finalized_total": finalized,
+            }}, {"scope": "process_lifetime", "queued_requests": queue,
+                 "queued_bytes": queue * 100}, at)
+
+        observe(8, 0, 0, 0, 0, queue=8)
+        observe(10, 5, 3, 1, 0)
+        observe(20, 25, 8, 1, None)
+        observe(22, 1000, 1000, 1000, 1000, hash="b" * 64, queue=500)
+        values = tracker.summary()["stages"]
+        self.assertEqual(values["accepted"]["reported_tps"], 2)
+        self.assertEqual(values["ordered"]["reported_tps"], 0.5)
+        self.assertEqual(values["executed"]["reported_tps"], 0)
+        self.assertIsNone(values["finalized"]["reported_tps"])
+        observe(24, 2, 0, 0, 0, pid=6)
+        observe(28, 6, 4, 1, 0, pid=6)
+        observe(29, 7, 1, 2, 2, pid=6)
+        observe(32, 10, 7, 7, 7, pid=7, queue=0)
+        report = tracker.summary()
+        self.assertEqual(report["process_changes"], 1)
+        self.assertEqual(report["process_id"], 6)
+        self.assertEqual(report["stages"]["accepted"]["window_seconds"], 5)
+        self.assertEqual(report["stages"]["accepted"]["delta"], 5)
+        self.assertEqual(report["stages"]["ordered"]["counter_resets"], 1)
+        self.assertIsNone(report["stages"]["ordered"]["reported_tps"])
+        self.assertEqual(report["queues"]["queued_requests"], {
+            "peak": 8, "last": 0, "last_observed_mono": 32,
+        })
+
     def test_stage_observations_do_not_invent_skipped_milestones_or_native_tps(self):
         record = {"transaction_id": "tx", "submission_started": True, "submitted_mono": 1,
                   "context_started_mono": 0, "finalized_mono": 20, "accepted": True}
@@ -180,6 +215,10 @@ class AsyncProofTests(unittest.TestCase):
         self.assertEqual(report["finalized_transactions"], 1)
         self.assertIsNone(report["independently_verified_tps"])
         self.assertFalse(report["independent_three_qc_verification"])
+        native = report["native_process_measurement"]["by_validator"]
+        self.assertEqual(set(native), set(harness.CANARY_OBSERVERS))
+        self.assertTrue(all(row["process_id"] == 42 for row in native.values()))
+        self.assertTrue(all(row["queues"]["queued_requests"]["last"] == 0 for row in native.values()))
         self.assertEqual(report["finality_measurement_basis"], "cross_observer_rpc_reconciliation")
         self.assertGreater(report["finalized_tps"], 0)
         views = {name: {"authorization_binding": {"pin": 1}} for name in harness.CANARY_OBSERVERS}
@@ -420,12 +459,16 @@ class AsyncProofTests(unittest.TestCase):
                     self.assertIn(params["receipt_id"], receipt_ids)
                     return {"receipt_id": params["receipt_id"], "status": "accepted", "admitted": True}
                 if method == "synergy_getProtectedAdmissionStats":
-                    return {"queued_requests": 0}
+                    return {"scope": "process_lifetime", "queued_requests": 0, "queued_bytes": 0}
                 if method == "synergy_chainTelemetry":
                     if cancel_after_submit and included:
                         raise KeyboardInterrupt()
                     at = height()
+                    finalized = sum(tx["height"] <= at for tx in included)
                     return {"chain_id": 9001, "network_identity": "posy-isolated-test", "epoch": 1, "finalized_height": at,
+                            "genesis_hash": "aa" * 32, "process_id": 42,
+                            "tps": {"accepted_total": len(included), "ordered_total": finalized,
+                                    "executed_total": finalized, "finalized_total": finalized},
                             "common_finalized_commitment": {"height": at, "block_id": str(at), "state_root": "state", "finality_certificate_id": "qc"}}
                 if method == "synergy_getBlock":
                     at = params["height"]
