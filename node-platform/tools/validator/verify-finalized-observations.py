@@ -15,6 +15,7 @@ PAGE_BYTES = 65536
 MAX_PROOF_BYTES = 16 * 1024 * 1024
 MAX_PAGES = 2 * MAX_PROOF_BYTES // PAGE_BYTES
 MAX_HEIGHTS = 8
+USER_AGENT = "Synergy-PoSy-Finality-Observer/1.0"
 HEX = re.compile(r"[0-9a-f]{64}")
 
 
@@ -26,14 +27,24 @@ class NoRedirect(HTTPRedirectHandler):
 def request_page(endpoint, params):
     body = json.dumps({"jsonrpc": "2.0", "id": 1,
                        "method": "synergy_getFinalizedProofPageV1", "params": params})
-    request = Request(endpoint, data=body.encode(), headers={"Content-Type": "application/json"})
+    request = Request(endpoint, data=body.encode(), headers={
+        "Content-Type": "application/json",
+        "User-Agent": USER_AGENT,
+    })
     with build_opener(NoRedirect()).open(request, timeout=10) as response:
         raw = response.read(PAGE_BYTES * 2 + 1)
     if len(raw) > PAGE_BYTES * 2:
         raise ValueError("RPC proof page exceeds response bound")
     result = json.loads(raw)
-    if result.get("id") != 1 or result.get("jsonrpc") != "2.0" or "error" in result:
-        raise ValueError(f"proof RPC unavailable for {params['kind']} at H{params['height']}")
+    scope = f"{params['kind']} at H{params['height']}"
+    if result.get("id") != 1 or result.get("jsonrpc") != "2.0":
+        raise ValueError(f"invalid proof RPC response for {scope}")
+    if "error" in result:
+        error = result["error"]
+        if not isinstance(error, dict):
+            raise ValueError(f"invalid proof RPC error for {scope}")
+        detail = ascii(str(error.get("message", ""))[:240])
+        raise ValueError(f"proof RPC unavailable for {scope} ({error.get('code')!r}): {detail}")
     return result["result"]
 
 

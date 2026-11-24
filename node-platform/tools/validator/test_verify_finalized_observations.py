@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location(
     "verify_finalized_observations", Path(__file__).with_name("verify-finalized-observations.py")
@@ -69,3 +70,16 @@ class FinalityObservationTests(unittest.TestCase):
                 verifier.check_successor(before, {**after, **fields})
         with self.assertRaisesRegex(ValueError, "invalid verified consensus position"):
             verifier.consensus_position({**native, "epoch": None}, block)
+
+    def test_public_request_identifies_client_and_reports_missing_evidence(self):
+        params = dict(height=9704, kind="block_commitment", offset=0, limit=1024)
+        with patch.object(verifier, "build_opener") as opener:
+            process = opener.return_value.open
+            response = process.return_value.__enter__.return_value
+            response.read.return_value = json.dumps({
+                "jsonrpc": "2.0", "id": 1,
+                "error": {"code": -32001, "message": "requested finalized evidence is not retained"},
+            }).encode()
+            with self.assertRaisesRegex(ValueError, r"block_commitment at H9704 .*not retained"):
+                verifier.request_page("https://observer", params)
+            self.assertEqual(process.call_args.args[0].get_header("User-agent"), verifier.USER_AGENT)
