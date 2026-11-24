@@ -45,7 +45,7 @@ fn independent_ethers_module() -> PathBuf {
     );
     module
 }
-fn fixture() -> serde_json::Value {
+pub(super) fn fixture() -> serde_json::Value {
     static FIXTURE: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
     FIXTURE.get_or_init(|| {
         use std::io::Write;

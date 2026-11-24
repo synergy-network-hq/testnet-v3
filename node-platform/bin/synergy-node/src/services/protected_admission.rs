@@ -788,7 +788,7 @@ impl AdmissionHandle {
         ->Result<Value,String>{
         use synergy_etdag::admission::{EthereumProcessingAdmission,ETHEREUM_PROCESSING_PROFILE_ID,ETHEREUM_PROCESSING_LANE};
         use synergy_etdag::crypto::{encrypt_protected_payload_with_kem,pad_plaintext};
-        let signed=authority.ethereum_genesis().ok_or("Ethereum compatibility is absent from signed Genesis")?;
+        let signed=authority.ethereum_submission_authority()?;
         if signed.genesis_hash!=genesis||raw.is_empty()||raw.len()>65536 {return Err("Ethereum input differs from selected signed Genesis or byte bound".into());}
         let mut context=self.0.lock().map_err(|_|"admission lock poisoned")?.processing_context.as_ref()
             .ok_or("asynchronous processing context unavailable")?.context.clone();

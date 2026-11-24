@@ -13,6 +13,7 @@ mod etdag_wallet_admission;
 #[cfg(test)]
 mod etdag_qualification;
 pub mod execution;
+pub(super) mod ethereum_activation;
 pub mod health;
 pub mod identity;
 pub mod ingress;

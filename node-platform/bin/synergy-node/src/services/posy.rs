@@ -931,6 +931,12 @@ fn load_local_signer(
     })
 }
 
+#[cfg(test)]
+pub(super) fn qualification_protocol_signer(configuration:&NodeConfiguration,authority:&VerifiedAuthority)
+    ->Result<Arc<dyn AegisSigner>,String>{
+    Ok(load_local_signer(configuration,authority)?.signer)
+}
+
 struct PreparedConsensus {
     peer: AuthenticatedPeer,
     event: ConsensusEvent,

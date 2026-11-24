@@ -84,7 +84,8 @@ fn execute_combined_processing<D,V,R>(
     subject:Option<String>,
 )->Result<ExecutionCandidate,ProcessingCandidateError>
 where D:synergy_execution::TransactionExecutor,V:synergy_transaction::AegisTransactionVerifier,R:synergy_execution::ProcessingReadinessVerifier {
-    if authority.ethereum_genesis().is_some() {
+    if authority.ethereum_activation(parent.world(),Some(parent.world().budget())).map_err(ProcessingCandidateError::Invalid)?
+        .is_some_and(|selected|crate::services::ethereum_activation::is_active(&selected,parent.world()).unwrap_or(false)) {
         let policy=synergy_aivm::ethereum_execution::EvmCompatibilityPolicy::load(parent.world()).map_err(|error|ProcessingCandidateError::Invalid(error.to_string()))?;
         context.maximum_gas=context.maximum_gas.min(policy.block_gas_limit);
     }

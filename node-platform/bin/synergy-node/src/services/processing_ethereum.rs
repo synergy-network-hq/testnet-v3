@@ -157,24 +157,83 @@ pub(in crate::services) fn finish_candidate(
     authority: &VerifiedAuthority,
     mut candidate: BudgetedExecutionCandidate,
 ) -> Result<BudgetedExecutionCandidate, synergy_execution::ProcessingCandidateError> {
-    if authority.ethereum_genesis().is_none() {
+    let Some(selected) = authority
+        .ethereum_activation(&candidate.state, Some(candidate.state.budget()))
+        .map_err(synergy_execution::ProcessingCandidateError::Invalid)?
+    else {
         return Ok(candidate);
-    }
-    NativeProcessingContext::check_ethereum_policy(authority, candidate.state.as_ref())
-        .map_err(synergy_execution::ProcessingCandidateError::Invalid)?;
-    let parent_height = candidate.height.checked_sub(1).ok_or_else(|| {
-        synergy_execution::ProcessingCandidateError::Invalid("EVM candidate height zero".into())
-    })?;
-    let parent = synergy_posy::parse_hash_bytes(&candidate.parent_block_id)
-        .map_err(|error| synergy_execution::ProcessingCandidateError::Invalid(error.to_string()))?;
-    let key = format!("{HISTORY_PREFIX}{parent_height:020}");
-    let oldest = parent_height.saturating_sub(256);
+    };
     let world = Arc::get_mut(&mut candidate.state).ok_or_else(|| {
         synergy_execution::ProcessingCandidateError::Invalid(
             "candidate World escaped before sealing EVM history".into(),
         )
     })?;
+    advance_native_history(
+        authority,
+        &selected,
+        candidate.height,
+        &candidate.parent_block_id,
+        world,
+    )?;
+    candidate.state_root = synergy_state::state_root(world)
+        .map_err(synergy_execution::ProcessingCandidateError::State)?;
+    candidate.block_id = candidate
+        .commitment_id()
+        .map_err(synergy_execution::ProcessingCandidateError::Invalid)?;
+    candidate
+        .validate()
+        .map_err(synergy_execution::ProcessingCandidateError::Invalid)?;
+    Ok(candidate)
+}
+
+pub(in crate::services) fn advance_native_history(
+    authority: &VerifiedAuthority,
+    selected: &super::super::authority::EthereumGenesisAuthority,
+    height: u64,
+    parent_block_id: &str,
+    world: &mut BudgetedWorld,
+) -> Result<(), synergy_execution::ProcessingCandidateError> {
+    NativeProcessingContext::check_ethereum_policy(authority, world)
+        .map_err(synergy_execution::ProcessingCandidateError::Invalid)?;
+    let parent_height = height.checked_sub(1).ok_or_else(|| {
+        synergy_execution::ProcessingCandidateError::Invalid("EVM candidate height zero".into())
+    })?;
+    let parent = synergy_posy::parse_hash_bytes(parent_block_id)
+        .map_err(|error| synergy_execution::ProcessingCandidateError::Invalid(error.to_string()))?;
+    let key = format!("{HISTORY_PREFIX}{parent_height:020}");
+    let oldest = parent_height.saturating_sub(256);
     let mut diff = StateDiff::default();
+    if selected.activation_height > height
+        && world
+            .protocol
+            .contains_key(crate::services::ethereum_activation::ACTIVE_KEY)
+    {
+        return Err(synergy_execution::ProcessingCandidateError::Invalid(
+            "premature governed EVM activation marker".into(),
+        ));
+    }
+    if selected.activation_height > 0 && height >= selected.activation_height {
+        let marker = crate::services::ethereum_activation::active_marker(&selected)
+            .map_err(synergy_execution::ProcessingCandidateError::Invalid)?;
+        match world
+            .protocol
+            .get(crate::services::ethereum_activation::ACTIVE_KEY)
+        {
+            Some(bytes) if *bytes == marker => {}
+            None if height == selected.activation_height => {
+                diff.protocol_changes.push(ProtocolChange {
+                    key: crate::services::ethereum_activation::ACTIVE_KEY.into(),
+                    expected_value: None,
+                    value: Some(marker),
+                })
+            }
+            _ => {
+                return Err(synergy_execution::ProcessingCandidateError::Invalid(
+                    "missing or substituted governed EVM activation transition".into(),
+                ))
+            }
+        }
+    }
     diff.protocol_changes.push(ProtocolChange {
         expected_value: world.protocol.get(&key).cloned(),
         key,
@@ -204,15 +263,7 @@ pub(in crate::services) fn finish_candidate(
     world
         .try_apply(&diff)
         .map_err(synergy_execution::ProcessingCandidateError::State)?;
-    candidate.state_root = synergy_state::state_root(world)
-        .map_err(synergy_execution::ProcessingCandidateError::State)?;
-    candidate.block_id = candidate
-        .commitment_id()
-        .map_err(synergy_execution::ProcessingCandidateError::Invalid)?;
-    candidate
-        .validate()
-        .map_err(synergy_execution::ProcessingCandidateError::Invalid)?;
-    Ok(candidate)
+    Ok(())
 }
 
 pub(in crate::services) struct EthereumDispatch<'a, 'p> {
@@ -335,8 +386,17 @@ impl ProcessingNativeWalletActions for EthereumDispatch<'_, '_> {
         });
         let signed = self
             .authority
-            .ethereum_genesis()
-            .ok_or_else(|| invalid("EVM signed Genesis is absent"))?;
+            .ethereum_activation(candidate, Some(candidate.budget()))
+            .map_err(invalid)?
+            .ok_or_else(|| invalid("authenticated EVM activation is absent"))?;
+        if self.context.height < signed.activation_height
+            || !crate::services::ethereum_activation::is_active(&signed, candidate)
+                .map_err(invalid)?
+        {
+            return Err(invalid(
+                "EVM execution precedes finalized governed activation",
+            ));
+        }
         let protected_credit = |account: &[u8; 20], world: &WorldState| {
             let receiver = synergy_address::protected_wallet_native_representation(*account)
                 .map_err(|error| error.to_string())?;

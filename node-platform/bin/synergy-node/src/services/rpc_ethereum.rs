@@ -95,9 +95,36 @@ impl CanonicalQueryStore {
             .map_err(|_| fail("authority lock poisoned"))?
             .clone()
             .ok_or_else(|| fail("authenticated Ethereum authority unavailable"))?;
-        let signed = authority
-            .ethereum_genesis()
-            .ok_or_else(|| fail("signed Genesis does not activate Ethereum compatibility"))?;
+        let latest = self.latest_finalized_height()?.unwrap_or(0);
+        let signed = if latest == 0 {
+            let world = authority
+                .autonomous_processing_origin()
+                .initial_world_state_budgeted(&self.world_budget)
+                .map_err(fail)?;
+            let selected = authority
+                .ethereum_activation(&world, Some(&self.world_budget))
+                .map_err(fail)?
+                .ok_or_else(|| fail("Ethereum compatibility has no authenticated activation"))?;
+            if !crate::services::ethereum_activation::is_active(&selected, &world).map_err(fail)? {
+                return Err(fail("EVM activation is not yet finalized"));
+            }
+            selected
+        } else {
+            let (candidate, _) = self
+                .finalized_at(latest)?
+                .ok_or_else(|| fail("finalized EVM activation source is unavailable"))?;
+            let selected = authority
+                .ethereum_activation(&candidate.state, Some(&self.world_budget))
+                .map_err(fail)?
+                .ok_or_else(|| fail("Ethereum compatibility has no authenticated activation"))?;
+            if latest < selected.activation_height
+                || !crate::services::ethereum_activation::is_active(&selected, &candidate.state)
+                    .map_err(fail)?
+            {
+                return Err(fail("EVM activation/history warmup is not yet finalized"));
+            }
+            selected
+        };
         signed.descriptor.validate().map_err(fail)?;
         if signed.genesis_hash != *genesis {
             return Err(fail("Ethereum authority differs from selected Genesis"));
@@ -113,7 +140,6 @@ impl CanonicalQueryStore {
                 chain.to_string()
             }));
         }
-        let latest = self.latest_finalized_height()?.unwrap_or(0);
         if method == "eth_blockNumber" {
             if !params.is_empty() {
                 return Err(RpcError::invalid_params("unexpected params"));
@@ -152,6 +178,9 @@ impl CanonicalQueryStore {
         };
         if height > latest {
             return Err(fail("requested state is not PoSy-finalized"));
+        }
+        if height < signed.activation_height {
+            return Err(fail("requested native state predates EVM activation"));
         }
         let (block_id, world) = if height == 0 {
             let origin = authority.autonomous_processing_origin();
@@ -597,9 +626,17 @@ impl CanonicalQueryStore {
         };
         let world = candidate.state.as_ref();
         let policy = EvmCompatibilityPolicy::load(world).map_err(fail)?;
-        let signed = authority
-            .ethereum_genesis()
-            .ok_or_else(|| fail("signed EVM Genesis absent"))?;
+        let Some(signed) = authority
+            .ethereum_activation(world, Some(&self.world_budget))
+            .map_err(fail)?
+        else {
+            return Ok(Value::Null);
+        };
+        if height < signed.activation_height
+            || !crate::services::ethereum_activation::is_active(&signed, world).map_err(fail)?
+        {
+            return Ok(Value::Null);
+        }
         if policy.chain_id != authority.epoch.chain_id
             || hex(&synergy_aegis::AegisProtectedPrimitives.sha256(&world.protocol[EVM_POLICY_KEY]))
                 .trim_start_matches("0x")
@@ -709,9 +746,9 @@ impl CanonicalQueryStore {
         &self,
         authority: &super::super::authority::VerifiedAuthority,
     ) -> Result<Value, RpcError> {
-        let signed = authority
-            .ethereum_genesis()
-            .ok_or_else(|| fail("signed Ethereum Genesis absent"))?;
+        let Some(signed) = authority.ethereum_genesis() else {
+            return Ok(Value::Null);
+        };
         let world = authority
             .autonomous_processing_origin()
             .initial_world_state_budgeted(&self.world_budget)

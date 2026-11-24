@@ -286,6 +286,11 @@ impl CanonicalGovernanceOperation {
     ) -> Result<TransactionDispatch, String> {
         let execution: GovernanceExecution = serde_json::from_slice(operation)
             .map_err(|error| format!("decode governance execution: {error}"))?;
+        if execution.mutation.action_kind==super::ethereum_activation::ACTION {
+            if authorization_id!=execution.authorization_root{return Err("EVM governance authorization identity differs".into());}
+            let state_diff=super::ethereum_activation::dispatch(self.authority.as_ref(),&execution,context.block_height,state)?;
+            return Ok(TransactionDispatch{state_diff,gas_used:75_000u64.checked_add(operation.len() as u64).ok_or("EVM governance gas overflow")?});
+        }
         let key = execution.verify(
             self.authority.as_ref(),
             authorization_id,
@@ -326,7 +331,20 @@ impl GovernanceOperation for CanonicalGovernanceOperation {
         if transaction.unsigned.amount_nwei != 0 {
             return Err("governance transaction cannot transfer value".into());
         }
-        self.execute(authorization_id, operation, context, state)
+        let governed:GovernanceExecution=serde_json::from_slice(operation).map_err(|error|error.to_string())?;
+        let evm_amendment=governed.mutation.action_kind==super::ethereum_activation::ACTION;
+        drop(governed);
+        let mut dispatched=self.execute(authorization_id, operation, context, state)?;
+        // The EVM amendment travels as an authenticated asynchronous account
+        // transaction. Its one-use governance CAS supplements the same native
+        // sender nonce and fee settlement used by ordinary account actions.
+        if evm_amendment {
+            dispatched.state_diff.changes.push(AccountChange {
+                account:transaction.unsigned.sender.clone(),debit_nwei:0,credit_nwei:0,
+                expected_nonce:Some(transaction.unsigned.nonce),code_hash:None,
+            });
+        }
+        Ok(dispatched)
     }
 }
 
@@ -804,6 +822,18 @@ type CanonicalExecutionDispatcher = CanonicalTransactionDispatcher<
     GovernanceDispatcher<CanonicalGovernanceOperation>,
     SystemDispatcher<CanonicalSystemOperation>,
 >;
+
+#[cfg(test)]
+pub(super) fn qualification_governance_transition(configuration:&NodeConfiguration,authority:Arc<VerifiedAuthority>,
+    transaction:SignedTransaction,height:u64,state:&BudgetedWorld)->Result<synergy_execution::BudgetedBlockExecutionOutcome,String>{
+    let network=transaction.unsigned.network.clone();
+    let scheduler=BlockExecutionScheduler::new(GovernanceDispatcher::new(CanonicalGovernanceOperation{authority:authority.clone()}),
+        TransactionPqvmVerifier::from_configuration(configuration)?,FeeSchedule{base_fee_per_gas_nwei:40,
+            collector:synergy_address::derive_object_address("synq",b"governance-fixture-fees").map_err(|error|error.to_string())?})
+        .map_err(|error|error.to_string())?;
+    scheduler.execute_async_at_budgeted(&synergy_block::BlockBody{transactions:vec![transaction]},&network,height,
+        authority.consensus_timestamp_unix(height)?,state,state.as_ref()).map_err(|error|error.to_string())
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct TransactionPqvmVerifier {

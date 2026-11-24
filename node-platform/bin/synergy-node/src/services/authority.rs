@@ -144,6 +144,7 @@ pub(crate) fn qualification_authority_for_network(
         autonomous_closure: None,
         genesis_autonomous: false,
         ethereum_genesis: None,
+        ethereum_activation_cache:Arc::new(Mutex::new(None)),
         managed_wallet_release: None,
         anchor_parent: SimplifiedFinalityParent::Genesis {
             genesis_hash: "c".repeat(64),
@@ -210,6 +211,7 @@ pub struct VerifiedAuthority {
     // Derived only from authenticated signed Genesis, never deserialized authority/config.
     genesis_autonomous: bool,
     ethereum_genesis: Option<EthereumGenesisAuthority>,
+    pub(super) ethereum_activation_cache:Arc<Mutex<Option<super::ethereum_activation::CachedActivation>>>,
     managed_wallet_release: Option<Arc<managed_wallet::ManagedWalletRelease>>,
     verifier: PqvmVerifier,
     wallet_verifier: PqvmVerifier,
@@ -227,6 +229,8 @@ pub(super) struct EthereumGenesisAuthority {
     pub descriptor:synergy_genesis::network::GenesisEthereumCompatibility,
     pub genesis_hash:String,
     pub activation_unix:u64,
+    pub activation_height:u64,
+    pub chain_id:u64,
 }
 
 thread_local! {
@@ -234,8 +238,24 @@ thread_local! {
 }
 impl VerifiedAuthority {
     pub(super) fn ethereum_genesis(&self)->Option<&EthereumGenesisAuthority> {self.ethereum_genesis.as_ref()}
+    pub(super) fn authenticated_genesis_hash(&self)->Result<&str,String>{
+        let mut origin=self;while let Some(previous)=origin.timeout_predecessor.as_deref(){origin=previous;}
+        match &origin.anchor_parent {SimplifiedFinalityParent::Genesis{genesis_hash,..}=>Ok(genesis_hash),
+            _=>Err("authenticated Genesis lineage is unavailable".into())}
+    }
+    pub(super) fn ethereum_activation(&self,world:&synergy_state::WorldState,budget:Option<&Arc<synergy_state::world_resources::WorldResourceBudget>>)
+        ->Result<Option<EthereumGenesisAuthority>,String>{
+        super::ethereum_activation::resolve(self,world,budget)
+    }
+    // Translation is not admission authority: the native owner independently
+    // verifies finalized source policy and activation before its durable ACK.
+    pub(super) fn ethereum_submission_authority(&self)->Result<EthereumGenesisAuthority,String>{
+        if let Some(genesis)=&self.ethereum_genesis{return Ok(genesis.clone());}
+        self.ethereum_activation_cache.lock().map_err(|_|"EVM activation cache poisoned")?.as_ref()
+            .map(super::ethereum_activation::cached_authority).ok_or_else(||"authenticated EVM activation is unavailable".into())
+    }
     pub(super) fn ethereum_ingress_kem(&self)->Result<synergy_aegis::ApqeKem,String>{
-        self.ethereum_genesis().ok_or("Ethereum compatibility is not authenticated")?;
+        self.ethereum_submission_authority()?;
         let selected=self.provider_configuration.as_ref().ok_or("Ethereum ingress requires an explicitly authenticated APQE provider")?;
         synergy_aegis::ApqeKem::mlkem1024(super::apqe_provider::load_selected(selected)?).map_err(|error|format!("{error:?}"))
     }
@@ -432,6 +452,7 @@ impl Clone for VerifiedAuthority {
             autonomous_closure: self.autonomous_closure.clone(),
             genesis_autonomous: self.genesis_autonomous,
             ethereum_genesis:self.ethereum_genesis.clone(),
+            ethereum_activation_cache:self.ethereum_activation_cache.clone(),
             managed_wallet_release: self.managed_wallet_release.clone(),
             verifier: self.verifier.clone(),
             wallet_verifier: self.wallet_verifier.clone(),
@@ -915,6 +936,11 @@ pub(super) fn load_signed(
     let mut authority = verify_binding_bytes(configuration, bytes)?;
     if configuration.genesis_path.is_some() {
         let genesis = crate::commands::selected_network::verified_genesis(configuration)?;
+        if authority.protected.as_ref().is_some_and(|policy|
+            policy.initial_world_state.protocol.contains_key(super::ethereum_activation::RECORD_KEY)
+            || policy.initial_world_state.protocol.contains_key(super::ethereum_activation::ACTIVE_KEY)) {
+            return Err("Genesis cannot preinstall a governed EVM amendment or activation marker".into());
+        }
         if genesis.unsigned.network.autonomous_epoch_protocol.is_some() || genesis.unsigned.network.ethereum_compatibility.is_some() {
             let binding: SignedAuthorityBinding = serde_json::from_slice(authority.binding_bytes())
                 .map_err(|e| e.to_string())?;
@@ -943,6 +969,7 @@ pub(super) fn load_signed(
                 }
                 Arc::make_mut(&mut authority).ethereum_genesis=Some(EthereumGenesisAuthority{
                     descriptor:descriptor.clone(),genesis_hash:genesis.genesis_hash.clone(),activation_unix:genesis.unsigned.network.activation_unix,
+                    activation_height:0,chain_id:genesis.unsigned.network.chain_id,
                 });
             }
         }
@@ -1091,6 +1118,7 @@ fn verify_binding_with_explicit_key(
         autonomous_closure: None,
         genesis_autonomous: false,
         ethereum_genesis: None,
+        ethereum_activation_cache:Arc::new(Mutex::new(None)),
         managed_wallet_release: None,
         anchor_parent: binding.payload.anchor_parent,
         verifier,

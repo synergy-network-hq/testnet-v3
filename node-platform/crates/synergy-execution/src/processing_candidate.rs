@@ -56,6 +56,9 @@ pub struct ProcessingEpochClose<'a> {
 /// retrieve a missing canonical payload or return a retryable resource/storage
 /// error; absence never removes an item from the mandatory parent selection.
 pub trait ProcessingPayloadProvider {
+    /// Only the native authenticated owner may attest a separately verified
+    /// governance action. Arbitrary system plaintext remains unsupported.
+    fn permits_system_action(&self,_record:&ProcessingReadyRecord)->bool {false}
     fn plaintext<'a>(
         &'a self,
         record: &ProcessingReadyRecord,
@@ -565,14 +568,17 @@ impl<D: TransactionExecutor, V: AegisTransactionVerifier> BlockExecutionSchedule
         let mut expected_nonces = BTreeMap::new();
         for (record, plaintext) in plaintexts {
             verify_processing_payload(record, plaintext, budget)?;
-            let transaction: SignedTransaction =
-                serde_json::from_slice(plaintext).map_err(|e| {
+            // reserve_execution_metadata retains expanded governance storage
+            // through the returned candidate, before its first decode here.
+            let transaction =
+                synergy_transaction::decode_processing_transaction(plaintext).map_err(|e| {
                     ProcessingCandidateError::Invalid(format!("decode processing transaction: {e}"))
                 })?;
             transaction
                 .validate_structure()
                 .map_err(|e| ProcessingCandidateError::Invalid(e.to_string()))?;
-            if transaction.unsigned.class != TransactionClass::User
+            if (transaction.unsigned.class != TransactionClass::User
+                && !(transaction.unsigned.class==TransactionClass::System&&payloads.permits_system_action(record)))
                 || transaction.unsigned.network != *context.network
                 || transaction.unsigned.sender != record.sender_wallet
                 || transaction.unsigned.nonce != record.sender_nonce

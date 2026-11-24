@@ -262,10 +262,17 @@ fn actual_apqe_five_process_ethereum_eip155_solidity_restart_and_rpc(){
     qualify_actual_apqe_five_process_canary(FiveProcessScenario::Ethereum);
 }
 
+#[test]
+#[ignore="real APQE five-process same-Genesis governance, 256-block warmup and ethers"]
+fn actual_apqe_five_process_governed_ethereum_same_genesis_restart(){
+    qualify_actual_apqe_five_process_canary(FiveProcessScenario::GovernedEthereum);
+}
+
 enum FiveProcessScenario {
     Ordinary,
     ManagedReleasePending,
     Ethereum,
+    GovernedEthereum,
 }
 
 fn qualify_actual_apqe_five_process_canary(scenario: FiveProcessScenario) {
@@ -279,13 +286,15 @@ fn qualify_actual_apqe_five_process_canary(scenario: FiveProcessScenario) {
     };
     let network_id = secure_fixture_network();
     let managed = matches!(scenario, FiveProcessScenario::ManagedReleasePending);
-    let ethereum=matches!(scenario,FiveProcessScenario::Ethereum);
+    let governed_ethereum=matches!(scenario,FiveProcessScenario::GovernedEthereum);
+    let ethereum=matches!(scenario,FiveProcessScenario::Ethereum|FiveProcessScenario::GovernedEthereum);
     let chain_id = if ethereum || managed { 99_999 } else { 1266 };
     let (transaction, mut world, mut account_secret) = funded_transaction_fixture_for_network_provider_chain(
         &network_id, 10_000_000, Some(&provider), chain_id,
     );
     if ethereum {super::ethereum_qualification::fund_world(&mut world);}
-    let mut prepared = prepare_socket_fixture_with_managed_release(
+    if governed_ethereum {world.protocol.remove(synergy_aivm::ethereum_execution::EVM_POLICY_KEY);}
+    let mut prepared = prepare_socket_fixture_with_protocol(
         world,
         None,
         true,
@@ -298,6 +307,7 @@ fn qualify_actual_apqe_five_process_canary(scenario: FiveProcessScenario) {
             binary: &binary,
             provider_manifest_sha256: hash(b"fixture provider"),
         }),
+        governed_ethereum,
     );
     struct Cleanup {
         root: PathBuf,
@@ -428,6 +438,10 @@ fn qualify_actual_apqe_five_process_canary(scenario: FiveProcessScenario) {
         std::thread::sleep(Duration::from_millis(1000));
     }
     if ethereum {
+        if governed_ethereum {
+            super::ethereum_activation_qualification::qualify_five_process(
+                &prepared,&mut cleanup.children,&binary,&provider,&transaction,&account_secret);
+        }
         account_secret.fill(0);
         super::ethereum_qualification::qualify(&prepared.configurations,&mut cleanup.children,&binary,&prepared.root);
         return;

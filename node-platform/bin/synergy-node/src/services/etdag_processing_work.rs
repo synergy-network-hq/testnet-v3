@@ -132,12 +132,7 @@ fn measure(value: &impl serde::Serialize) -> Result<usize, String> {
     Ok(count.0)
 }
 fn authorization_state_root(world: &synergy_state::WorldState) -> String {
-    let bytes = world
-        .protocol
-        .get(synergy_identity::authorization::IDENTITY_AUTHORIZATION_BINDINGS_STATE_KEY)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    synergy_block::hash_block_bytes(bytes)
+    crate::services::ethereum_activation::authorization_root(world)
 }
 fn authorization_refresh_source(
     current_root: &str,
@@ -922,7 +917,6 @@ impl EtdagService {
     pub(in crate::services::etdag) fn processing_ethereum_vertex(
         &mut self,v:ProcessingVertex<synergy_etdag::admission::EthereumProcessingAdmission>,
     )->Result<(),String>{
-        self.authority.ethereum_genesis().ok_or("signed Ethereum compatibility is unavailable")?;
         self.processing_runtime_vertex(v.map_admission(RuntimeProcessingAdmission::Ethereum))
     }
 
@@ -1209,6 +1203,7 @@ impl EtdagService {
             if height < work.verifier.context.authority.source_finalized_height {
                 return Ok(());
             }
+            self.authority.ethereum_activation(&world,Some(world.budget()))?;
             work.pending.set_execution_headroom(
                 NativeProcessingContext::execution_headroom_for(&self.authority,&world)?);
             let root = authorization_state_root(&world);

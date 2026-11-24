@@ -6,15 +6,35 @@ SNRG accounts, ETDAG order, PoSy candidates, finality and durable stores. There
 is no additional VM process, consensus, native currency or independently owned
 Ethereum state database. `alloy-trie` 0.9.9 computes derived block-view roots.
 
-Activation requires signed Genesis format 2 with
+For new chains, activation uses signed Genesis format 2 with
 `network.ethereum_compatibility.profile_id = aivm-ethereum-eip155-shanghai-v1`
 and an exact lowercase SHA256 of the initial World's
 `aivm/ethereum/v1/policy` bytes. The initial native state root also commits those
 bytes. Startup, original admission, candidate execution and RPC recheck that
 independently authenticated digest and selected chain. Omission preserves older
-Genesis serialization and grants no Ethereum capability. The current profile
+Genesis serialization and grants no initial Ethereum capability. The current profile
 keeps its exact policy immutable through epoch changes; an upgrade needs an
 explicit authenticated protocol transition rather than editing runtime config.
+
+An existing autonomous chain can install the same profile through native
+`aivm-ethereum-activation-v1` governance without changing its signed Genesis.
+The amendment binds exact chain, network, Genesis, frozen epoch/root, canonical
+policy bytes and digest, an inclusion window and an effective height. Actual
+frozen distinct and stake-weighted PoSy quorum is verified independently of
+any supplied Constitution threshold. Installation uses a one-use canonical
+World CAS. The effective height must follow the signed window's expiry by at
+least 256 blocks so AIVM accumulates genuine native parent IDs for BLOCKHASH.
+An exact activation marker is committed at that height; finalized admission
+anchors and RPC refresh from that World transition. Expired/already-installed
+valid requests produce terminal native outcomes with normal fee/nonce
+settlement. Initial-Genesis activation remains available for future chains.
+
+The complete signed governance account transaction travels through the same
+encrypted native processing carrier. A governance-only versioned DEFLATE wire
+encoding fits the existing ciphertext classes, caps expansion at 1 MiB,
+rejects trailing/truncated/nested streams, and preserves every signed field.
+Decode and retained candidate expansion are prepaid. Encoding supplies no
+quorum or account authority; the existing native owners verify both again.
 
 The policy specifies the engine/fork, native base fee and treasury, block gas,
 account/storage/code/memory/patch/receipt bounds and these explicit rules:
@@ -126,6 +146,16 @@ PoSy finality, independently consumed HTTP/ABI/log/block views and independent
 MPT reconstruction. Fixture roots, keys and process logs are removed on exit.
 This source qualification is distinct from authenticated managed distribution
 and acceptance of the actual public Testnet.
+
+`real_apqe_governance_evm_scope_native_settlement_history_and_restart` checks
+actual native quorum signatures, scope, asynchronous settlement, terminal
+replay/expiry, budgeted cold authority recovery and unchanged Genesis. Its
+history inputs are explicit component fixtures. The separate ignored
+`actual_apqe_five_process_governed_ethereum_same_genesis_restart` exercises
+original encrypted governance admission, abrupt ACK-owner restart without
+resubmission, real PoSy history through the signed effective height, and then
+the complete independent ethers/Solidity acceptance. Defining this test does
+not establish that it has passed or that any live chain is activated.
 
 Primary specifications: [EIP155](https://eips.ethereum.org/EIPS/eip-155),
 [Ethereum JSON-RPC](https://ethereum.org/developers/docs/apis/json-rpc/),

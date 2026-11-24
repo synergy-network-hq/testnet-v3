@@ -4719,6 +4719,7 @@ name = "synergy-transaction"
 version = "0.1.0"
 dependencies = [
  "aegis-pqvm",
+ "flate2",
  "hex",
  "serde",
  "serde_json",

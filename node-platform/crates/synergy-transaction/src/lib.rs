@@ -6,6 +6,7 @@
 mod fee;
 mod id;
 mod nonce;
+mod processing_wire;
 mod receipt;
 mod signature;
 mod system_transaction;
@@ -15,6 +16,10 @@ mod validation;
 pub use fee::FeeLimit;
 pub use id::TransactionId;
 pub use nonce::NonceWindow;
+pub use processing_wire::{
+    decode_processing_transaction, encode_processing_transaction, processing_decode_scratch,
+    MAX_PROCESSING_DECODE_BYTES,
+};
 pub use receipt::{ReceiptStatus, TransactionReceipt};
 pub use signature::{
     verify as verify_aegis_signature,

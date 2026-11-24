@@ -2723,7 +2723,7 @@ fn processing_wallet_admission_fixture_provider(
         nonce_slot: transaction.unsigned.nonce,
     };
     let mut padded =
-        synergy_etdag::crypto::pad_plaintext(&serde_json::to_vec(&transaction).unwrap()).unwrap();
+        synergy_etdag::crypto::pad_plaintext(&synergy_transaction::encode_processing_transaction(transaction).unwrap()).unwrap();
     let payload = fixture_encrypt_protected_payload(
         &aad,
         &authority.protected_ingress_registry().unwrap().records,
@@ -10254,6 +10254,17 @@ fn prepare_socket_fixture_with_managed_release(
     chain_id: u64,
     managed: Option<ManagedProcessFixture<'_>>,
 ) -> PreparedSocketFixture {
+    prepare_socket_fixture_with_protocol(initial_world_state,export,processing_profile,epoch_end_override,provider,
+        secure,registry_endpoints,chain_id,managed,false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_socket_fixture_with_protocol(
+    initial_world_state:synergy_state::WorldState,export:Option<&IsolatedFixtureExport>,processing_profile:bool,
+    epoch_end_override:Option<u64>,provider:Option<&synergy_config::ApqeProviderConfiguration>,secure:bool,
+    registry_endpoints:Option<&[std::net::SocketAddr;5]>,chain_id:u64,managed:Option<ManagedProcessFixture<'_>>,
+    governed_ethereum:bool,
+)->PreparedSocketFixture {
     let ethereum=initial_world_state.protocol.get(synergy_aivm::ethereum_execution::EVM_POLICY_KEY).map(|bytes|{
         assert_eq!(synergy_aivm::ethereum_execution::EvmCompatibilityPolicy::load(&initial_world_state).unwrap().chain_id,chain_id);
         synergy_genesis::network::GenesisEthereumCompatibility{
@@ -10438,7 +10449,7 @@ fn prepare_socket_fixture_with_managed_release(
     let registry =
         FrozenValidatorRegistry::new(1, validators.iter().map(|v| v.record.clone()).collect())
             .unwrap();
-    let epoch_end_height = if managed.is_some() || ethereum.is_some() {
+    let epoch_end_height = if managed.is_some() || ethereum.is_some() || governed_ethereum {
         1000 // Signed Core autonomous E1 requires H1 through H1000.
     } else {
         epoch_end_override.unwrap_or_else(|| export.map_or(10_000, |value| value.epoch_end_height))
@@ -10534,16 +10545,16 @@ fn prepare_socket_fixture_with_managed_release(
         )
     }
     .unwrap();
-    let fixture_genesis_hash = if export.is_some() || secure || ethereum.is_some() {
+    let fixture_genesis_hash = if export.is_some() || secure || ethereum.is_some() || governed_ethereum {
         let policy = payload.protected.as_ref().unwrap();
         let unsigned = synergy_genesis::builder::UnsignedGenesis {
-            format_version: if secure || ethereum.is_some() { 2 } else { 1 },
+            format_version: if secure || ethereum.is_some() || governed_ethereum { 2 } else { 1 },
             network: synergy_genesis::network::GenesisNetwork {
                 chain_id: payload.chain_id,
                 network_id: payload.network_id.clone(),
                 protocol_version: preliminary.protocol_version.clone(),
                 activation_unix: policy.epoch_start_timestamp_ms / 1000,
-                autonomous_epoch_protocol: (managed.is_some() || ethereum.is_some()).then(|| {
+                autonomous_epoch_protocol: (managed.is_some() || ethereum.is_some() || governed_ethereum).then(|| {
                     synergy_genesis::network::AUTONOMOUS_EPOCH_PROTOCOL_V1.into()
                 }),
                 ethereum_compatibility: ethereum.clone(),
@@ -13066,3 +13077,6 @@ use secure_process_canary::{finalize_secure_fixture, hex_decode};
 
 #[path = "ethereum_socket_qualification.rs"]
 mod ethereum_qualification;
+
+#[path = "ethereum_activation_qualification.rs"]
+mod ethereum_activation_qualification;

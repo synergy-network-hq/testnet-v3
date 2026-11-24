@@ -216,6 +216,13 @@ pub fn reserve_execution_metadata<'a>(
 ) -> Result<synergy_state::world_resources::WorldResourcePermit, CandidateResourceError> {
     let mut retained = budget.reserve(16 * 1024)?;
     for bytes in plaintexts {
+        let expanded = synergy_transaction::processing_decode_scratch(bytes);
+        if expanded != 0 {
+            // Compressed governance is decoded only after this bounded charge.
+            // Its expanded native body survives until candidate retirement.
+            retained.grow(expanded)?;
+            continue;
+        }
         let scratch = bytes
             .len()
             .checked_mul(3)

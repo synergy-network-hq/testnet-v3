@@ -504,7 +504,9 @@ where
                         source,
                     })?;
             if async_mode {
-                if transaction.unsigned.class != TransactionClass::User {
+                if transaction.unsigned.class != TransactionClass::User
+                    && !(transaction.unsigned.class==TransactionClass::System
+                        && matches!(transaction.unsigned.action(),Ok(TransactionAction::Governance{..}))) {
                     return Err(BlockExecutionError::Transaction {
                         transaction_index,
                         source: TransactionError::UnauthorizedTransactionClass,
