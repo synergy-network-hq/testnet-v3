@@ -7,6 +7,7 @@ pub mod audit;
 pub mod authorization;
 pub mod constitution;
 pub mod emergency;
+pub mod ethereum_activation;
 pub mod execution;
 pub mod proposal;
 pub mod vote;
@@ -15,6 +16,11 @@ pub use activation::{ActivationPoint, GovernedActivation};
 pub use authorization::GovernanceAuthorization;
 pub use constitution::{Constitution, GovernanceRule};
 pub use emergency::EmergencyAuthorization;
+pub use ethereum_activation::{
+    EthereumActivationSpec, ETHEREUM_ACTIVATION_ACTION_V1,
+    ETHEREUM_ACTIVATION_HISTORY_WARMUP_BLOCKS, ETHEREUM_ACTIVATION_RECORD_KEY_V1,
+    ETHEREUM_ACTIVATION_TARGET_V1,
+};
 pub use execution::{GovernanceExecution, GovernedStateMutation};
 pub use proposal::{GovernanceAction, GovernanceProposal, ProposalState};
 pub use vote::{GovernanceVote, VoteChoice, VoteVerifier};

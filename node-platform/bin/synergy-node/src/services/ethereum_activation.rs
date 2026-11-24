@@ -7,28 +7,13 @@ use synergy_aivm::ethereum_execution::{EvmCompatibilityPolicy, EVM_POLICY_KEY};
 use synergy_governance::{GovernanceExecution, VoteChoice, VoteVerifier};
 use synergy_state::{world_resources::WorldResourceBudget, ProtocolChange, StateDiff, WorldState};
 
-pub(super) const ACTION: &str = "aivm-ethereum-activation-v1";
-pub(super) const TARGET: &str = "canonical";
-pub(super) const RECORD_KEY: &str = "governance/aivm-ethereum-activation-v1/canonical";
+pub(super) use synergy_governance::{
+    EthereumActivationSpec, ETHEREUM_ACTIVATION_ACTION_V1 as ACTION,
+    ETHEREUM_ACTIVATION_HISTORY_WARMUP_BLOCKS as HISTORY_WARMUP_BLOCKS,
+    ETHEREUM_ACTIVATION_RECORD_KEY_V1 as RECORD_KEY, ETHEREUM_ACTIVATION_TARGET_V1 as TARGET,
+};
 pub(super) const ACTIVE_KEY: &str = "aivm/ethereum/v1/activation";
-pub(super) const HISTORY_WARMUP_BLOCKS: u64 = 256;
 const MAX_RECORD: usize = 1024 * 1024;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct EthereumActivationSpec {
-    pub schema_version: u32,
-    pub profile_id: String,
-    pub chain_id: u64,
-    pub network_id: String,
-    pub genesis_hash: String,
-    pub frozen_epoch: u64,
-    pub frozen_epoch_context_root: String,
-    pub install_height: u64,
-    pub activation_height: u64,
-    pub policy_sha256: String,
-    pub policy_bytes: Vec<u8>,
-}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GovernedRecord {
@@ -70,7 +55,7 @@ fn verify_execution(
     }
     let spec: EthereumActivationSpec =
         serde_json::from_slice(&execution.mutation.value).map_err(|error| error.to_string())?;
-    if serde_json::to_vec(&spec).map_err(|error| error.to_string())? != execution.mutation.value
+    if spec.canonical_bytes()? != execution.mutation.value
         || spec.schema_version != 1
         || spec.profile_id != synergy_genesis::network::ETHEREUM_COMPATIBILITY_PROFILE_V1
         || spec.chain_id != authority.epoch.chain_id
