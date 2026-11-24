@@ -1,5 +1,7 @@
 //! Deterministic bounded AIVM execution boundary. It cannot create consensus or finality evidence.
 pub mod metrics;
+pub mod ethereum;
+pub mod ethereum_admission;
 mod quantum;
 pub mod resources;
 pub mod runtime;

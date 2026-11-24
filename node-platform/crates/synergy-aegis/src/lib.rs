@@ -10,6 +10,7 @@ mod audit;
 mod binding;
 mod digest;
 mod entropy;
+pub mod ethereum;
 mod kem;
 mod key_lifecycle;
 mod kms_bridge;

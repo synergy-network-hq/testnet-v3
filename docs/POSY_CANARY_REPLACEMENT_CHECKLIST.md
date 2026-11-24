@@ -1,6 +1,21 @@
 # PoSy Canary readiness checklist
 
-Complete these checks on Canary chain 99999 to qualify the architecture for a fresh PoSy Testnet on chain 1266. Check off each item when its full acceptance criteria are verified.
+Qualify the architecture using the temporary Canary chain 99999 and deploy a distinct fresh PoSy Testnet on chain 9969. Check off each item only when its full acceptance criteria are verified.
+
+## Controlling launch requirements · 2026-11-24
+
+The owner approved **9969** as the replacement Testnet chain ID and **469** for Mainnet-beta/Mainnet. Earlier replacement references to 1266 are superseded. The retired single-authority 1266 ledger remains preserved and disabled. Canary 99999 authorization must not be renewed; retain existing renewal tooling without generating, signing or deploying a renewal.
+
+Deployment deadline: **2026-11-25 21:04 UTC / 15:04 CST**, preferred operational target **15:00 UTC / 09:00 CST**. Native and required Ethereum compatibility are initial-launch requirements. AIVM remains the sole execution owner. Source tests and build artifacts alone cannot close live acceptance.
+
+- [ ] Bind chain 9969 consistently in authenticated signed Genesis, runtime, EIP-155 validation, Gateway/Sentry routing, Wallet profiles, Portal/NodeNetwork, Atlas and external tooling. Keep network state distinct by Genesis. Reserve 469 for Mainnet-beta/Mainnet.
+- [ ] Qualify canonical EIP-155 RLP decoding, signing preimage, recovery, canonical signatures, nonce, gas and fees; enforce the approved unprotected-legacy policy and reject wrong-chain and duplicate submissions. Qualify typed formats only where implemented.
+- [ ] Integrate EVM bytecode deployment, calls, storage, logs, reverts, receipts and deterministic state transitions into AIVM, asynchronous ETDAG and three-QC PoSy finality, including exactly-once execution and restart reconciliation. No separate execution owner.
+- [ ] Qualify nine-decimal native SNRG to Ethereum-compatible denomination conversion for balances, values, gas and fees; explicitly handle unrepresentable amounts and prove conservation. Preserve independent D/P native authority for protected accounts; conventional ECDSA cannot bypass their policy.
+- [ ] Qualify public Ethereum RPC through Gateway → Sentry → validator: eth_chainId, net_version, eth_blockNumber, eth_getBalance, eth_getTransactionCount, eth_getBlockByNumber, eth_getBlockByHash, eth_getTransactionByHash, eth_getTransactionReceipt, eth_getCode, eth_getStorageAt, eth_call, eth_estimateGas, eth_gasPrice, eth_sendRawTransaction and eth_getLogs. Qualify feeHistory, priority fees, typed transactions and subscriptions only where actually supported.
+- [ ] Verify MetaMask connection and independent Ethereum tooling against the replacement network: correct identity and balances, externally signed transfer, finalized receipt, wrong-chain and duplicate rejection, contract deployment/call/logs, fees and nonces.
+- [ ] Complete reusable mixed iPhone/Linux application/provider qualification, public Hosted P D/P enrollment, automatic eligible-user sponsorship, Core protected enrollment and native Wallet finalized verification. Verify genuine iPhone and Mac creation, independent concurrent consumer enrollment, cross-wallet isolation, restart recovery, receiving and finalized D/P sending. Qualification attaches to supported releases/providers, never one customer device or account.
+
 
 - [ ] Commission `synergy-devrpc`, `synergy-relayer2`, and `synergy-relayer3` through the established Synergy-operated infrastructure workflow with authenticated network profiles. Keep the gateway off the validator VPN. Route through each Sentry’s public endpoint and the Sentry’s authorized private path to the validator. Qualify each route independently with the other Sentry offline. Verify HTTPS, Genesis, epoch and finality proofs, balances and receipts after restart and reboot.
 - [ ] Qualify one uniform, signed master on Val2, Val3, Val4 and Val6. Prove sustained matching finality across consecutive autonomous epochs, including restart, rejoin and safe recovery at an epoch boundary.
@@ -8,7 +23,7 @@ Complete these checks on Canary chain 99999 to qualify the architecture for a fr
 - [ ] Qualify ETDAG end to end. Prove encrypted submissions execute exactly once, with correct fees, nonces, balances and durable finalized receipts through the public gateway, including across restarts and epoch changes.
 - [ ] Verify APQE and operational security. Check authenticated provider provenance, key custody and rotation, peer admission, malformed requests, replay rejection, and signed install, update and recovery through NodeNetwork.
 - [ ] Pass a sustained multi-host load and recovery test. Record average, median, p95 and p99 block intervals, finalized TPS, finality and ETDAG latency, backlog recovery, CPU, memory, network overhead and behavior during controlled validator dropout. Verify monitoring and alerts against authenticated data. The 0.5–1.5 s block interval is a performance target. Missing that target alone does not fail qualification. No minimum TPS has been ratified.
-- [ ] Validate the replacement formation. Prepare a fresh signed PoSy Genesis for chain 1266 with Val1 as the fifth validator, settle the initial allocation and entitlement rules, and verify that Portal and Wallet distinguish the fresh network by Genesis. Any protected Wallet features in launch scope need their ratified Core contract and end-to-end verification.
+- [ ] Validate the replacement formation. Prepare a fresh signed PoSy Genesis for chain 9969 with Val1 as the fifth validator, settle the initial allocation and entitlement rules, and verify that Portal and Wallet distinguish the fresh network by Genesis. Any protected Wallet features in launch scope need their ratified Core contract and end-to-end verification.
 
 ## Latest verification
 
