@@ -37,11 +37,15 @@ fn proposal(
     signers: &[Arc<dyn AegisSigner>],
     count: usize,
 ) -> GovernanceExecution {
-    proposal_window(spec,authority,ids,signers,count,30)
+    proposal_window(spec, authority, ids, signers, count, 30)
 }
 fn proposal_window(
-    spec:&activation::EthereumActivationSpec,authority:&authority::VerifiedAuthority,
-    ids:&[String],signers:&[Arc<dyn AegisSigner>],count:usize,expires_at_height:u64,
+    spec: &activation::EthereumActivationSpec,
+    authority: &authority::VerifiedAuthority,
+    ids: &[String],
+    signers: &[Arc<dyn AegisSigner>],
+    count: usize,
+    expires_at_height: u64,
 ) -> GovernanceExecution {
     let mut constitution = Constitution {
         version: 1,
@@ -538,12 +542,36 @@ pub(super) fn qualify_five_process(
         secret,
         Some(provider),
     );
-    let acknowledged = process_rpc(
+    let queued = process_rpc(
         address,
         "synergy_submitProcessingTransactionV1",
         serde_json::to_value(&admission).unwrap(),
     )
     .unwrap();
+    let ack_deadline = Instant::now() + Duration::from_secs(30);
+    let acknowledged = loop {
+        let receipt = process_rpc(
+            address,
+            "synergy_getProtectedAdmissionReceipt",
+            serde_json::json!({"receipt_id":queued["receipt_id"]}),
+        )
+        .unwrap();
+        assert!(
+            !matches!(
+                receipt["lifecycle_status"].as_str(),
+                Some("failed" | "rejected")
+            ),
+            "original governance rejected before durable ACK: {receipt}"
+        );
+        if receipt["admitted"] == true && receipt["durable"] == true {
+            break receipt;
+        }
+        assert!(
+            Instant::now() < ack_deadline,
+            "original governance durable ACK deadline: {receipt}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
     eprintln!("Same-Genesis governance durable original ACK={acknowledged}; window={earliest}..={expires}, effective={}",spec.activation_height);
     children[0].kill().unwrap();
     children[0].wait().unwrap();
@@ -583,7 +611,12 @@ pub(super) fn qualify_five_process(
             .collect::<Vec<_>>();
         let height = telemetry
             .iter()
-            .filter_map(|row| row.as_ref().ok()?.get("finalized_height")?.as_u64())
+            .map(|row| {
+                row.as_ref()
+                    .ok()
+                    .and_then(|row| row.get("finalized_height")?.as_u64())
+                    .unwrap_or(0)
+            })
             .min()
             .unwrap_or(0);
         if telemetry.iter().all(Result::is_ok) && height > last {
