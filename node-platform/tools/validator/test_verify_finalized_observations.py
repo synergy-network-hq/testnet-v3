@@ -254,6 +254,41 @@ class FinalityObservationTests(unittest.TestCase):
                     verifier.main()
                 self.assertIn(reason, err.getvalue())
 
+    def test_plain_transfer_proof_checks_exact_debit_credit_fee_and_nonce(self):
+        amount, base_fee, gas, nonce = 1000, 2, 21000, 7
+        intent = dict(sender="sender", receiver="receiver", amount_nwei=amount, nonce=nonce,
+                      payload=[], fee_limit=dict(gas_limit=gas, max_fee_per_gas_nwei=3))
+        intent["class"] = "user"
+        receipt = dict(status="applied", gas_used=gas)
+        before = {"sender": (100000, nonce), "collector": (55, 6)}
+        after = {"sender": (57000, nonce + 1), "receiver": (1000, 0), "collector": (42055, 6)}
+
+        def world(accounts):
+            return json.dumps({"accounts": {
+                key: {"balance_nwei": value, "nonce": counter, "code_hash": None}
+                for key, (value, counter) in accounts.items()
+            }, "protocol": {}}).encode()
+
+        def verify(accounts=after, tx=intent, expected_base_fee=base_fee, extra=()):
+            txs = [{"unsigned": tx}, *extra]
+            block = json.dumps([1001, "a" * 64, "b" * 64, "c" * 64, txs, [receipt]])
+            return verifier.verify_plain_transfer(block, receipt, world(before), world(accounts),
+                                                  "collector", expected_base_fee)
+
+        self.assertEqual(verify()["fee_nwei"], "42000")
+        for key, bad_account in (("sender", (57001, 8)), ("receiver", (999, 0)),
+                                 ("collector", (42054, 6)), ("sender", (57000, 9)),
+                                 ("collector", (42055, 7))):
+            with self.subTest(key=key, bad_account=bad_account), self.assertRaisesRegex(
+                    ValueError, "balance, fee, or nonce"):
+                verify(accounts={**after, key: bad_account})
+        with self.assertRaisesRegex(ValueError, "signed fee limits"):
+            verify(expected_base_fee=4)
+        with self.assertRaisesRegex(ValueError, "exactly one transaction"):
+            verify(extra=({"unsigned": intent},))
+        with self.assertRaisesRegex(ValueError, "native plain transfer"):
+            verify(tx={**intent, "payload": [1]})
+
     def test_exact_receipt_selection_rejects_missing_duplicate_and_invalid_status(self):
         txid = "a" * 64
         receipt = dict(transaction_id=txid, status="applied", gas_used=21000,

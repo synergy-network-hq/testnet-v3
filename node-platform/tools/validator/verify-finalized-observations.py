@@ -203,6 +203,49 @@ def select_receipt(block_bytes, transaction_id, *, expected=True):
                 state_root_after=root, error_code=error)
 
 
+def verify_plain_transfer(block_bytes, receipt, previous_world, current_world, collector, base_fee):
+    # The caller has authenticated both Worlds and the linked block preimages.
+    _, _, _, _, transactions, _ = json.loads(block_bytes)
+    if len(transactions) != 1 or not isinstance(transactions[0], dict):
+        raise ValueError("transfer accounting requires a block with exactly one transaction")
+    intent = transactions[0].get("unsigned", {})
+    if not isinstance(intent, dict):
+        raise ValueError("invalid authenticated transfer intent")
+    sender, receiver = intent.get("sender"), intent.get("receiver")
+    amount, nonce = intent.get("amount_nwei"), intent.get("nonce")
+    limit = intent.get("fee_limit")
+    if (not all(isinstance(key, str) and key for key in (sender, receiver))
+            or len({sender, receiver, collector}) != 3 or intent.get("class") != "user"
+            or intent.get("payload") not in ([], list(b"SYNACT01\x00"))
+            or type(amount) is not int or not 0 < amount < 2**128
+            or type(nonce) is not int or not 0 <= nonce < 2**64 - 1
+            or not isinstance(limit, dict) or receipt["status"] != "applied"):
+        raise ValueError("expected an applied native plain transfer with distinct fee collector")
+    gas = receipt["gas_used"]
+    gas_limit, fee_cap = limit.get("gas_limit"), limit.get("max_fee_per_gas_nwei")
+    if (gas != 21_000 or type(gas_limit) is not int or not gas <= gas_limit < 2**64
+            or type(fee_cap) is not int or not base_fee <= fee_cap < 2**64):
+        raise ValueError("authenticated transfer does not match expected gas or signed fee limits")
+    fee = gas * base_fee
+
+    keys = (sender, receiver, collector)
+    before = select_world_accounts(previous_world, keys)
+    after = select_world_accounts(current_world, keys)
+    if before[sender] is None or any(account is None for account in after.values()):
+        raise ValueError("missing authenticated transfer account")
+    zero = dict(balance_nwei="0", nonce="0")
+    for address, delta in ((sender, -amount - fee), (receiver, amount), (collector, fee)):
+        prior = before[address] or zero
+        final = after[address]
+        prior_nonce = int(prior["nonce"])
+        if (int(final["balance_nwei"]) != int(prior["balance_nwei"]) + delta
+                or int(final["nonce"]) != prior_nonce + (address == sender)
+                or (address == sender and prior_nonce != nonce)):
+            raise ValueError("authenticated transfer balance, fee, or nonce movement differs")
+    return dict(sender=sender, receiver=receiver, fee_collector=collector,
+                amount_nwei=str(amount), fee_nwei=str(fee), base_fee_per_gas_nwei=str(base_fee))
+
+
 def verify_native(command, height):
     outcome = subprocess.run(command, capture_output=True, timeout=90)
     if outcome.returncode:
@@ -239,6 +282,9 @@ def main():
     cli.add_argument("--receipt-id", help="select a transaction receipt from the authenticated block bytes")
     cli.add_argument("--receipt-height", type=int,
                      help="height at which the receipt must occur exactly once within the verified range")
+    cli.add_argument("--fee-collector", help="independently authenticated fee collector for a plain transfer")
+    cli.add_argument("--base-fee-per-gas-nwei", type=int,
+                     help="independently authenticated base fee at the transfer height")
     cli.add_argument("--through-height", type=int, help="verify up to eight consecutive heights")
     cli.add_argument("--require-epoch-transition", action="store_true")
     args = cli.parse_args()
@@ -249,7 +295,8 @@ def main():
             or any(not address or len(address) > 128 or not address.isascii()
                    or not address.isprintable() for address in args.account)):
         cli.error("select up to eight distinct account keys")
-    verify_world = args.verify_world or bool(args.account)
+    verify_transfer = args.fee_collector is not None or args.base_fee_per_gas_nwei is not None
+    verify_world = args.verify_world or bool(args.account) or verify_transfer
     if args.witness_only and verify_world:
         cli.error("World verification requires an original block preimage")
     receipt_height = args.receipt_height
@@ -261,6 +308,11 @@ def main():
             cli.error("receipt verification requires original block bytes and an exact transaction ID and height")
     elif receipt_height is not None:
         cli.error("--receipt-height requires --receipt-id")
+    if verify_transfer and (
+            not args.fee_collector or args.base_fee_per_gas_nwei is None
+            or not 0 < args.base_fee_per_gas_nwei < 2**64
+            or receipt_height is None or receipt_height <= args.height):
+        cli.error("transfer accounting requires a fee collector, positive base fee, and receipt after the first verified height")
     if args.require_epoch_transition and last == args.height:
         cli.error("an epoch transition requires at least two heights")
     endpoints = [urlsplit(value) for value in args.observer]
@@ -279,6 +331,7 @@ def main():
         with tempfile.TemporaryDirectory(prefix="posy-finality-") as directory:
             finality = Path(directory, "finality.json")
             block = Path(directory, "block.json")
+            previous_worlds = {}
             for height in range(args.height, last + 1):
                 agreed = None
                 for endpoint in args.observer:
@@ -302,6 +355,12 @@ def main():
                         match_world_state(world_bytes, observed["state_root"])
                         if args.account:
                             observed["accounts"] = select_world_accounts(world_bytes, args.account)
+                        if verify_transfer and height == receipt_height - 1:
+                            previous_worlds[endpoint] = world_bytes
+                        if verify_transfer and height == receipt_height:
+                            observed["transfer_accounting"] = verify_plain_transfer(
+                                block_bytes, observed["receipt"], previous_worlds.pop(endpoint),
+                                world_bytes, args.fee_collector, args.base_fee_per_gas_nwei)
                     if range_mode:
                         if args.witness_only:
                             observed.update(witness_position(proof_bytes, observed, args.chain,
