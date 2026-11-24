@@ -1,6 +1,6 @@
 # PoSy Canary readiness checklist
 
-Qualify the architecture using the temporary Canary chain 99999 and deploy a distinct fresh PoSy Testnet on chain 9969. Check off each item only when its full acceptance criteria are verified.
+Complete and stabilize the architecture on the temporary Canary chain 99999 first. Only after Canary acceptance, use that architecture to build the distinct fresh PoSy Testnet on chain 9969. Check off each item only when its full acceptance criteria are verified.
 
 ## Controlling launch requirements · 2026-11-24
 
@@ -8,12 +8,13 @@ The owner approved **9969** as the replacement Testnet chain ID and **469** for 
 
 Deployment deadline: **2026-11-25 21:04 UTC / 15:04 CST**, preferred operational target **15:00 UTC / 09:00 CST**. Native and required Ethereum compatibility are initial-launch requirements. AIVM remains the sole execution owner. Source tests and build artifacts alone cannot close live acceptance.
 
-- [ ] Bind chain 9969 consistently in authenticated signed Genesis, runtime, EIP-155 validation, Gateway/Sentry routing, Wallet profiles, Portal/NodeNetwork, Atlas and external tooling. Keep network state distinct by Genesis. Reserve 469 for Mainnet-beta/Mainnet.
+**Owner's sequencing correction, 2026-11-24:** all current chain implementation, deployment and acceptance work targets Canary 99999. It must be running, stable and complete, including Wallet and required EVM functionality, before Testnet 9969 construction begins. Do not switch current applications or Hosted P to 9969 prematurely.
+
 - [ ] Qualify canonical EIP-155 RLP decoding, signing preimage, recovery, canonical signatures, nonce, gas and fees; enforce the approved unprotected-legacy policy and reject wrong-chain and duplicate submissions. Qualify typed formats only where implemented.
 - [ ] Integrate EVM bytecode deployment, calls, storage, logs, reverts, receipts and deterministic state transitions into AIVM, asynchronous ETDAG and three-QC PoSy finality, including exactly-once execution and restart reconciliation. No separate execution owner.
 - [ ] Qualify nine-decimal native SNRG to Ethereum-compatible denomination conversion for balances, values, gas and fees; explicitly handle unrepresentable amounts and prove conservation. Preserve independent D/P native authority for protected accounts; conventional ECDSA cannot bypass their policy.
 - [ ] Qualify public Ethereum RPC through Gateway → Sentry → validator: eth_chainId, net_version, eth_blockNumber, eth_getBalance, eth_getTransactionCount, eth_getBlockByNumber, eth_getBlockByHash, eth_getTransactionByHash, eth_getTransactionReceipt, eth_getCode, eth_getStorageAt, eth_call, eth_estimateGas, eth_gasPrice, eth_sendRawTransaction and eth_getLogs. Qualify feeHistory, priority fees, typed transactions and subscriptions only where actually supported.
-- [ ] Verify MetaMask connection and independent Ethereum tooling against the replacement network: correct identity and balances, externally signed transfer, finalized receipt, wrong-chain and duplicate rejection, contract deployment/call/logs, fees and nonces.
+- [ ] Verify MetaMask connection and independent Ethereum tooling against Canary 99999: correct identity and balances, externally signed transfer, finalized receipt, wrong-chain and duplicate rejection, contract deployment/call/logs, fees and nonces.
 - [ ] Complete reusable mixed iPhone/Linux application/provider qualification, public Hosted P D/P enrollment, automatic eligible-user sponsorship, Core protected enrollment and native Wallet finalized verification. Verify genuine iPhone and Mac creation, independent concurrent consumer enrollment, cross-wallet isolation, restart recovery, receiving and finalized D/P sending. Qualification attaches to supported releases/providers, never one customer device or account.
 
 
@@ -23,9 +24,21 @@ Deployment deadline: **2026-11-25 21:04 UTC / 15:04 CST**, preferred operational
 - [ ] Qualify ETDAG end to end. Prove encrypted submissions execute exactly once, with correct fees, nonces, balances and durable finalized receipts through the public gateway, including across restarts and epoch changes.
 - [ ] Verify APQE and operational security. Check authenticated provider provenance, key custody and rotation, peer admission, malformed requests, replay rejection, and signed install, update and recovery through NodeNetwork.
 - [ ] Pass a sustained multi-host load and recovery test. Record average, median, p95 and p99 block intervals, finalized TPS, finality and ETDAG latency, backlog recovery, CPU, memory, network overhead and behavior during controlled validator dropout. Verify monitoring and alerts against authenticated data. The 0.5–1.5 s block interval is a performance target. Missing that target alone does not fail qualification. No minimum TPS has been ratified.
-- [ ] Validate the replacement formation. Prepare a fresh signed PoSy Genesis for chain 9969 with Val1 as the fifth validator, settle the initial allocation and entitlement rules, and verify that Portal and Wallet distinguish the fresh network by Genesis. Any protected Wallet features in launch scope need their ratified Core contract and end-to-end verification.
 
-## Latest verification
+## Subsequent Testnet construction — only after Canary acceptance
+
+- [ ] Bind chain 9969 consistently in authenticated signed Genesis, runtime, EIP-155 validation, Gateway/Sentry routing, Wallet profiles, Portal/NodeNetwork, Atlas and external tooling. Keep network state distinct by Genesis. Reserve 469 for Mainnet-beta/Mainnet.
+- [ ] Validate the replacement formation. Prepare a fresh signed PoSy Genesis for chain 9969 with Val1 as the fifth validator, settle the initial allocation and entitlement rules, and verify that Portal and Wallet distinguish the fresh network by Genesis. Repeat the applicable live native, Wallet and EVM acceptance against this distinct deployment.
+
+## Current launch snapshot · 2026-11-24
+
+Hosted P on Google Cloud now runs worker `c82d747e7c23d6949c734f84d59f3329ff6a37483fd03c6cb40bb06ae2b44679` and factor issuer `e2abaf0591fa431b4369a3b37c9c6e85a70ef4512c4eaafc17de705eb60457bf` with the matching 15-module broker from Wallet `795252f11eac093fb44a07ed8cc22412318fd98b`. The canonical upgrade preserved original custody/configuration identities; all four services were active afterward. Private original D/P routes admit the independently reviewed iOS/Linux and macOS/Linux engineering provider pairs. Fresh GNU qualification passed 157 standard native tests, three actual-provider Hosted P tests, two issuer/restart tests, the signed PIN method-separation test, and original D/P HTTPS AccountBinding. These results do not close physical application or public enrollment acceptance.
+
+The Wallet origin and Apple's association CDN both serve the exact registered iOS/macOS passkey association. Hosted P's RP is `wallet.synergy-network.io` with origin `https://wallet.synergy-network.io`. Physical OS passkey verification remains open. Public D/P execution ingress was activated using the canonical `execution-publish` controller action: Nginx had excluded `primary-companion/*` and returned 404 before broker dispatch. An independent public HTTPS `POST {}` to `/v1/enrollment/primary-companion/run` returned HTTP 400 JSON `invalid_request` at 14:36:51 UTC on November 24. This closes that routing defect, not authenticated application enrollment acceptance. Sponsor authorization remains disabled; D/P publication does not require it. Finalized enrollment-to-spending factor activation has a source checkpoint but still needs deployed acceptance.
+
+The standard Portal's saved NodeNetwork version was unavailable, but the existing signed engineering Portal opens its actual NodeNetwork workspace. Its current Gateway target inspection failed controller authentication even after the existing operator identity was refreshed in the OS agent; no node mutation or substitute management workflow was used. Read-only local RPC observations found Val2, Val3, Val4 and Val6 at finalized height 143,039 in epoch 144 on the same Canary Genesis; Val2 had previously reported height 142,859 in epoch 143. The public Gateway still returned 503 for authenticated chain telemetry, so these observations do not close public-tier or fleet health acceptance. Current work remains Canary completion; fresh chain 9969 construction is subsequent.
+
+## Earlier verification · 2026-11-21
 
 On 2026-11-21, Canary 99999 recovered from H39,998 after Val3 rejoined through Portal and NodeNetwork on the same authenticated Linux release as Val2, Val4 and Val6. Each validator had three authenticated peers. All four matched the block ID and state root and independently verified the same three-QC witness at H40,198, then advanced to H40,204.
 
