@@ -1,4 +1,5 @@
 use super::*;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use synergy_address_engine::apqe::provider::{
     NativeVerificationQualification, SignOptions, Target, BACKEND_ABI, IMPORT_MANIFEST_SHA256,
     MODULE_REVISION, SELECTED_MANIFEST_SHA256,
@@ -181,16 +182,54 @@ pub(in crate::network_formation) fn exercise(
             engine.clone(),
         )
     };
+    let observe = |request: &Path, request_sha256: &str, provider_report_sha256: &str| {
+        inspect(
+            Inputs {
+                context,
+                formation_sha256,
+                formation,
+                reviewed: &reviewed,
+                request,
+                request_sha256,
+                provider_report_sha256,
+            },
+            engine.clone(),
+        )
+    };
+    let set_custody_permissions = |mode| {
+        for file in ["authority.enc.json", "unlock"] {
+            fs::set_permissions(formation.join(file), fs::Permissions::from_mode(mode)).unwrap();
+        }
+    };
     let reservations = formation.join(RESERVATIONS);
     assert!(invoke(&request_path, &"11".repeat(32), &report).is_err());
     assert!(invoke(&request_path, &request_pin, &"11".repeat(32)).is_err());
+    assert!(observe(&request_path, &"11".repeat(32), &report).is_err());
+    assert!(observe(&request_path, &request_pin, &"11".repeat(32)).is_err());
+    set_custody_permissions(0o000);
+    let ready = observe(&request_path, &request_pin, &report).unwrap();
+    assert_eq!(ready["state"], "ready");
+    assert_eq!(ready["request_sha256"], request_pin);
+    assert_eq!(ready["genesis_hash"], *genesis);
+    assert_eq!(ready["issuer_sha256"], digest(&issuer.public_key));
+    assert_eq!(
+        ready["predecessor_context_root"],
+        predecessor.root().unwrap()
+    );
+    assert!(ready["delegation"].is_null());
+    set_custody_permissions(0o600);
     assert!(!reservations.exists());
     let first = invoke(&request_path, &request_pin, &report).unwrap();
     assert_eq!(first["genesis_hash"], *genesis);
     let output = first["authorization_json"].as_str().unwrap();
     assert_eq!(first["authorization_sha256"], digest(output.as_bytes()));
     assert_eq!(invoke(&request_path, &request_pin, &report).unwrap(), first);
-    let delegation: WalletDispatchReleaseIssuerAuthorization =
+    set_custody_permissions(0o000);
+    let observed = observe(&request_path, &request_pin, &report).unwrap();
+    assert_eq!(observed["state"], "signed");
+    assert_eq!(observed["delegation"], first);
+    set_custody_permissions(0o600);
+    let mut delegation: WalletDispatchReleaseIssuerAuthorization =
         serde_json::from_str(output).unwrap();
     let check = |public: &[u8]| {
         engine
@@ -215,10 +254,31 @@ pub(in crate::network_formation) fn exercise(
     assert!(invoke(&changed_path, &digest(&changed_request), &report)
         .unwrap_err()
         .contains("different approved request"));
+    assert!(observe(&changed_path, &digest(&changed_request), &report)
+        .unwrap_err()
+        .contains("different approved request"));
     let slot = reservations.join(first["attachment_sha256"].as_str().unwrap());
-    fs::remove_file(slot.join(AUTHORIZATION_FILE)).unwrap();
+    let retained = slot.join(AUTHORIZATION_FILE);
+    delegation.signature[0] ^= 1;
+    fs::write(&retained, serde_json::to_vec(&delegation).unwrap()).unwrap();
+    assert!(observe(&request_path, &request_pin, &report).is_err());
+    fs::remove_file(&retained).unwrap();
+    symlink(slot.join("absent-authorization"), &retained).unwrap();
+    assert!(observe(&request_path, &request_pin, &report).is_err());
+    fs::remove_file(&retained).unwrap();
+    let interrupted = observe(&request_path, &request_pin, &report).unwrap();
+    assert_eq!(interrupted["state"], "interrupted");
+    assert!(interrupted["delegation"].is_null());
     assert!(invoke(&request_path, &request_pin, &report)
         .unwrap_err()
         .contains("Interrupted Wallet issuer delegation"));
-    eprintln!("Native Wallet issuer delegation, exact replay and interrupted-write refusal passed");
+    fs::remove_file(slot.join(APPROVED_REQUEST)).unwrap();
+    assert_eq!(
+        observe(&request_path, &request_pin, &report).unwrap()["state"],
+        "interrupted"
+    );
+    assert!(!retained.exists());
+    eprintln!(
+        "Native Wallet issuer readiness, delegation, verified read-only reopen and interrupted-write refusal passed"
+    );
 }

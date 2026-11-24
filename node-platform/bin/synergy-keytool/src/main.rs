@@ -69,25 +69,27 @@ fn run() -> Result<(), String> {
         }
         #[cfg(unix)]
         [command, context, formation_pin, formation, reviewed, request, request_pin]
-            if command == "delegate-wallet-release-issuer" =>
+            if matches!(command.as_str(), "inspect-wallet-release-issuer" | "delegate-wallet-release-issuer") =>
         {
-            println!(
-                "{}",
-                network_formation::wallet_release_issuer::delegate(
-                    network_formation::wallet_release_issuer::Inputs {
-                        context: Path::new(context),
-                        formation_sha256: formation_pin,
-                        formation: Path::new(formation),
-                        reviewed: Path::new(reviewed),
-                        request: Path::new(request),
-                        request_sha256: request_pin,
-                        provider_report_sha256: supplied
-                            .last()
-                            .ok_or("authenticated APQE report digest required")?,
-                    },
-                    engine.ok_or("authenticated APQE provider required")?,
-                )?
-            );
+            use network_formation::wallet_release_issuer::{delegate, inspect, Inputs};
+            let input = Inputs {
+                context: Path::new(context),
+                formation_sha256: formation_pin,
+                formation: Path::new(formation),
+                reviewed: Path::new(reviewed),
+                request: Path::new(request),
+                request_sha256: request_pin,
+                provider_report_sha256: supplied
+                    .last()
+                    .ok_or("authenticated APQE report digest required")?,
+            };
+            let engine = engine.ok_or("authenticated APQE provider required")?;
+            let result = if command == "inspect-wallet-release-issuer" {
+                inspect(input, engine)?
+            } else {
+                delegate(input, engine)?
+            };
+            println!("{result}");
         }
         #[cfg(unix)]
         [command, context, pin, formation, transport] if command == "review-gateway-issuer" => {
@@ -751,6 +753,8 @@ fn selected_arguments(
                 Some("RECIPE_JSON CONTEXT_JSON CONTEXT_SHA256 UNSIGNED_GENESIS_OUT UNSIGNED_AUTHORITY_OUT"),
             "review-validator-genesis-binding" | "bind-validator-formation" =>
                 Some("CONTEXT_JSON CONTEXT_SHA256 PRIVATE_DIRECTORY SIGNED_PUBLIC_DIRECTORY BOUND_CUSTODY_DIRECTORY GENESIS_SHA256 AUTHORITY_SHA256 TRUST_ROOT_SHA256"),
+            "inspect-wallet-release-issuer" | "delegate-wallet-release-issuer" =>
+                Some("CONTEXT_JSON FORMATION_SHA256 FORMATION_DIR REVIEWED_INPUT_DIR REQUEST_JSON REQUEST_SHA256"),
             _ => None,
         };
         if let Some(usage) = usage {
@@ -769,6 +773,7 @@ fn selected_arguments(
     if !matches!(
         command,
         "check-gateway-admission"
+            | "inspect-wallet-release-issuer"
             | "delegate-wallet-release-issuer"
             | "prepare-wallet-sponsor-identity"
             | "attach-wallet-sponsor-identity"

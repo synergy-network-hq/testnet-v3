@@ -280,7 +280,10 @@ struct Prepared {
     authority: AuthorityPayload,
     public: Vec<u8>,
     signer: crate::provider::Engine,
-    custody: Custody,
+}
+
+struct FormationKey {
+    envelope: EncryptedEnvelope,
     unlock: SecretBytes,
 }
 
@@ -354,22 +357,6 @@ fn load(
     {
         return Err("Prepared Genesis, authority or registration coverage differs".into());
     }
-    let custody: Custody = decode(&read(
-        &directory.join("authority.enc.json"),
-        REQUEST_LIMIT,
-        true,
-    )?)?;
-    if custody.version != 1
-        || custody.role != ROLE
-        || custody.formation != context
-        || custody.request_sha256 != review.request_sha256
-        || custody.review_sha256 != review_pin
-        || custody.public_key != public
-    {
-        return Err("Authority custody scope differs".into());
-    }
-    let unlock = read(&directory.join("unlock"), 64, true)?;
-    passphrase(&unlock)?;
     Ok(Prepared {
         review,
         review_pin,
@@ -377,11 +364,32 @@ fn load(
         authority,
         public,
         signer: engine,
-        custody,
-        unlock,
     })
 }
 impl Prepared {
+    fn read_custody(&self, directory: &Path) -> Result<FormationKey, String> {
+        let custody: Custody = decode(&read(
+            &directory.join("authority.enc.json"),
+            REQUEST_LIMIT,
+            true,
+        )?)?;
+        if custody.version != 1
+            || custody.role != ROLE
+            || custody.formation != self.review.formation
+            || custody.request_sha256 != self.review.request_sha256
+            || custody.review_sha256 != self.review_pin
+            || custody.public_key != self.public
+        {
+            return Err("Authority custody scope differs".into());
+        }
+        let unlock = read(&directory.join("unlock"), 64, true)?;
+        passphrase(&unlock)?;
+        Ok(FormationKey {
+            envelope: custody.envelope,
+            unlock,
+        })
+    }
+
     fn read_signed_formation(&self, directory: &Path) -> Result<Option<SignedFormation>, String> {
         if directory.join("signed-pending").exists() {
             return Err(
@@ -429,7 +437,7 @@ impl Prepared {
         }))
     }
 
-    fn signer(&self) -> Result<impl AegisSigner, String> {
+    fn signer(&self, key: &FormationKey) -> Result<impl AegisSigner, String> {
         let guard = self
             .signer
             .lock()
@@ -437,8 +445,8 @@ impl Prepared {
         let secret = SecretBytes::from_bytes(decrypt_with_passphrase(
             &guard,
             &Primitives,
-            &self.custody.envelope,
-            passphrase(&self.unlock)?,
+            &key.envelope,
+            passphrase(&key.unlock)?,
         )?);
         drop(guard);
         crate::provider::signer(
@@ -467,6 +475,7 @@ pub fn status(
     export: bool,
 ) -> Result<Value, String> {
     let p = load(context_path, context_pin, directory, engine.clone())?;
+    let key = p.read_custody(directory)?;
     let possession = format!(
         "SYNERGY-AUTHORITY-CUSTODY-POSSESSION-V1\0{}\0{}",
         p.review.request_sha256, p.review_pin
@@ -479,7 +488,7 @@ pub fn status(
     };
     let id = KeyId::new(p.review.key_id.clone()).map_err(|e| e.to_string())?;
     let proof = p
-        .signer()?
+        .signer(&key)?
         .sign(&id, &ctx, possession.as_bytes())
         .map_err(|e| e.to_string())?;
     use synergy_aegis::AegisVerifier;
@@ -528,6 +537,7 @@ pub fn sign(
     let (request, raw) =
         exact_request::<Sign>(request_path, request_pin, "network_formation_sign")?;
     let p = load(context_path, context_pin, directory, engine.clone())?;
+    let key = p.read_custody(directory)?;
     if request.parameters.review_sha256 != p.review_pin {
         return Err("Explicit public review digest changed".into());
     }
@@ -539,7 +549,7 @@ pub fn sign(
     let pending = directory.join("signed-pending");
     begin(&pending)?;
     write(&pending.join("sign-request.json"), raw.as_bytes())?;
-    let signer = p.signer()?;
+    let signer = p.signer(&key)?;
     let id = KeyId::new(p.review.key_id.clone()).map_err(|e| e.to_string())?;
     let genesis = synergy_genesis::signing::sign(p.genesis.clone(), &signer, id.clone())?;
     let signature = signer
