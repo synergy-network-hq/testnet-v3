@@ -13,4 +13,4 @@ pub use verification::verify_cluster_assignment;
 #[cfg(feature = "candidate-cluster-schedule")]
 mod candidate_schedule;
 #[cfg(feature = "candidate-cluster-schedule")]
-pub use candidate_schedule::CandidateClusterSchedule;
+pub use candidate_schedule::{CandidateClusterSchedule, CandidateHeightAssignments};

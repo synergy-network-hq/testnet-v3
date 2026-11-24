@@ -1,6 +1,6 @@
 //! Inactive qualification of POSY-00C's shuffle/sizing, with the owner's
-//! minimum-three proposal. No epoch activation, entropy creation, height
-//! rotation, admission policy or consensus commitment is defined here.
+//! minimum-three proposal. It checks supplied height assignments without
+//! defining rotation, epoch activation, admission policy or consensus commitments.
 use crate::{
     parse_hash_bytes, verify_strict_dual_quorum, ConsensusCluster, FrozenValidatorRegistry,
     PosyError, PosyResult,
@@ -89,6 +89,37 @@ impl CandidateClusterSchedule {
     pub fn clusters(&self) -> &[ConsensusCluster] {
         &self.clusters
     }
+    /// Bind the candidate map to the exact-height assignments already
+    /// authenticated by the caller. Indices are offsets from first_height.
+    pub fn bind_height_assignments<'a>(
+        &'a self,
+        epoch: u64,
+        first_height: u64,
+        last_height: u64,
+        assignments: &'a [u64],
+    ) -> PosyResult<CandidateHeightAssignments<'a>> {
+        let count = last_height
+            .checked_sub(first_height)
+            .and_then(|delta| delta.checked_add(1))
+            .and_then(|count| usize::try_from(count).ok());
+        if epoch != self.epoch || first_height == 0 || count != Some(assignments.len()) {
+            return Err(PosyError::invalid(
+                "candidate assignment epoch or height range differs",
+            ));
+        }
+        let cluster_count = self.clusters.len() as u64;
+        if assignments.iter().any(|id| *id >= cluster_count) {
+            return Err(PosyError::invalid(
+                "candidate height selects an unknown cluster",
+            ));
+        }
+        Ok(CandidateHeightAssignments {
+            schedule: self,
+            first_height,
+            assignments,
+        })
+    }
+
     /// Applicable cluster is supplied by a future authenticated height schedule,
     /// not inferred here. Exact map equality precedes existing dual quorum.
     pub fn verify_cluster_quorum(
@@ -116,6 +147,35 @@ impl CandidateClusterSchedule {
             .collect::<Vec<_>>();
         verify_strict_dual_quorum(&validators, signers)
             .map_err(|_| PosyError::invalid("candidate cluster lacks strict frozen dual quorum"))
+    }
+}
+
+/// Inactive verifier input for one contiguous epoch assignment. Construction
+/// checks structural consistency. The caller authenticates the input schedule.
+pub struct CandidateHeightAssignments<'a> {
+    schedule: &'a CandidateClusterSchedule,
+    first_height: u64,
+    assignments: &'a [u64],
+}
+
+impl CandidateHeightAssignments<'_> {
+    /// Check the certificate's assigned cluster before counting any signer.
+    pub fn verify_height_quorum(
+        &self,
+        height: u64,
+        cluster: &ConsensusCluster,
+        signers: &[String],
+    ) -> PosyResult<()> {
+        let assigned = height
+            .checked_sub(self.first_height)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .and_then(|offset| self.assignments.get(offset));
+        if assigned != Some(&cluster.cluster_id) {
+            return Err(PosyError::invalid(
+                "candidate certificate is outside its assigned cluster or height",
+            ));
+        }
+        self.schedule.verify_cluster_quorum(cluster, signers)
     }
 }
 
@@ -259,6 +319,46 @@ mod tests {
         signers = c.validator_ids[..3].to_vec();
         signers.push(map.clusters[1].validator_ids[0].clone());
         assert!(map.verify_cluster_quorum(c, &signers).is_err());
+    }
+
+    #[test]
+    fn only_the_assigned_cluster_can_form_quorum_at_a_height() {
+        for (n, assignments, threshold) in [(10, vec![0, 1], 4), (21, vec![2, 0, 1], 5)] {
+            let map = CandidateClusterSchedule::derive(&registry(n), &"01".repeat(32)).unwrap();
+            let first = 6001;
+            let last = first + assignments.len() as u64 - 1;
+            assert!(map
+                .bind_height_assignments(8, first, last, &assignments)
+                .is_err());
+            assert!(map
+                .bind_height_assignments(7, first, last + 1, &assignments)
+                .is_err());
+            assert!(map
+                .bind_height_assignments(7, first, first, &[n as u64])
+                .is_err());
+            let bound = map
+                .bind_height_assignments(7, first, last, &assignments)
+                .unwrap();
+            for (offset, &id) in assignments.iter().enumerate() {
+                let height = first + offset as u64;
+                let cluster = &map.clusters[id as usize];
+                let other = &map.clusters[(id as usize + 1) % map.clusters.len()];
+                let signers = &cluster.validator_ids[..threshold];
+                assert!(bound.verify_height_quorum(height, cluster, signers).is_ok());
+                assert!(bound
+                    .verify_height_quorum(height, cluster, &signers[..threshold - 1])
+                    .is_err());
+                assert!(bound
+                    .verify_height_quorum(height, other, &other.validator_ids)
+                    .is_err());
+                assert!(bound
+                    .verify_height_quorum(first - 1, cluster, signers)
+                    .is_err());
+                assert!(bound
+                    .verify_height_quorum(last + 1, cluster, signers)
+                    .is_err());
+            }
+        }
     }
 
     #[test]
