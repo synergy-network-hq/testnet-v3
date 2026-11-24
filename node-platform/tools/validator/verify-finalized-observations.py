@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare original finalized proofs from independently selected HTTPS observers."""
+"""Compare original finalized proofs from HTTPS observers or authorized archives."""
 import argparse
 import base64
 import hashlib
@@ -80,6 +80,18 @@ def fetch_proof(endpoint, height, kind, request=request_page):
                 raise ValueError("reassembled proof digest mismatch")
             return bytes(data)
     raise ValueError("proof exceeded the continuation page limit")
+
+
+def read_archived_proof(directory, height, kind):
+    path = directory / f"{height}.{kind}.json"
+    try:
+        with path.open("rb") as source:
+            data = source.read(MAX_PROOF_BYTES + 1)
+    except FileNotFoundError as error:
+        raise ValueError(f"archived {kind} unavailable at H{height}") from error
+    if not 0 < len(data) <= MAX_PROOF_BYTES:
+        raise ValueError(f"archived {kind} at H{height} exceeds proof bounds or is empty")
+    return data
 
 
 def subject(result, chain, network, genesis, height, *, witness_only=False):
@@ -266,7 +278,10 @@ def verify_native(command, height):
 
 def main():
     cli = argparse.ArgumentParser(description=__doc__)
-    cli.add_argument("--observer", action="append", required=True)
+    sources = cli.add_mutually_exclusive_group(required=True)
+    sources.add_argument("--observer", action="append")
+    sources.add_argument("--evidence-dir", action="append", type=Path,
+                         help="authorized directory of original HEIGHT.KIND.json proof bytes")
     cli.add_argument("--node", type=Path, required=True, help="qualified native synergy-node binary")
     cli.add_argument("--config", type=Path, required=True, help="independently authenticated read-only trust configuration")
     cli.add_argument("--chain", type=int, required=True)
@@ -315,12 +330,21 @@ def main():
         cli.error("transfer accounting requires a fee collector, positive base fee, and receipt after the first verified height")
     if args.require_epoch_transition and last == args.height:
         cli.error("an epoch transition requires at least two heights")
-    endpoints = [urlsplit(value) for value in args.observer]
-    if (not 1 <= len(endpoints) <= 8 or any(
-            e.scheme != "https" or not e.hostname or e.username is not None or e.query or e.fragment
-            for e in endpoints) or len({e.hostname for e in endpoints}) != len(endpoints)
-            or args.chain <= 0 or args.height <= 0 or not HEX.fullmatch(args.genesis)):
-        cli.error("select distinct HTTPS observer hosts and an explicit network and finalized height")
+    if args.chain <= 0 or args.height <= 0 or not HEX.fullmatch(args.genesis):
+        cli.error("select an explicit network and finalized height")
+    if args.observer:
+        endpoints = [urlsplit(value) for value in args.observer]
+        if (not 1 <= len(endpoints) <= 8 or any(
+                e.scheme != "https" or not e.hostname or e.username is not None or e.query or e.fragment
+                for e in endpoints) or len({e.hostname for e in endpoints}) != len(endpoints)):
+            cli.error("select one to eight distinct HTTPS observer hosts")
+        inputs, read_proof = args.observer, fetch_proof
+    else:
+        inputs = [directory.resolve() for directory in args.evidence_dir]
+        if not 1 <= len(inputs) <= 8 or len(set(inputs)) != len(inputs) or not all(
+                directory.is_dir() for directory in inputs):
+            cli.error("select one to eight distinct existing evidence directories")
+        read_proof = read_archived_proof
 
     range_mode = args.through_height is not None
     observations = []
@@ -334,12 +358,12 @@ def main():
             previous_worlds = {}
             for height in range(args.height, last + 1):
                 agreed = None
-                for endpoint in args.observer:
-                    proof_bytes = fetch_proof(endpoint, height, "finality")
+                for endpoint in inputs:
+                    proof_bytes = read_proof(endpoint, height, "finality")
                     finality.write_bytes(proof_bytes)
                     command = [str(node), "finality-proof", "verify", str(config), str(finality)]
                     if not args.witness_only:
-                        block_bytes = fetch_proof(endpoint, height, "block_commitment")
+                        block_bytes = read_proof(endpoint, height, "block_commitment")
                         block.write_bytes(block_bytes)
                         command.append(str(block))
                     native = verify_native(command, height)
@@ -351,7 +375,7 @@ def main():
                         if receipt is not None:
                             observed["receipt"] = receipt
                     if verify_world:
-                        world_bytes = fetch_proof(endpoint, height, "world_state")
+                        world_bytes = read_proof(endpoint, height, "world_state")
                         match_world_state(world_bytes, observed["state_root"])
                         if args.account:
                             observed["accounts"] = select_world_accounts(world_bytes, args.account)
@@ -380,7 +404,11 @@ def main():
         cli.exit(1, f"Finality verification failed: {error}\n")
 
     result = dict(verified=True, chain_id=args.chain, network_id=args.network,
-                  genesis_hash=args.genesis, observer_count=len(endpoints))
+                  genesis_hash=args.genesis)
+    if args.observer:
+        result["observer_count"] = len(inputs)
+    else:
+        result["archive_input_count"] = len(inputs)
     if args.witness_only:
         result["block_preimage_verified"] = False
     if verify_world:

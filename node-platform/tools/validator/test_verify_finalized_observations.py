@@ -40,6 +40,41 @@ class FinalityObservationTests(unittest.TestCase):
                 **fetch(endpoint, query), "next_offset": None
             })
 
+    def test_archive_mode_preserves_exact_native_inputs_without_network_reads(self):
+        genesis = "a" * 64
+        proof, block = b'{ "finalized": 7 }', b'[7, "original"]'
+        native = dict(verified=True, chain_id=99999, network_id="canary", genesis_hash=genesis,
+                      state_root="b" * 64, finalized=dict(height=7, block_id="c" * 64,
+                      protected_execution_root="d" * 64))
+
+        def verify(command, height):
+            self.assertEqual(height, 7)
+            self.assertEqual(Path(command[-2]).read_bytes(), proof)
+            self.assertEqual(Path(command[-1]).read_bytes(), block)
+            return native
+
+        with verifier.tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            (folder / "7.finality.json").write_bytes(proof)
+            (folder / "7.block_commitment.json").write_bytes(block)
+            args = ["verify", "--evidence-dir", temporary, "--node", __file__, "--config", __file__,
+                    "--chain", "99999", "--network", "canary", "--genesis", genesis, "--height", "7"]
+            with (patch("sys.argv", args), patch.object(verifier, "verify_native", side_effect=verify),
+                  patch.object(verifier, "fetch_proof") as fetch):
+                with redirect_stdout(io.StringIO()) as out:
+                    verifier.main()
+                self.assertEqual(json.loads(out.getvalue())["archive_input_count"], 1)
+                self.assertNotIn("observer_count", json.loads(out.getvalue()))
+                (folder / "7.block_commitment.json").unlink()
+                with patch("sys.stderr", new=io.StringIO()) as err, self.assertRaises(SystemExit):
+                    verifier.main()
+                self.assertIn("archived block_commitment unavailable at H7", err.getvalue())
+                (folder / "7.block_commitment.json").write_bytes(b"x" * (verifier.MAX_PROOF_BYTES + 1))
+                with patch("sys.stderr", new=io.StringIO()) as err, self.assertRaises(SystemExit):
+                    verifier.main()
+                self.assertIn("exceeds proof bounds", err.getvalue())
+            fetch.assert_not_called()
+
     def test_native_result_must_authenticate_the_exact_requested_incarnation(self):
         result = dict(verified=True, chain_id=99999, network_id="canary", genesis_hash="a" * 64,
                       state_root="b" * 64, finalized=dict(height=7, block_id="c" * 64,
