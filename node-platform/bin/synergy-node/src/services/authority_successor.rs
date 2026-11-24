@@ -705,7 +705,8 @@ fn check_treasury_processing_context(config: &NodeConfiguration, request_path: &
     let request: serde_json::Value = serde_json::from_slice(&raw).map_err(|_| "invalid treasury request")?;
     let p = &request["parameters"];
     let text = p["processing_context_json"].as_str().ok_or("treasury processing bytes missing")?;
-    if request["version"] != 1 || request["operation"] != "treasury_send_prepare"
+    let governance=request["operation"]=="ethereum_activation_fee_prepare";
+    if request["version"] != 1 || !(request["operation"] == "treasury_send_prepare"||governance)
         || text.is_empty() || text.len() > 1024 * 1024
         || p["processing_context_sha256"] != apqe_transport::sha256(text.as_bytes())
     {
@@ -727,13 +728,31 @@ fn check_treasury_processing_context(config: &NodeConfiguration, request_path: &
         return Err("treasury origin changed during native verification".into());
     }
     let selected = tip.autonomous_authority_at(context.authority.target_height).ok_or("treasury epoch disappeared")?;
-    Ok(serde_json::json!({"schema":"nodenetwork-verified-treasury-context-v1",
+    let mut result=serde_json::json!({"schema":"nodenetwork-verified-treasury-context-v1",
         "request_sha256":apqe_transport::sha256(&raw),"genesis_sha256":genesis_sha,
         "authority_sha256":apqe_transport::sha256(origin.binding_bytes()),"authority_root_sha256":apqe_transport::sha256(&root),
         "processing_context_sha256":apqe_transport::sha256(text.as_bytes()),
         "processing_context_root":context.root().map_err(|_| "invalid treasury context root")?,
         "epoch_context_root":selected.epoch.root().map_err(|e| e.to_string())?,
-        "epoch":selected.epoch.epoch,"chain_id":selected.epoch.chain_id,"network_id":selected.epoch.network_id}))
+        "epoch":selected.epoch.epoch,"chain_id":selected.epoch.chain_id,"network_id":selected.epoch.network_id});
+    if governance {
+        let execution:synergy_governance::GovernanceExecution=serde_json::from_value(p["governance_execution"].clone())
+            .map_err(|_|"invalid exact governance execution")?;
+        let spec=crate::services::ethereum_activation::authorize_request(&tip,&execution)?;
+        let layout=synergy_storage::NodeStorageLayout::new(config.storage.data_directory.clone()).map_err(|e|e.to_string())?;
+        let store=synergy_state::FinalizedStateStore::load(layout.state().join("execution")).map_err(|e|format!("governance finalized scope unavailable: {e:?}"))?;
+        let current=store.current().ok_or("governance finalized scope absent")?;
+        if current.finalized_height>=execution.proposal.expires_at_height
+            || !tip.epoch.contains_height(current.finalized_height)||spec.frozen_epoch!=tip.epoch.epoch {
+            return Err("governance signing window is no longer current".into())
+        }
+        let bytes=serde_json::to_vec(&execution).map_err(|_|"invalid governance execution")?;
+        let gas=75_000u64.checked_add(bytes.len() as u64).ok_or("governance gas overflow")?;
+        result["governance_execution_sha256"]=serde_json::json!(apqe_transport::sha256(&bytes));
+        result["governance_gas_limit"]=serde_json::json!(gas);
+        result["governance_maximum_fee_nwei"]=serde_json::json!((u128::from(gas)*40).to_string());
+    }
+    Ok(result)
 }
 
 fn canary_successor_range(

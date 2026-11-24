@@ -24,6 +24,7 @@ synergy-posy = { path = "../../crates/synergy-posy" }
 synergy-state = { path = "../../crates/synergy-state" }
 synergy-etdag = { path = "../../crates/synergy-etdag" }
 synergy-transaction = { path = "../../crates/synergy-transaction" }
+synergy-governance = { path = "../../crates/synergy-governance" }
 chrono = { version = "=0.4.44", default-features = false, features = ["std"] }
 
 synergy-address-engine = { version = "=2.0.0", path = "../../../../21-Aegis-Engine/synergy-address-engine" }

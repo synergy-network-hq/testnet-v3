@@ -10,3 +10,4 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 synergy-node-core = { path = "../synergy-node-core" }
 synergy-protocol-types = { path = "../synergy-protocol-types" }
+synergy-governance = { path = "../synergy-governance" }

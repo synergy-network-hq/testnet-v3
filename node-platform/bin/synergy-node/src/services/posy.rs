@@ -245,13 +245,15 @@ pub fn registration_with_authority_transition(
     delivery
         .activate(state_machine.active_slot())
         .map_err(|e| e.to_string())?;
-    let mut local_signer = match consensus.mode {
-        ConsensusMode::Observe => None,
-        ConsensusMode::ValidateAndVote => Some(DurableSigningAuthority::new(
-            sign_once,
-            load_local_signer(configuration, &authority)?,
-        )),
-        ConsensusMode::Disabled => None,
+    let (mut local_signer,governance_owner) = match consensus.mode {
+        ConsensusMode::ValidateAndVote => {
+            let signer=load_local_signer(configuration,&authority)?;
+            let governance=super::governance_admin::GovernanceApprovalOwner::new(
+                signer.validator_id.clone(),signer.key_id.clone(),Arc::clone(&signer.signer),
+                &layout.consensus().join("governance-approvals"))?;
+            (Some(DurableSigningAuthority::new(sign_once,signer)),Some(governance))
+        },
+        ConsensusMode::Observe | ConsensusMode::Disabled => (None,None),
     };
     if let (Some(local), Some(finalized)) = (local_signer.as_mut(), last_finalized.as_ref()) {
         local
@@ -338,6 +340,7 @@ pub fn registration_with_authority_transition(
                 atomic_transitions,
                 timeout_certificates,
                 local_signer,
+                governance_owner,
                 last_finalized,
                 candidates: BTreeMap::new(),
                 processing_candidate_rounds: BTreeMap::new(),
@@ -955,6 +958,7 @@ struct PosyService {
     atomic_transitions: AtomicConsensusTransitionStore,
     timeout_certificates: VerifiedTimeoutCertificateStore,
     local_signer: Option<DurableSigningAuthority<LocalConsensusSigner>>,
+    governance_owner: Option<super::governance_admin::GovernanceApprovalOwner>,
     last_finalized: Option<synergy_posy::FinalizedBlockRecord>,
     candidates: BTreeMap<u64, Arc<ExecutionCandidate>>,
     processing_candidate_rounds: BTreeMap<u64, u64>,
@@ -3795,6 +3799,24 @@ impl ManagedService for PosyService {
         if !self.started {
             return Err("PoSy service is not started".into());
         }
+        // At most one bounded native review/signing operation per poll. Admin
+        // workers never share the non-Sync APQE signer or block consensus on
+        // their own locks. A cancelled/expired queued request cannot sign later.
+        if let Some(owner)=self.governance_owner.as_mut() {owner.recover_pending(&self.authority,&self.ingress);}
+        if let Some(request)=self.ingress.take_governance_control()? {
+            let result=if Instant::now()>=request.deadline {Err("native governance request expired before execution".into())}
+            else if let Some(owner)=self.governance_owner.as_mut() {
+                use synergy_admin_api::operations::GovernanceOperation;
+                match request.operation {
+                    GovernanceOperation::PrepareEthereum{policy_json}=>owner.prepare(&self.authority,&self.ingress,&policy_json),
+                    GovernanceOperation::EthereumApprovalStatus{draft}=>draft.review_root().and_then(|root|owner.approval_status(&self.authority,&draft,&root)),
+                    GovernanceOperation::ReviewEthereum{draft}=>owner.review(&self.authority,&self.ingress,&draft),
+                    GovernanceOperation::ApproveEthereum{draft,review_root}=>owner.approve(&self.authority,&self.ingress,&draft,&review_root),
+                    GovernanceOperation::AssembleEthereum{draft,review_root,votes}=>owner.assemble(&self.authority,&self.ingress,&draft,&review_root,votes),
+                }
+            } else {Err("this native owner has no frozen validator signing authority".into())};
+            let _=request.response.send(result);
+        }
         #[cfg(feature = "qualification-timing")]
         {
             use super::qualification_timing::{self as timing, Classification, Kind, Phase, Role};
@@ -3925,6 +3947,7 @@ impl ManagedService for PosyService {
         self.deferred_qcs.clear();
         self.deferred_sync.clear();
         self.local_signer = None;
+        self.governance_owner = None;
         Ok(())
     }
 

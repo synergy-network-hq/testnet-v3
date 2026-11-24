@@ -111,6 +111,7 @@ struct Queues {
     peer_controls: VecDeque<PeerControlRequest>,
     sync_controls: VecDeque<SyncControlRequest>,
     etdag_controls: VecDeque<EtdagControlRequest>,
+    governance_controls: VecDeque<GovernanceControlRequest>,
     head_claims: VecDeque<(AuthenticatedPeer, HeadClaim)>,
     verified_heads: VecDeque<VerifiedHead>,
     sync_candidate_requests: VecDeque<(AuthenticatedPeer, FinalizedCandidateRequest, bool)>,
@@ -332,6 +333,11 @@ pub enum EtdagControlAction {
 pub struct EtdagControlRequest {
     pub action: EtdagControlAction,
     pub response: mpsc::SyncSender<Result<(), String>>,
+}
+pub(super) struct GovernanceControlRequest {
+    pub operation: synergy_admin_api::operations::GovernanceOperation,
+    pub deadline: std::time::Instant,
+    pub response: mpsc::SyncSender<Result<serde_json::Value,String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -887,6 +893,21 @@ impl AuthenticatedIngress {
             .lock()
             .map_err(|_| "runtime pipeline lock poisoned".to_string())
             .map(|mut queues| queues.etdag_controls.pop_front())
+    }
+    pub(super) fn request_governance_control(&self,
+        operation:synergy_admin_api::operations::GovernanceOperation,timeout:Duration)->Result<serde_json::Value,String> {
+        operation.validate().map_err(|e|e.message)?;
+        let (response,receiver)=mpsc::sync_channel(1);
+        let deadline=std::time::Instant::now().checked_add(timeout).ok_or("governance request deadline overflow")?;
+        {
+            let mut queues=self.0.lock().map_err(|_|"runtime pipeline lock poisoned")?;
+            if queues.governance_controls.len()>=4 {return Err("native governance owner queue is full".into())}
+            queues.governance_controls.push_back(GovernanceControlRequest{operation,deadline,response});
+        }
+        receiver.recv_timeout(timeout).map_err(|_|"native governance outcome unavailable; inspect original approval before another request")?
+    }
+    pub(super) fn take_governance_control(&self)->Result<Option<GovernanceControlRequest>,String> {
+        Ok(self.0.lock().map_err(|_|"runtime pipeline lock poisoned")?.governance_controls.pop_front())
     }
 
     pub fn submit_head_claim(

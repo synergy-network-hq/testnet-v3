@@ -17,7 +17,7 @@ pub use authorization::GovernanceAuthorization;
 pub use constitution::{Constitution, GovernanceRule};
 pub use emergency::EmergencyAuthorization;
 pub use ethereum_activation::{
-    EthereumActivationSpec, ETHEREUM_ACTIVATION_ACTION_V1,
+    EthereumActivationDraft, EthereumActivationSpec, ETHEREUM_ACTIVATION_ACTION_V1,
     ETHEREUM_ACTIVATION_HISTORY_WARMUP_BLOCKS, ETHEREUM_ACTIVATION_RECORD_KEY_V1,
     ETHEREUM_ACTIVATION_TARGET_V1,
 };

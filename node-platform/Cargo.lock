@@ -4228,6 +4228,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "synergy-governance",
  "synergy-node-core",
  "synergy-protocol-types",
 ]
@@ -4439,6 +4440,7 @@ dependencies = [
  "synergy-config",
  "synergy-etdag",
  "synergy-genesis",
+ "synergy-governance",
  "synergy-identity",
  "synergy-posy",
  "synergy-state",

@@ -2,6 +2,7 @@ mod ai;
 mod config;
 mod cross_chain;
 mod etdag;
+mod governance;
 mod identity;
 mod lifecycle;
 mod naming;
@@ -23,6 +24,7 @@ pub use ai::AiOperation;
 pub use config::ConfigOperation;
 pub use cross_chain::CrossChainOperation;
 pub use etdag::EtdagOperation;
+pub use governance::GovernanceOperation;
 pub use identity::IdentityOperation;
 pub use lifecycle::{LifecycleAction, LifecycleOperation};
 pub use naming::NamingOperation;
@@ -52,6 +54,7 @@ pub enum AdminOperation {
     Sentry(SentryOperation),
     Posy(PosyOperation),
     Etdag(EtdagOperation),
+    Governance(GovernanceOperation),
     Storage(StorageOperation),
     Telemetry(TelemetryOperation),
     Upgrade(UpgradeOperation),
@@ -71,6 +74,7 @@ impl AdminOperation {
             && !matches!(self, Self::Ownership(operation) if !operation.is_mutating())
             && !matches!(self, Self::Naming(operation) if !operation.is_mutating())
             && !matches!(self, Self::Rewards(operation) if !operation.is_mutating())
+            && !matches!(self, Self::Governance(operation) if !operation.is_mutating())
     }
 
     pub const fn required_permission(&self) -> crate::authorization::AdminPermission {
@@ -86,6 +90,7 @@ impl AdminOperation {
             Self::Vpn(_) => AdminPermission::Vpn,
             Self::Sentry(_) => AdminPermission::Peers,
             Self::Posy(_) => AdminPermission::Consensus,
+            Self::Governance(operation) => if operation.is_mutating() { AdminPermission::Consensus } else { AdminPermission::Read },
             Self::Etdag(_) => AdminPermission::Etdag,
             Self::Storage(_) => AdminPermission::Storage,
             Self::Telemetry(_) => AdminPermission::Read,
@@ -107,6 +112,7 @@ impl AdminOperation {
             Self::Vpn(_) => "vpn",
             Self::Sentry(_) => "sentry",
             Self::Posy(_) => "posy",
+            Self::Governance(_) => "governance",
             Self::Etdag(_) => "etdag",
             Self::Storage(_) => "storage",
             Self::Telemetry(_) => "telemetry",
@@ -131,6 +137,7 @@ impl AdminOperation {
             Self::Vpn(operation) => operation.validate(),
             Self::Sentry(operation) => operation.validate(),
             Self::Posy(operation) => operation.validate(),
+            Self::Governance(operation) => operation.validate(),
             Self::Etdag(operation) => operation.validate(),
             Self::Storage(operation) => operation.validate(),
             Self::Telemetry(operation) => operation.validate(),

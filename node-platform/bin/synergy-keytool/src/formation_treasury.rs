@@ -307,6 +307,8 @@ struct SendParameters {
     nonce: u64,
     observed_balance_nwei: String,
     timestamp_unix: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    governance_execution: Option<synergy_governance::GovernanceExecution>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -342,7 +344,8 @@ fn send_request(path: &Path, pin: &str) -> Result<(SendRequest, SecretBytes), St
     let request: SendRequest = decode(&raw)?;
     if digest(raw.as_bytes()) != pin
         || request.version != 1
-        || request.operation != "treasury_send_prepare"
+        || !matches!((request.operation.as_str(),request.parameters.governance_execution.is_some()),
+            ("treasury_send_prepare",false)|("ethereum_activation_fee_prepare",true))
     {
         return Err("Exact approved treasury send request required".into());
     }
@@ -459,12 +462,34 @@ fn authenticated_send_context(
     Ok((context, registry))
 }
 
+/// Construct only the supported exact native action. Authorization of every
+/// frozen vote is independently performed by the bundled native owner before
+/// this function may reserve a nonce or open account spending custody.
+fn send_action(p:&SendParameters,sender:&str)->Result<(synergy_transaction::TransactionClass,u64,Vec<u8>),String> {
+    let Some(execution)=p.governance_execution.as_ref() else {
+        if decimal(&p.amount_nwei)?==0 {return Err("ordinary treasury transfer must be positive".into())}
+        return Ok((synergy_transaction::TransactionClass::User,21_000,Vec::new()))
+    };
+    if p.receiver!=sender||decimal(&p.amount_nwei)?!=0
+        ||execution.mutation.action_kind!=synergy_governance::ETHEREUM_ACTIVATION_ACTION_V1
+        ||execution.mutation.target!=synergy_governance::ETHEREUM_ACTIVATION_TARGET_V1 {
+        return Err("treasury governance supports only an exact zero-value initial EVM amendment".into())
+    }
+    let operation=serde_json::to_vec(execution).map_err(|_|"invalid governance execution")?;
+    if operation.len()>256*1024 {return Err("governance execution exceeds signing bound".into())}
+    let gas=75_000u64.checked_add(operation.len() as u64).ok_or("governance fee overflow")?;
+    let payload=synergy_transaction::TransactionAction::Governance {authorization_id:execution.authorization_root.clone(),operation}
+        .encode().map_err(|e|e.to_string())?;
+    Ok((synergy_transaction::TransactionClass::System,gas,payload))
+}
+
 fn checked_lineage_descriptor(
     descriptor: &Value, request_sha: &str, formation: &FormationContext,
     p: &SendParameters, exported: &Value,
 ) -> Result<(synergy_etdag::ProcessingContext, synergy_etdag::crypto::IngressKemKeyRegistry), String> {
-    let fields = ["schema","request_sha256","genesis_sha256","authority_sha256","authority_root_sha256",
+    let mut fields = vec!["schema","request_sha256","genesis_sha256","authority_sha256","authority_root_sha256",
         "processing_context_sha256","processing_context_root","epoch_context_root","epoch","chain_id","network_id"];
+    if p.governance_execution.is_some(){fields.extend(["governance_execution_sha256","governance_gas_limit","governance_maximum_fee_nwei"]);}
     let response: Value = serde_json::from_str(&p.processing_context_json).map_err(|_| "Invalid processing response")?;
     let context: synergy_etdag::ProcessingContext = serde_json::from_value(response["context"].clone()).map_err(|_| "Processing context missing")?;
     let registry: synergy_etdag::crypto::IngressKemKeyRegistry = serde_json::from_value(response["ingress_kem_registry"].clone()).map_err(|_| "Processing registry missing")?;
@@ -482,7 +507,7 @@ fn checked_lineage_descriptor(
         || digest(p.processing_context_json.as_bytes()) != p.processing_context_sha256
         || descriptor["processing_context_root"] != json!(context.root().map_err(|_| "Invalid processing root")?)
         || !descriptor["epoch_context_root"].as_str().is_some_and(|s|s.len()==64&&s.bytes().all(|b|b.is_ascii_hexdigit()&&!b.is_ascii_uppercase()))
-        || descriptor["epoch"] != context.authority.epoch || context.authority.epoch <= 1
+        || descriptor["epoch"] != context.authority.epoch || (context.authority.epoch <= 1&&p.governance_execution.is_none())
         || descriptor["chain_id"] != context.authority.chain_id
         || context.authority.chain_id != signed.unsigned.network.chain_id
         || descriptor["network_id"] != formation.network_id
@@ -490,6 +515,14 @@ fn checked_lineage_descriptor(
         || registry.root().map_err(|_| "Invalid processing registry root")? != context.authority.ingress_kem_registry_root
     {
         return Err("Native lineage descriptor differs from the exact treasury intent or signed formation".into());
+    }
+    if let Some(execution)=p.governance_execution.as_ref() {
+        let bytes=serde_json::to_vec(execution).map_err(|_|"invalid governance bytes")?;
+        let gas=75_000u64.checked_add(bytes.len() as u64).ok_or("governance gas overflow")?;
+        if descriptor["governance_execution_sha256"]!=digest(&bytes)
+            ||descriptor["governance_gas_limit"]!=gas||descriptor["governance_maximum_fee_nwei"]!=(u128::from(gas)*40).to_string() {
+            return Err("native owner did not authorize this exact governance execution".into())
+        }
     }
     Ok((context, registry))
 }
@@ -584,15 +617,16 @@ pub fn prepare_send(
         engine.clone(),
     )?;
     let response: Value = serde_json::from_str(&p.processing_context_json).map_err(|_| "Invalid processing response")?;
-    let (context, registry) = if response["context"]["authority"]["epoch"].as_u64().is_some_and(|epoch|epoch>1) {
+    let (context, registry) = if p.governance_execution.is_some()||response["context"]["authority"]["epoch"].as_u64().is_some_and(|epoch|epoch>1) {
         authenticated_lineage_context(formation_directory, request_path, request_pin, &formation, p, &exported)?
     } else { authenticated_send_context(&formation, p, &exported)? };
     let public: Public = decode(&read(&treasury.join("treasury-public.json"), LIMIT, true)?)?;
     let amount = decimal(&p.amount_nwei)?;
+    let (class,gas_limit,payload)=send_action(p,&public.address)?;
     let total = amount
-        .checked_add(21_000 * 40)
+        .checked_add(u128::from(gas_limit) * 40)
         .ok_or("Treasury transfer cost overflow")?;
-    if amount == 0 || decimal(&p.observed_balance_nwei)? < total || p.nonce == u64::MAX {
+    if decimal(&p.observed_balance_nwei)? < total || p.nonce == u64::MAX {
         return Err(
             "Positive affordable treasury transfer and advanceable observed nonce required".into(),
         );
@@ -603,17 +637,17 @@ pub fn prepare_send(
             context.authority.network_id.clone(),
         )
         .map_err(|e| e.to_string())?,
-        class: synergy_transaction::TransactionClass::User,
+        class,
         sender: public.address.clone(),
         receiver: p.receiver.clone(),
         amount_nwei: amount,
         nonce: p.nonce,
         fee_limit: synergy_transaction::FeeLimit {
-            gas_limit: 21_000,
+            gas_limit,
             max_fee_per_gas_nwei: 40,
         },
         timestamp_unix: p.timestamp_unix,
-        payload: Vec::new(),
+        payload,
     };
     let transcript = unsigned.signing_bytes().map_err(|e| e.to_string())?;
     let transaction_id = unsigned.id().map_err(|e| e.to_string())?.0;
@@ -687,7 +721,7 @@ pub fn prepare_send(
         }
     };
     let plaintext = SecretBytes::from_bytes(
-        serde_json::to_vec(&signed).map_err(|_| "Cannot encode treasury transfer")?,
+        synergy_transaction::encode_processing_transaction(&signed).map_err(|_| "Cannot encode native treasury action")?,
     );
     let padded = SecretBytes::from_bytes(
         synergy_etdag::crypto::pad_plaintext(plaintext.as_bytes())
@@ -764,7 +798,7 @@ pub fn prepare_send(
         context_root: root,
         sender_wallet: public.address,
         sender_nonce: p.nonce,
-        gas_class_units: 21_000,
+        gas_class_units: gas_limit,
         fee_class: 1,
         signature_algorithm: "ML-DSA-87".into(),
         signer_public_key: spending,
@@ -828,7 +862,8 @@ pub fn send_status(
 ) -> Result<Value, String> {
     let path = send_path(treasury, nonce)?;
     private_dir(&path)?;
-    let record: SendRecord = decode(&read(&path.join("prepared.json"), LIMIT, true)?)?;
+    let record_raw=read(&path.join("prepared.json"),1024*1024,true)?;
+    let record: SendRecord = decode(&record_raw)?;
     let (_, raw) = send_request(&path.join("request.json"), &record.request_sha256)?;
     let request: SendRequest = decode(&raw)?;
     let admission_raw = read(&path.join("admission.json"), 1024 * 1024, true)?;
@@ -837,6 +872,8 @@ pub fn send_status(
     let public: Public = decode(&public_raw)?;
     let custody: Custody = decode(&read(&treasury.join("treasury.enc.json"), LIMIT, true)?)?;
     let p = &request.parameters;
+    if p.governance_execution.is_none()&&record_raw.as_bytes().len()>LIMIT as usize {return Err("ordinary treasury record exceeds original bound".into())}
+    let (class,gas_limit,payload)=send_action(p,&public.address)?;
     let principal = public
         .authorization
         .binding
@@ -860,9 +897,11 @@ pub fn send_status(
         || record.unsigned.receiver != p.receiver
         || record.unsigned.amount_nwei != decimal(&p.amount_nwei)?
         || record.unsigned.timestamp_unix != p.timestamp_unix
-        || record.unsigned.fee_limit.gas_limit != 21_000
+        || record.unsigned.class!=class
+        || record.unsigned.fee_limit.gas_limit != gas_limit
         || record.unsigned.fee_limit.max_fee_per_gas_nwei != 40
-        || !record.unsigned.payload.is_empty()
+        || record.unsigned.payload!=payload
+        || admission.request.gas_class_units!=gas_limit
         || !provider
             .verify(
                 Algorithm::MlDsa87,
@@ -913,9 +952,14 @@ pub fn send_status(
             return Err("Treasury dispatch fence differs".into());
         }
     }
-    Ok(
-        json!({"schema":"nodenetwork-formation-treasury-send-v1","request_sha256":record.request_sha256,"formation_sha256":record.formation_sha256,"genesis_sha256":record.genesis_sha256,"transaction_id":record.transaction_id,"receipt_id":record.receipt_id,"admission_sha256":record.admission_sha256,"sender":record.unsigned.sender,"receiver":record.unsigned.receiver,"amount_nwei":record.unsigned.amount_nwei.to_string(),"nonce":nonce,"fee_nwei":"840000","state":if taken{"dispatch_unknown"}else{"prepared"},"automatic_retry":false}),
-    )
+    let mut result=json!({"schema":"nodenetwork-formation-treasury-send-v1","request_sha256":record.request_sha256,"formation_sha256":record.formation_sha256,"genesis_sha256":record.genesis_sha256,"transaction_id":record.transaction_id,"receipt_id":record.receipt_id,"admission_sha256":record.admission_sha256,"sender":record.unsigned.sender,"receiver":record.unsigned.receiver,"amount_nwei":record.unsigned.amount_nwei.to_string(),"nonce":nonce,"fee_nwei":(u128::from(gas_limit)*40).to_string(),"state":if taken{"dispatch_unknown"}else{"prepared"},"automatic_retry":false});
+    if let Some(execution)=p.governance_execution.as_ref() {
+        result["schema"]=json!("nodenetwork-ethereum-activation-fee-v1");
+        result["governance_execution_sha256"]=json!(digest(&serde_json::to_vec(execution).map_err(|_|"invalid governance bytes")?));
+        result["proposal_root"]=json!(execution.proposal.proposal_root);
+        result["gas_limit"]=json!(gas_limit);
+    }
+    Ok(result)
 }
 /// One-use native handoff. The fence is durable BEFORE ciphertext is returned.
 /// Lost stdout is uncertain; status never re-exports and this call never retries.

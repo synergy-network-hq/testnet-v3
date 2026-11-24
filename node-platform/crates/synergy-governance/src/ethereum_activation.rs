@@ -43,6 +43,97 @@ impl EthereumActivationSpec {
     }
 }
 
+/// Public, unsigned review input. The renderer cannot supply a signing
+/// transcript: native validators reconstruct it from this exact draft.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EthereumActivationDraft {
+    pub spec: EthereumActivationSpec,
+    pub proposal: crate::GovernanceProposal,
+    pub constitution: crate::Constitution,
+}
+impl EthereumActivationDraft {
+    pub fn validate(&self) -> Result<(), String> {
+        self.proposal.validate(&self.constitution)?;
+        let mutation = self.spec.mutation()?;
+        if self.proposal.state != crate::ProposalState::Authorized
+            || self.proposal.actions.len() != 1
+            || self.proposal.actions[0].kind != mutation.action_kind
+            || self.proposal.actions[0].target != mutation.target
+            || self.proposal.actions[0].payload_root != mutation.payload_root()?
+            || self.spec.schema_version != 1
+            || self.spec.install_height < self.proposal.created_at_height
+            || self.spec.install_height > self.proposal.expires_at_height
+            || self.spec.activation_height
+                < self
+                    .proposal
+                    .expires_at_height
+                    .checked_add(ETHEREUM_ACTIVATION_HISTORY_WARMUP_BLOCKS)
+                    .ok_or("activation height overflow")?
+            || self.spec.policy_bytes.is_empty()
+            || self.spec.policy_bytes.len() > 16384
+        {
+            return Err("invalid exact Ethereum activation draft".into());
+        }
+        let rule = self.constitution.rule(ETHEREUM_ACTIVATION_ACTION_V1)?;
+        if self.spec.install_height
+            < self
+                .proposal
+                .created_at_height
+                .checked_add(rule.minimum_delay_blocks)
+                .ok_or("activation delay overflow")?
+        {
+            return Err("activation draft does not satisfy its signed delay".into());
+        }
+        Ok(())
+    }
+    pub fn review_root(&self) -> Result<String, String> {
+        self.validate()?;
+        crate::canonical_root(b"SYNERGY_ETHEREUM_ACTIVATION_REVIEW_V1", self)
+    }
+    /// Existing authorization encoding, with native verification of every vote.
+    /// The caller must additionally enforce the actual frozen dual quorum.
+    pub fn assemble(
+        &self,
+        votes: Vec<crate::GovernanceVote>,
+        verifier: &impl crate::VoteVerifier,
+    ) -> Result<crate::GovernanceExecution, String> {
+        self.validate()?;
+        let approving: std::collections::BTreeSet<_> =
+            votes.iter().map(|vote| vote.authority_id.clone()).collect();
+        let root = crate::canonical_root(
+            b"SYNERGY_GOVERNANCE_AUTHORIZATION_V1",
+            &(
+                &self.proposal.proposal_root,
+                &self.constitution.constitution_root,
+                &approving,
+            ),
+        )?;
+        let authorization = crate::GovernanceAuthorization::assemble(
+            &self.proposal,
+            &self.constitution,
+            &votes,
+            verifier,
+            root.clone(),
+        )?;
+        let activation = crate::GovernedActivation::new(
+            &self.proposal,
+            &authorization,
+            crate::ActivationPoint::FinalizedHeight {
+                height: self.spec.install_height,
+            },
+        )?;
+        Ok(crate::GovernanceExecution {
+            proposal: self.proposal.clone(),
+            constitution: self.constitution.clone(),
+            votes,
+            authorization_root: root,
+            activation,
+            mutation: self.spec.mutation()?,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

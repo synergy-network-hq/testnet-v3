@@ -207,6 +207,66 @@ fn real_apqe_governance_evm_scope_native_settlement_history_and_restart() {
         policy_bytes,
     };
     let execution = proposal(&spec, &authority, &prepared.ids, &signers, 4);
+    // Native admin signing-owner component test. Injecting its trusted finalized
+    // boundary below is a caller-context fixture, not claimed PoSy finality.
+    // Keys come from the actual sealed native fixture custody loaded above.
+    let draft=EthereumActivationDraft{spec:spec.clone(),proposal:execution.proposal.clone(),constitution:execution.constitution.clone()};
+    let ingress=crate::services::ingress::AuthenticatedIngress::with_world_budget(Arc::clone(&budget));
+    ingress.submit_finality(synergy_posy::FinalizedBlockRecord{height:1,block_id:"31".repeat(32),
+        finality_certificate_id:"32".repeat(32),protected_execution_root:"33".repeat(32)},vec![1]).unwrap();
+    ingress.publish_processing_finalized_world(1,Arc::new(synergy_state::world_resources::BudgetedWorld::try_clone_world(&initial,&budget).unwrap())).unwrap();
+    let review_root=draft.review_root().unwrap();
+    let mut actual_votes=Vec::new();
+    for index in 0..4 {
+        let root=prepared.root.join(format!("native-governance-{index}"));
+        let create=||crate::services::governance_admin::GovernanceApprovalOwner::new(prepared.ids[index].clone(),
+            KeyId::new(format!("consensus-{index}")).unwrap(),Arc::clone(&signers[index]),&root).unwrap();
+        let mut owner=create();
+        if index==0 {
+            let policy=include_str!(concat!(env!("CARGO_MANIFEST_DIR"),"/../../../networks/synergy-posy-canary-20261117/ethereum-compatibility-policy.candidate.json"));
+            let prepared=owner.prepare(&authority,&ingress,policy).unwrap();
+            let typed:EthereumActivationDraft=serde_json::from_value(prepared["draft"].clone()).unwrap();
+            let selected:synergy_aivm::ethereum_execution::EvmCompatibilityPolicy=serde_json::from_slice(&typed.spec.policy_bytes).unwrap();
+            assert_eq!(lower_hex(&selected.fee_collector),"72f57b74c0b2d556589ceb393103bea0f631933b");
+            assert_eq!(typed.spec.genesis_hash,spec.genesis_hash);
+            assert_eq!(typed.spec.frozen_epoch,authority.epoch.epoch);
+            assert_eq!(typed.spec.activation_height,typed.proposal.expires_at_height+256);
+        }
+        let review=owner.review(&authority,&ingress,&draft).unwrap();
+        assert_eq!(review["review_root"],review_root);
+        let approval=owner.approve(&authority,&ingress,&draft,&review_root).unwrap();
+        assert!(owner.approve(&authority,&ingress,&draft,&"ff".repeat(32)).is_err());
+        let mut changed=draft.clone();changed.proposal.proposal_id.push_str("-conflicting");
+        changed.proposal.proposal_root=changed.proposal.canonical_root().unwrap();
+        assert!(owner.approve(&authority,&ingress,&changed,&changed.review_root().unwrap()).is_err());
+        drop(owner);
+        let mut reopened=create();
+        assert_eq!(reopened.approve(&authority,&ingress,&draft,&review_root).unwrap(),approval);
+        assert_eq!(reopened.approval_status(&authority,&draft,&review_root).unwrap(),approval);
+        if index==0 {
+            // Crash between exact durable reservation and signature publication:
+            // the production owner resumes this same scope autonomously.
+            let path=root.join("ethereum-initial.json");
+            let mut reserved:serde_json::Value=serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            reserved["vote"]=serde_json::Value::Null;
+            fs::write(&path,serde_json::to_vec(&reserved).unwrap()).unwrap();
+            drop(reopened);
+            reopened=create();
+            reopened.recover_pending(&authority,&ingress);
+            let recovered=reopened.approval_status(&authority,&draft,&review_root).unwrap();
+            let recovered:GovernanceVote=serde_json::from_value(recovered["vote"].clone()).unwrap();
+            authority.verify(&recovered).unwrap();
+            assert_eq!(recovered.proposal_root,draft.proposal.proposal_root);
+        }
+        actual_votes.push(serde_json::from_value::<GovernanceVote>(approval["vote"].clone()).unwrap());
+        if index==2 {assert!(reopened.assemble(&authority,&ingress,&draft,&review_root,actual_votes.clone()).is_err());}
+        if index==3 {
+            let assembled=reopened.assemble(&authority,&ingress,&draft,&review_root,actual_votes.clone()).unwrap();
+            let verified:GovernanceExecution=serde_json::from_value(assembled["execution"].clone()).unwrap();
+            activation::authorize_request(&authority,&verified).unwrap();
+            assert_eq!(verified.proposal,execution.proposal);
+        }
+    }
     // A caller-provided one-signature Constitution cannot weaken frozen PoSy.
     let weak = proposal(&spec, &authority, &prepared.ids, &signers, 1);
     assert!(weak

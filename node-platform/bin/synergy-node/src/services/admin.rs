@@ -332,6 +332,8 @@ impl AdminService for RuntimeAdminService {
             AdminOperation::Peers(operation) => self.handle_peers(operation),
             AdminOperation::Sync(operation) => self.handle_sync(operation),
             AdminOperation::Etdag(operation) => self.handle_etdag(operation),
+            AdminOperation::Governance(operation) => self.ingress.request_governance_control(operation,Duration::from_secs(4))
+                .map_err(AdminError::unavailable),
             _ => Err(AdminError::unavailable(
                 "Admin operation has no canonical runtime owner wired",
             )),

@@ -37,6 +37,8 @@ const TIMEOUT: Duration = Duration::from_secs(3);
 const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const WORKERS: usize = 4;
 const MAX_EPOCH_PROOFS_PER_REQUEST: usize = 4;
+#[path="apqe_rpc_batch.rs"]
+mod batch;
 const TELEMETRY: &[u8] =
     br#"{"jsonrpc":"2.0","method":"synergy_chainTelemetry","params":{},"id":1}"#;
 
@@ -595,6 +597,14 @@ impl Gateway {
     }
 
     fn call(&mut self, admission: &Admission, body: &[u8]) -> Result<Vec<u8>, String> {
+        if body.iter().find(|byte| !byte.is_ascii_whitespace())==Some(&b'[') {
+            return batch::forward_batch(body,admission.payload.chain_id,&admission.payload.network_id,
+                &admission.base.payload.genesis_hash,|request|self.call_single(admission,request));
+        }
+        self.call_single(admission,body)
+    }
+
+    fn call_single(&mut self, admission: &Admission, body: &[u8]) -> Result<Vec<u8>, String> {
         let reply = Self::call_raw(
             &self.worker,
             &self.local,
@@ -604,6 +614,10 @@ impl Gateway {
             body,
         )?;
         let request = validate_request(body)?;
+        let response:Reply<'_>=serde_json::from_slice(&reply).map_err(|_|"invalid correlated RPC reply")?;
+        if serde_json::from_str::<serde_json::Value>(response.id.get()).ok()!=serde_json::from_str::<serde_json::Value>(request.id.get()).ok() {
+            return Err("authenticated JSON-RPC reply has a different request id".into())
+        }
         if request.method == CHAIN_TELEMETRY && self.epoch_trust.is_some() {
             self.verify_telemetry(admission, &reply, request.id.get())?;
         }
@@ -711,7 +725,7 @@ impl Gateway {
                     })
             }
             "POST / HTTP/1.1" | "POST /rpc HTTP/1.1" => {
-                if validate_request(&request.body).is_err() {
+                if batch::validate_document(&request.body).is_err() {
                     return send_http(
                         stream,
                         400,

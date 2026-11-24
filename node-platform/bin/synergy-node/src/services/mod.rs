@@ -14,6 +14,7 @@ mod etdag_wallet_admission;
 mod etdag_qualification;
 pub mod execution;
 pub(super) mod ethereum_activation;
+pub(super) mod governance_admin;
 pub mod health;
 pub mod identity;
 pub mod ingress;

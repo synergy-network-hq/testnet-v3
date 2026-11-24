@@ -40,7 +40,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn verify_execution(
+fn verify_policy_template(
     authority: &VerifiedAuthority,
     execution: &GovernanceExecution,
     height: u64,
@@ -97,6 +97,15 @@ fn verify_execution(
         .protocol
         .insert(EVM_POLICY_KEY.into(), spec.policy_bytes.clone());
     EvmCompatibilityPolicy::load(&policy_world).map_err(|error| error.to_string())?;
+    Ok(spec)
+}
+
+fn verify_execution(
+    authority: &VerifiedAuthority,
+    execution: &GovernanceExecution,
+    height: u64,
+) -> Result<EthereumActivationSpec, String> {
+    let spec=verify_policy_template(authority,execution,height)?;
     if execution.votes.len() > authority.registry.quorum_validators().len() {
         return Err("EVM governance vote count exceeds frozen membership".into());
     }
@@ -245,6 +254,39 @@ pub(super) fn authorize_request(
         .authenticated_history_ref_at(height)
         .ok_or("EVM governance frozen authority unavailable")?;
     verify_execution(frozen, execution, height)
+}
+
+/// Native pre-signing review. This deliberately verifies no quorum and grants
+/// no installation authority; it validates the exact shared unsigned draft
+/// against the live owner's authenticated scope and unused canonical World.
+pub(super) fn review_draft(
+    authority:&VerifiedAuthority,
+    draft:&synergy_governance::EthereumActivationDraft,
+    world:&WorldState,
+)->Result<(),String> {
+    draft.validate()?;
+    if authority.ethereum_genesis().is_some()||world.protocol.contains_key(RECORD_KEY)
+        ||world.protocol.contains_key(EVM_POLICY_KEY)||world.protocol.contains_key(ACTIVE_KEY) {
+        return Err("initial EVM activation already exists".into())
+    }
+    let execution=GovernanceExecution {proposal:draft.proposal.clone(),constitution:draft.constitution.clone(),
+        votes:Vec::new(),authorization_root:String::new(),
+        activation:synergy_governance::GovernedActivation {proposal_root:draft.proposal.proposal_root.clone(),
+            authorization_root:String::new(),point:synergy_governance::ActivationPoint::FinalizedHeight{height:draft.spec.install_height}},
+        mutation:draft.spec.mutation()?};
+    verify_policy_template(authority,&execution,draft.spec.install_height)?;
+    let policy:synergy_aivm::ethereum_execution::EvmCompatibilityPolicy=serde_json::from_slice(&draft.spec.policy_bytes).map_err(|e|e.to_string())?;
+    let collector=synergy_aivm::ethereum_execution::evm_account_key(world,policy.fee_collector).map_err(|e|e.to_string())?;
+    let protected_key=format!("apqe-protected-account-candidate/v1/policy/{}",hex(&policy.fee_collector));
+    if world.protocol.contains_key(&protected_key)||world.accounts.get(&collector).is_some_and(|a|a.code_hash.is_some()) {
+        return Err("EVM fee recipient must be an unprotected conventional external account without contract code".into())
+    }
+    let frozen:std::collections::BTreeSet<_>=authority.registry.quorum_validators().iter().map(|v|v.validator_id.clone()).collect();
+    let rule=draft.constitution.rule(ACTION)?;
+    if draft.constitution.rules.len()!=1||rule.eligible_authorities!=frozen||rule.emergency_permitted {
+        return Err("activation review must name the exact frozen validator roster without emergency override".into())
+    }
+    Ok(())
 }
 pub(super) fn processing_transaction(
     authority: &VerifiedAuthority,

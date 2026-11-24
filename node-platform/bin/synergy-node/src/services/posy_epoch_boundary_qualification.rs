@@ -48,6 +48,7 @@ pub(in crate::services) fn qualify_terminal_epoch_timeout(
         )
         .unwrap();
         PosyService {
+            governance_owner:None,
             autonomous_boundary: None,
             preparation: None,
             mode: ConsensusMode::ValidateAndVote,
