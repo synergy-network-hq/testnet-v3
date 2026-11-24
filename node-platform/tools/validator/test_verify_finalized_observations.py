@@ -98,6 +98,7 @@ class FinalityObservationTests(unittest.TestCase):
         with (patch("sys.argv", args),
               patch.object(verifier, "fetch_proof", return_value=b"original") as fetch,
               patch.object(verifier.subprocess, "run") as run, redirect_stdout(io.StringIO()) as out):
+            run.return_value.returncode = 0
             run.return_value.stdout = json.dumps(native).encode()
             verifier.main()
             fetch.assert_called_once_with("https://example.test", 9704, "finality")
@@ -132,3 +133,33 @@ class FinalityObservationTests(unittest.TestCase):
             verifier.check_successor(previous, {**next_block, "parent_block_id": "f" * 64})
         with self.assertRaisesRegex(ValueError, "selected consensus position"):
             verifier.witness_position(json.dumps(proof), commitments, 99999, network, 9001)
+
+    def test_native_failure_distinguishes_missing_authority_and_hides_local_paths(self):
+        with patch.object(verifier.subprocess, "run") as run:
+            run.return_value.returncode = 1
+            run.return_value.stderr = (
+                b"synergy-node failed closed: proof lies outside independently authenticated authority history"
+            )
+            with self.assertRaisesRegex(ValueError, "H131998: proof lies outside"):
+                verifier.verify_native(["node"], 131998)
+            run.return_value.stderr = b"decode /home/operator/private-config.json"
+            with self.assertRaisesRegex(ValueError, r"H131998: exit 1$"):
+                verifier.verify_native(["node"], 131998)
+
+    def test_proof_size_bound_matches_native_protocol_before_pagination(self):
+        with self.assertRaisesRegex(ValueError, "invalid proof page scope"):
+            verifier.fetch_proof("https://observer", 7, "finality", lambda _url, _params: {
+                "version": 1, "height": 7, "kind": "finality", "encoding": "base64",
+                "offset": 0, "sha256": "a" * 64, "total_bytes": 1024 * 1024 + 1,
+            })
+
+    def test_world_root_binds_original_bytes_without_reserialization(self):
+        world = b'{"accounts":{"a":"9007199254740993"}}'
+        commitment = hashlib.sha3_256(
+            b"SYNERGY_WORLD_STATE_ROOT_V1" + len(world).to_bytes(8, "big") + world
+        ).hexdigest()
+        verifier.match_world_state(world, commitment)
+        with self.assertRaisesRegex(ValueError, "authenticated state root"):
+            verifier.match_world_state(world.replace(b"993", b"992"), commitment)
+        with self.assertRaisesRegex(ValueError, "authenticated state root"):
+            verifier.match_world_state(world + b" ", commitment)

@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 PAGE_BYTES = 65536
-MAX_PROOF_BYTES = 16 * 1024 * 1024
+MAX_PROOF_BYTES = 1024 * 1024
 MAX_PAGES = 2 * MAX_PROOF_BYTES // PAGE_BYTES
 MAX_HEIGHTS = 8
 USER_AGENT = "Synergy-PoSy-Finality-Observer/1.0"
@@ -146,6 +146,31 @@ def check_successor(previous, current):
     return delta
 
 
+def match_world_state(world_bytes, state_root):
+    domain = b"SYNERGY_WORLD_STATE_ROOT_V1"
+    digest = hashlib.sha3_256(domain + len(world_bytes).to_bytes(8, "big") + world_bytes).hexdigest()
+    if digest != state_root:
+        raise ValueError("World preimage does not match the authenticated state root")
+
+
+def verify_native(command, height):
+    outcome = subprocess.run(command, capture_output=True, timeout=90)
+    if outcome.returncode:
+        # Do not publish local trust-file paths from the verifier.
+        # The parser's generic path-bearing failures can be diagnosed offline.
+        stderr = outcome.stderr.decode("utf-8", errors="replace").strip()
+        detail = stderr.removeprefix("synergy-node failed closed: ")
+        public_diagnostics = (
+            "proof lies outside independently authenticated authority history",
+            "finality record or exact timeout closure mismatch",
+            "block preimage does not match verified finality",
+            "verified height has no authenticated consensus time authority",
+        )
+        reason = detail if detail in public_diagnostics else f"exit {outcome.returncode}"
+        raise ValueError(f"native finality verification rejected H{height}: {reason}")
+    return json.loads(outcome.stdout)
+
+
 def main():
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument("--observer", action="append", required=True)
@@ -157,12 +182,16 @@ def main():
     cli.add_argument("--height", type=int, required=True)
     cli.add_argument("--witness-only", action="store_true",
                      help="authenticate retained three-QC finality without the original block preimage")
+    cli.add_argument("--verify-world", action="store_true",
+                     help="check original public World bytes against each authenticated block state root")
     cli.add_argument("--through-height", type=int, help="verify up to eight consecutive heights")
     cli.add_argument("--require-epoch-transition", action="store_true")
     args = cli.parse_args()
     last = args.height if args.through_height is None else args.through_height
     if not args.height <= last < args.height + MAX_HEIGHTS:
         cli.error("select one to eight consecutive finalized heights")
+    if args.witness_only and args.verify_world:
+        cli.error("World verification requires an original block preimage")
     if args.require_epoch_transition and last == args.height:
         cli.error("an epoch transition requires at least two heights")
     endpoints = [urlsplit(value) for value in args.observer]
@@ -191,13 +220,12 @@ def main():
                         block_bytes = fetch_proof(endpoint, height, "block_commitment")
                         block.write_bytes(block_bytes)
                         command.append(str(block))
-                    outcome = subprocess.run(
-                        command,
-                        check=True, capture_output=True, timeout=90,
-                    )
-                    native = json.loads(outcome.stdout)
+                    native = verify_native(command, height)
                     observed = subject(native, args.chain, args.network, args.genesis, height,
                                        witness_only=args.witness_only)
+                    if args.verify_world:
+                        match_world_state(fetch_proof(endpoint, height, "world_state"),
+                                          observed["state_root"])
                     if range_mode:
                         if args.witness_only:
                             observed.update(witness_position(proof_bytes, observed, args.chain,
@@ -220,6 +248,8 @@ def main():
                   genesis_hash=args.genesis, observer_count=len(endpoints))
     if args.witness_only:
         result["block_preimage_verified"] = False
+    if args.verify_world:
+        result["world_preimage_verified"] = True
     if range_mode:
         result.update(start_height=args.height, through_height=last, epoch_transitions=transitions,
                       observations=observations)
