@@ -62,6 +62,8 @@ use synergy_address_engine::apqe::{
 use synergy_aegis::ApqeIdentityVerifier;
 use synergy_identity::authorization::{
     canonical_binding_commitment_if_present, IdentityAuthorizationCarrier,
+    PROTECTED_ENROLLMENT_SPONSOR_AUTHORIZATION_DOMAIN as SPONSOR_SIGNATURE_DOMAIN,
+    PROTECTED_ENROLLMENT_SPONSOR_PURPOSE as SPONSOR_PURPOSE,
 };
 use synergy_posy::FinalizedBlockRecord;
 use synergy_state::{
@@ -81,13 +83,11 @@ const MAX_ENROLLMENT_BYTES: usize = 24 * 1024;
 // Internal bounded state values, not RPC or consensus-action wire assignments.
 const MAX_STORED_POLICY_BYTES: usize = (MAX_ENROLLMENT_BYTES + 10 * 1024) * 4 + 4096;
 const MAX_STORED_COMMIT_BYTES: usize = 1024;
-const SPONSOR_SIGNATURE_DOMAIN: &str = "AEGIS/ENROLL-SPONSOR/v1";
 const SPONSOR_CONTEXT: &[u8] = b"AEGIS.ENROLL.SPONSOR.V1";
 
 #[path = "protected_public_world.rs"]
 mod public_world;
 pub(super) use public_world::{PublicWalletRecords, validate_public_wallet_record};
-const SPONSOR_PURPOSE: &str = "protected-enrollment-sponsorship";
 
 pub(super) struct SponsorProof<'a> {
     pub(super) intent: &'a [u8],

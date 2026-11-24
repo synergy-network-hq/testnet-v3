@@ -24,6 +24,7 @@ mod validator_custody;
 #[cfg(unix)]
 mod validator_formation;
 mod wallet;
+mod wallet_sponsor_identity;
 
 use std::path::Path;
 
@@ -40,6 +41,32 @@ fn run() -> Result<(), String> {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     let (arguments, engine) = selected_arguments(&arguments)?;
     match arguments {
+        [command, request, output] if command == "prepare-wallet-sponsor-identity" => {
+            wallet_sponsor_identity::prepare(
+                Path::new(request),
+                Path::new(output),
+                engine.ok_or("authenticated APQE provider required")?,
+            )?;
+        }
+        [command, request, root_signature, sponsor_signature, output]
+            if command == "attach-wallet-sponsor-identity" =>
+        {
+            wallet_sponsor_identity::attach(
+                Path::new(request),
+                Path::new(root_signature),
+                Path::new(sponsor_signature),
+                Path::new(output),
+                engine.ok_or("authenticated APQE provider required")?,
+            )?;
+        }
+        [command, ..]
+            if matches!(
+                command.as_str(),
+                "prepare-wallet-sponsor-identity" | "attach-wallet-sponsor-identity"
+            ) =>
+        {
+            return Err(wallet_sponsor_identity::USAGE.into());
+        }
         #[cfg(unix)]
         [command, context, pin, formation, transport] if command == "review-gateway-issuer" => {
             println!(
@@ -720,6 +747,8 @@ fn selected_arguments(
     if !matches!(
         command,
         "check-gateway-admission"
+            | "prepare-wallet-sponsor-identity"
+            | "attach-wallet-sponsor-identity"
             | "review-gateway-issuer"
             | "prepare-gateway-admission"
             | "sign-gateway-admission"
