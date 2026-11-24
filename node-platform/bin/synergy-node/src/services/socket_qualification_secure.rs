@@ -444,6 +444,7 @@ fn qualify_actual_apqe_five_process_canary(scenario: FiveProcessScenario) {
         }
         account_secret.fill(0);
         super::ethereum_qualification::qualify(&prepared.configurations,&mut cleanup.children,&binary,&prepared.root);
+        if governed_ethereum {super::ethereum_activation_qualification::qualify_final_world_pages(&prepared.configurations);}
         return;
     }
     let rpc_address = prepared.configurations[0].rpc.listen_address.unwrap();

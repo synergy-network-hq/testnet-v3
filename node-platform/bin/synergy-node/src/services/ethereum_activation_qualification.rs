@@ -355,6 +355,9 @@ fn real_apqe_governance_evm_scope_native_settlement_history_and_restart() {
         .unwrap()
         .unwrap();
     assert!(!activation::is_active(&selected, &world).unwrap());
+    assert_eq!(activation::authorization_update_height(&world).unwrap(),20);
+    crate::services::rpc::proofs::require_public_world(&world,None).unwrap();
+    crate::services::rpc::proofs::bounded_document(world.as_ref()).unwrap();
     let staged_root = activation::authorization_root(&world);
     assert_ne!(staged_root, activation::authorization_root(&initial));
     // Caller-context parent identities exercise the actual canonical history
@@ -376,6 +379,9 @@ fn real_apqe_governance_evm_scope_native_settlement_history_and_restart() {
         );
     }
     assert!(activation::is_active(&selected, &world).unwrap());
+    assert_eq!(activation::authorization_update_height(&world).unwrap(),286);
+    crate::services::rpc::proofs::require_public_world(&world,None).unwrap();
+    crate::services::rpc::proofs::bounded_document(world.as_ref()).unwrap();
     assert_ne!(staged_root, activation::authorization_root(&world));
     for (height, hash) in expected.range(30..) {
         assert_eq!(
@@ -426,6 +432,8 @@ fn real_apqe_governance_evm_scope_native_settlement_history_and_restart() {
     )
     .unwrap();
     assert!(deployed.receipt.success);
+    crate::services::rpc::proofs::require_public_world(&deployed.world,None).unwrap();
+    crate::services::rpc::proofs::bounded_document(deployed.world.as_ref()).unwrap();
     let expired = crate::services::execution::qualification_governance_transition(
         configuration,
         authority.clone(),
@@ -661,6 +669,9 @@ pub(super) fn qualify_five_process(
                         (10_000_000 - fee).to_string(),
                         "exact native governance fee"
                     );
+                    let proof=process_rpc(config.rpc.listen_address.unwrap(),"synergy_getFinalizedProofPageV1",
+                        serde_json::json!({"height":height,"kind":"world_state","offset":0,"limit":1})).unwrap();
+                    assert_eq!(proof["commitment"]["type"],"full_canonical_world_preimage");
                 }
                 settled = true;
             }
@@ -701,4 +712,17 @@ pub(super) fn qualify_five_process(
         );
     }
     eprintln!("Actual five-process same-Genesis frozen-quorum activation + original ACK restart PASS H{last}; Solidity/RPC acceptance follows");
+}
+
+pub(super) fn qualify_final_world_pages(configs:&[NodeConfiguration]) {
+    use super::secure_process_canary::process_rpc;
+    let height=configs.iter().map(|config|process_rpc(config.rpc.listen_address.unwrap(),
+        "synergy_chainTelemetry",serde_json::json!({})).unwrap()["finalized_height"].as_u64().unwrap()).min().unwrap();
+    for config in configs {
+        let proof=process_rpc(config.rpc.listen_address.unwrap(),"synergy_getFinalizedProofPageV1",
+            serde_json::json!({"height":height,"kind":"world_state","offset":0,"limit":1})).unwrap();
+        assert_eq!(proof["commitment"]["type"],"full_canonical_world_preimage");
+        assert!(proof["total_bytes"].as_u64().unwrap()<=1024*1024);
+        eprintln!("Governed+Solidity finalized World actual bounded proof H{height}, bytes={}",proof["total_bytes"]);
+    }
 }

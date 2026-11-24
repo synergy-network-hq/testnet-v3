@@ -375,3 +375,42 @@ pub(super) fn authorization_root(world: &WorldState) -> String {
     }
     synergy_block::hash_block_bytes(&bytes)
 }
+
+/// Index only for an already authenticated canonical World. This does not
+/// authenticate a policy or a quorum; resolve() owns that boundary. Both
+/// installation and maturation change the frozen admission authorization root.
+pub(super) fn authorization_update_height(world: &WorldState) -> Result<u64, String> {
+    let mut height = synergy_identity::registration::authorization_update_height(&world.protocol)?;
+    let mut installed = 0;
+    if let Some(bytes) = world.protocol.get(RECORD_KEY) {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Index {
+            schema_version: u32,
+            included_height: u64,
+            execution: serde::de::IgnoredAny,
+        }
+        if bytes.len() > MAX_RECORD {
+            return Err("EVM authorization index exceeds bound".into());
+        }
+        let index: Index = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+        let _ignored = index.execution;
+        if index.schema_version != 1 || index.included_height == 0 {
+            return Err("invalid EVM authorization installation index".into());
+        }
+        installed = index.included_height;
+        height = height.max(installed);
+    }
+    if let Some(bytes) = world.protocol.get(ACTIVE_KEY) {
+        if !world.protocol.contains_key(RECORD_KEY) || bytes.len() > 1024 {
+            return Err("EVM activation index lacks bounded governed authority".into());
+        }
+        let (version, _chain, _genesis, effective, _policy): (u32, u64, String, u64, String) =
+            serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+        if version != 1 || effective == 0 || effective < installed {
+            return Err("invalid EVM authorization effective-height index".into());
+        }
+        height = height.max(effective);
+    }
+    Ok(height)
+}

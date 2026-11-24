@@ -147,7 +147,7 @@ fn authorization_refresh_source(
     if root == current_root {
         return Ok(None);
     }
-    let updated = synergy_identity::registration::authorization_update_height(&world.protocol)?;
+    let updated = crate::services::ethereum_activation::authorization_update_height(world)?;
     if updated == 0 || updated > observed_height {
         return Err(
             "changed canonical authorization lacks its exact finalized update height".into(),
@@ -2142,6 +2142,25 @@ impl EtdagService {
 mod paced_retry_tests {
     use super::deliver_processing_retry_slice;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn governed_authorization_refresh_indexes_installation_maturation_and_later_identity() {
+        use super::{authorization_refresh_source as refresh,authorization_state_root};
+        use crate::services::ethereum_activation::{RECORD_KEY,ACTIVE_KEY};
+        let mut world=synergy_state::WorldState::default();
+        let genesis=authorization_state_root(&world);
+        // Index fixture only: no signature or admission authority is supplied
+        // by this metadata test. The real-provider test verifies the full record.
+        world.protocol.insert(RECORD_KEY.into(),br#"{"schema_version":1,"included_height":10,"execution":{}}"#.to_vec());
+        let staged=authorization_state_root(&world);
+        assert_eq!(refresh(&genesis,0,12,&world).unwrap(),Some((10,staged.clone())));
+        assert!(refresh(&genesis,0,9,&world).is_err());
+        world.protocol.insert(ACTIVE_KEY.into(),serde_json::to_vec(&(1u32,99999u64,"11".repeat(32),284u64,"22".repeat(32))).unwrap());
+        assert_eq!(refresh(&staged,10,285,&world).unwrap(),Some((284,authorization_state_root(&world))));
+        world.protocol.insert(synergy_identity::registration::AUTHORIZATION_UPDATED_HEIGHT_STATE_KEY.into(),serde_json::to_vec(&500u64).unwrap());
+        assert_eq!(refresh(&staged,284,501,&world).unwrap(),Some((500,authorization_state_root(&world))));
+        assert_eq!(refresh(&genesis,502,501,&world).unwrap(),None);
+    }
 
     #[test]
     fn successor_authorization_refresh_preserves_verified_source_and_rejects_rollback() {

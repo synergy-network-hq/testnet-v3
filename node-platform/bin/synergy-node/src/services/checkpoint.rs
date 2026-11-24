@@ -257,8 +257,7 @@ fn restore_authorization_source(
 }
 
 fn authorization_source_height(candidate: &BudgetedExecutionCandidate) -> Result<u64, String> {
-    let height =
-        synergy_identity::registration::authorization_update_height(&candidate.state.protocol)?;
+    let height = super::ethereum_activation::authorization_update_height(&candidate.state)?;
     if height > candidate.height {
         return Err("authorization source is above its finalized checkpoint".into());
     }
@@ -275,7 +274,8 @@ fn verify_authorization_source(
         || source.height != height
         || authorization_source_height(source)? != height
         || !source.state.protocol.contains_key(key)
-        || source.state.protocol.get(key) != tip.state.protocol.get(key)
+        || super::ethereum_activation::authorization_root(&source.state)
+            != super::ethereum_activation::authorization_root(&tip.state)
     {
         return Err("supplied candidate is not the current exact authorization source".into());
     }

@@ -6,6 +6,8 @@ use crate::services::protected_accounts::{PublicWalletRecords, validate_public_w
 
 #[path = "rpc_public_processing.rs"]
 mod public_processing;
+#[path = "rpc_public_ethereum.rs"]
+mod public_ethereum;
 
 const MAX_PAGE: usize = 64 * 1024;
 // A proof is a bounded transport of the existing commitment preimage, not a
@@ -659,7 +661,7 @@ impl CanonicalQueryStore {
 // a different preimage; disclosing them could expose private application data.
 // Only these typed, explicitly public consensus records may be transported.
 // New protocol consumers must qualify disclosure before extending this list.
-fn require_public_world(world: &synergy_state::WorldState, wallet: Option<&PublicWalletRecords>) -> Result<(), RpcError> {
+pub(in crate::services) fn require_public_world(world: &synergy_state::WorldState, wallet: Option<&PublicWalletRecords>) -> Result<(), RpcError> {
     use synergy_identity::authorization::IDENTITY_AUTHORIZATION_BINDINGS_STATE_KEY;
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -710,9 +712,10 @@ fn require_public_world(world: &synergy_state::WorldState, wallet: Option<&Publi
                 if names.encode().map_err(|_| invalid())? != *bytes { return Err(invalid()); }
             }
             _ => {
+                if public_ethereum::validate_record(world,key,bytes).map_err(|_|invalid())?
+                    || public_processing::validate_record(key,bytes).map_err(|_|invalid())? {continue;}
                 let Some(scope) = wallet else { return Err(invalid()); };
-                if !public_processing::validate_record(key, bytes).map_err(|_| invalid())?
-                    && !validate_public_wallet_record(scope, world, key, bytes).map_err(|_| invalid())? {
+                if !validate_public_wallet_record(scope, world, key, bytes).map_err(|_| invalid())? {
                     return Err(invalid());
                 }
             }
