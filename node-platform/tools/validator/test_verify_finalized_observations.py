@@ -163,3 +163,16 @@ class FinalityObservationTests(unittest.TestCase):
             verifier.match_world_state(world.replace(b"993", b"992"), commitment)
         with self.assertRaisesRegex(ValueError, "authenticated state root"):
             verifier.match_world_state(world + b" ", commitment)
+
+    def test_exact_receipt_selection_rejects_missing_duplicate_and_invalid_status(self):
+        txid = "a" * 64
+        receipt = dict(transaction_id=txid, status="applied", gas_used=21000,
+                       state_root_after="b" * 64, error_code=None)
+        def block(receipts):
+            return json.dumps([7, "c" * 64, "d" * 64, "e" * 64, [{}] * len(receipts), receipts])
+        self.assertEqual(verifier.select_receipt(block([receipt]), txid), receipt)
+        for receipts in ([], [receipt, receipt], [{**receipt, "transaction_id": "f" * 64}]):
+            with self.assertRaisesRegex(ValueError, "exactly once"):
+                verifier.select_receipt(block(receipts), txid)
+        with self.assertRaisesRegex(ValueError, "invalid canonical receipt"):
+            verifier.select_receipt(block([{**receipt, "status": "reverted"}]), txid)

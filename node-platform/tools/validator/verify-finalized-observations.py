@@ -153,6 +153,28 @@ def match_world_state(world_bytes, state_root):
         raise ValueError("World preimage does not match the authenticated state root")
 
 
+def select_receipt(block_bytes, transaction_id):
+    # The native verifier authenticated the exact block bytes before selection.
+    _, _, _, _, transactions, receipts = json.loads(block_bytes)
+    if not isinstance(transactions, list) or not isinstance(receipts, list) or len(transactions) != len(receipts):
+        raise ValueError("invalid transaction and receipt alignment in verified block")
+    matches = [receipt for receipt in receipts if receipt.get("transaction_id") == transaction_id]
+    if len(matches) != 1:
+        raise ValueError("requested receipt does not occur exactly once in verified block")
+    receipt = matches[0]
+    status = receipt.get("status")
+    gas = receipt.get("gas_used")
+    root = receipt.get("state_root_after")
+    error = receipt.get("error_code")
+    if (type(gas) is not int or not 0 <= gas < 2**64 or not isinstance(root, str)
+            or not HEX.fullmatch(root)
+            or not ((status == "applied" and error is None)
+                    or (status == "reverted" and isinstance(error, str) and error))):
+        raise ValueError("invalid canonical receipt in verified block")
+    return dict(transaction_id=transaction_id, status=status, gas_used=gas,
+                state_root_after=root, error_code=error)
+
+
 def verify_native(command, height):
     outcome = subprocess.run(command, capture_output=True, timeout=90)
     if outcome.returncode:
@@ -184,6 +206,7 @@ def main():
                      help="authenticate retained three-QC finality without the original block preimage")
     cli.add_argument("--verify-world", action="store_true",
                      help="check original public World bytes against each authenticated block state root")
+    cli.add_argument("--receipt-id", help="select a transaction receipt from the authenticated block bytes")
     cli.add_argument("--through-height", type=int, help="verify up to eight consecutive heights")
     cli.add_argument("--require-epoch-transition", action="store_true")
     args = cli.parse_args()
@@ -192,6 +215,9 @@ def main():
         cli.error("select one to eight consecutive finalized heights")
     if args.witness_only and args.verify_world:
         cli.error("World verification requires an original block preimage")
+    if args.receipt_id is not None and (
+            not HEX.fullmatch(args.receipt_id) or args.witness_only or last != args.height):
+        cli.error("receipt verification requires one finalized height and an exact transaction ID")
     if args.require_epoch_transition and last == args.height:
         cli.error("an epoch transition requires at least two heights")
     endpoints = [urlsplit(value) for value in args.observer]
@@ -223,6 +249,8 @@ def main():
                     native = verify_native(command, height)
                     observed = subject(native, args.chain, args.network, args.genesis, height,
                                        witness_only=args.witness_only)
+                    if args.receipt_id is not None:
+                        observed["receipt"] = select_receipt(block_bytes, args.receipt_id)
                     if args.verify_world:
                         match_world_state(fetch_proof(endpoint, height, "world_state"),
                                           observed["state_root"])
