@@ -181,6 +181,35 @@ class RosterSelection(unittest.TestCase):
         del verified[6]
         self.assertEqual(mesh()['status'], 'observing')
 
+    def test_selected_registry_distinguishes_expiry_mismatch_and_unavailable_observations(self):
+        expected = {2, 3, 4, 6}
+        verified = {number: self.states[number] for number in expected}
+        timestamp = self.states[2]['observed_at']
+        now = 1794837600
+        registry = {'generation': 7, 'sha256': 'a' * 64,
+                    'valid_from_unix': now - 100, 'expires_at_unix': now + 8 * 86400}
+
+        def install(**fields):
+            for state in verified.values():
+                state['registry_validity'] = {**registry, **fields}
+
+        def status():
+            return collector.selected_registry_check(verified, expected, timestamp)['status']
+
+        self.assertEqual(status(), 'observing')
+        install()
+        self.assertEqual(status(), 'passed')
+        verified[3]['registry_validity']['sha256'] = 'b' * 64
+        self.assertEqual(status(), 'blocked')
+        install(expires_at_unix=now + 6 * 86400)
+        self.assertEqual(status(), 'warning')
+        install(expires_at_unix=now)
+        self.assertEqual(status(), 'blocked')
+        install(valid_from_unix=now + 1)
+        self.assertEqual(status(), 'blocked')
+        install(sha256=7)
+        self.assertEqual(status(), 'observing')
+
     def test_duplicate_identity_does_not_count_twice(self):
         self.states[5] = {}
         self.states[4]['address'] = self.states[3]['address']

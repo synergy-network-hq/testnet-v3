@@ -131,13 +131,15 @@ try:
  transport=configuration['apqe_transport']
  registry_bytes=read_bytes(Path(transport['registry_path']),256*1024)
  trust_bytes=read_bytes(Path(transport['registry_trust_key_path']),4096)
- if (hashlib.sha256(registry_bytes).hexdigest()!=policy['public_file_sha256']['transport-registry.json']
+ registry_sha256=hashlib.sha256(registry_bytes).hexdigest()
+ if (registry_sha256!=policy['public_file_sha256']['transport-registry.json']
      or hashlib.sha256(trust_bytes).hexdigest()!=transport['registry_trust_key_sha256']):
   raise ValueError('active transport pins differ')
  registry=json.loads(registry_bytes)['payload']
  if registry['network_id']!=configuration['network_id'] or registry['genesis_hash']!=genesis['genesis_hash'] or registry['chain_id']!=configuration['chain_id']:
   raise ValueError('registry identifies another chain')
  result['registry_validity']={key:registry[key] for key in ['generation','valid_from_unix','expires_at_unix']}
+ result['registry_validity']['sha256']=registry_sha256
 except Exception:pass
 try:
  body={'jsonrpc':'2.0','id':1,'method':'synergy_getBlock','params':{'height':height,'hash':None}}
@@ -514,6 +516,40 @@ def selected_mesh_check(verified, expected, timestamp):
     return check
 
 
+def selected_registry_check(verified, expected, timestamp):
+    check = {'name': 'Selected validator transport registry', 'status': 'observing',
+             'started_at': None, 'updated_at': timestamp,
+             'detail': 'Active pinned registry observations are incomplete.'}
+    if not expected.issubset(verified):
+        return check
+    registries = [verified[number].get('registry_validity') for number in sorted(expected)]
+    for registry in registries:
+        if not isinstance(registry, dict):
+            return check
+        generation, start, end = (registry.get(key) for key in
+                                  ('generation', 'valid_from_unix', 'expires_at_unix'))
+        if (not all(type(value) is int for value in (generation, start, end))
+                or not 0 < generation < 2**64 or not 0 <= start < end < 253402300800
+                or not isinstance(registry.get('sha256'), str)
+                or not re.fullmatch(r'[a-f0-9]{64}', registry['sha256'])):
+            return check
+    active = registries[0]
+    if any(registry != active for registry in registries[1:]):
+        check.update(status='blocked', detail='Selected validators report different pinned registry artifacts.')
+        return check
+    now = datetime.datetime.fromisoformat(timestamp).timestamp()
+    end = datetime.datetime.fromtimestamp(active['expires_at_unix'], datetime.timezone.utc)
+    remaining = active['expires_at_unix'] - now
+    if not active['valid_from_unix'] <= now < active['expires_at_unix']:
+        check.update(status='blocked', detail=f"Pinned generation {active['generation']} is outside its validity window.")
+    else:
+        check.update(status='warning' if remaining <= 7 * 86400 else 'passed',
+                     detail=f"{len(expected)} selected validators report the same pinned generation "
+                            f"{active['generation']}, expiring at {end.isoformat()} "
+                            f"({remaining / 86400:.1f} days remaining).")
+    return check
+
+
 def live_canary_checks(network_id, genesis_hash, nodes, timestamp, states=None):
     if (network_id, genesis_hash) != ('posy-apqe-canary-process-49028',
             '2a770743814a98e61856efb85ebae1461dbac38a7b75ca65fb9f7ffe2e7011dc'):
@@ -641,6 +677,8 @@ def run(report=None, once=False, test_plan=None, *, selected=None, observe_only=
         observed_hosts = {number for number in states if f'synergy-val{number}' in MASTER_SOCKETS}
         if selected is not None and len(observed_hosts) >= 2:
             tests.append(selected_mesh_check(verified, observed_hosts, timestamp))
+            if not any(item['name']=='Live transport registry expiry alert' for item in tests):
+                tests.append(selected_registry_check(verified, observed_hosts, timestamp))
         if test_plan:
             plan=json.loads(test_plan.read_bytes())
             if (plan.get('network_id')!=network_id or plan.get('genesis_hash') not in {None, genesis_hash}
