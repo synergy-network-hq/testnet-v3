@@ -124,7 +124,27 @@ impl TransactionExecutor for NativeTransferDispatcher {
 }
 
 impl NativeTransferDispatcher {
-    fn execute_with_credit_policy(
+    /// A selected, authenticated ordinary transfer to an unavailable
+    /// protected recipient settles its normal fee without moving the amount.
+    pub(crate) fn protected_credit_reversion(
+        transaction: &SignedTransaction,
+    ) -> TransactionDispatch {
+        TransactionDispatch {
+            state_diff: StateDiff {
+                changes: vec![AccountChange {
+                    account: transaction.unsigned.sender.clone(),
+                    debit_nwei: 0,
+                    credit_nwei: 0,
+                    expected_nonce: Some(transaction.unsigned.nonce),
+                    code_hash: None,
+                }],
+                protocol_changes: Vec::new(),
+            },
+            gas_used: NATIVE_TRANSFER_GAS,
+        }
+    }
+
+    pub(crate) fn execute_with_credit_policy(
         transaction: &SignedTransaction,
         action: &TransactionAction,
         context: TransactionExecutionContext<'_>,

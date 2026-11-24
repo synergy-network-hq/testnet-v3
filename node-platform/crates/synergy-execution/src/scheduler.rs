@@ -3,12 +3,13 @@ use synergy_state::world_resources::{resource_state_error, BudgetedWorld};
 use synergy_state::{state_root, StateOverlay, WorldState};
 use synergy_transaction::{
     verify_aegis_signature, verify_aegis_signature_with_admission, AegisTransactionVerifier,
-    NetworkBinding, ReceiptStatus, TransactionAdmissionContext, TransactionClass, TransactionError,
-    TransactionReceipt,
+    NetworkBinding, ReceiptStatus, TransactionAction, TransactionAdmissionContext, TransactionClass,
+    TransactionError, TransactionReceipt,
 };
 
 use crate::{
-    BlockExecutionError, BlockExecutionOutcome, FeeSchedule, TransactionExecutionContext,
+    BlockExecutionError, BlockExecutionOutcome, FeeSchedule, NativeDispatchError,
+    NativeTransferDispatcher, ProcessingNativeWalletActions, TransactionExecutionContext,
     TransactionExecutor,
 };
 
@@ -374,7 +375,10 @@ where
         make_overlay: impl FnOnce() -> Result<O, BlockExecutionError>,
         async_mode: bool,
     ) -> Result<BlockExecutionOutcome<O::State>, BlockExecutionError> {
-        self.execute_interleaved(body, network, block_height, admission, make_overlay, async_mode, |_, _| Ok(()))
+        self.execute_interleaved(
+            body, network, block_height, admission, make_overlay, async_mode, None,
+            |_, _| Ok(()),
+        )
     }
 
     pub(crate) fn execute_budgeted_processing_with_native_actions(
@@ -382,13 +386,14 @@ where
         body: &BlockBody,
         context: &crate::ProcessingCandidateContext<'_>,
         parent: &BudgetedWorld,
+        wallet: Option<&dyn ProcessingNativeWalletActions>,
         before: impl FnMut(usize, &mut BudgetedWorld) -> Result<(), BlockExecutionError>,
     ) -> Result<crate::BudgetedBlockExecutionOutcome, BlockExecutionError> {
         self.execute_interleaved(
             body, context.network, context.height,
             Some((context.consensus_timestamp_unix, context.finalized_authorization_state)),
             || parent.try_clone().map_err(|error| BlockExecutionError::StateRoot(resource_state_error(error))),
-            true, before,
+            true, wallet, before,
         )
     }
 
@@ -401,6 +406,7 @@ where
         admission: Option<(u64, &WorldState)>,
         make_overlay: impl FnOnce() -> Result<O, BlockExecutionError>,
         async_mode: bool,
+        wallet: Option<&dyn ProcessingNativeWalletActions>,
         mut before: impl FnMut(usize, &mut O) -> Result<(), BlockExecutionError>,
     ) -> Result<BlockExecutionOutcome<O::State>, BlockExecutionError> {
         if block_height == 0 {
@@ -540,23 +546,39 @@ where
                     transaction_index,
                     message: "transaction index exceeds canonical range".into(),
                 })?;
-            let mut dispatch = self
-                .dispatcher
-                .execute(
+            let context = TransactionExecutionContext {
+                network,
+                block_height,
+                transaction_index: transaction_position,
+            };
+            let state = overlay.staged();
+            let protected_credit = matches!(action, TransactionAction::Transfer)
+                && transaction.unsigned.receiver.starts_with("synw");
+            let (mut dispatch, rejection) = match (protected_credit, wallet) {
+                (true, Some(wallet)) => match NativeTransferDispatcher::execute_with_credit_policy(
                     transaction,
                     &action,
-                    TransactionExecutionContext {
-                        network,
-                        block_height,
-                        transaction_index: transaction_position,
-                    },
-                    overlay.staged(),
-                )
-                .map_err(|error| BlockExecutionError::Dispatcher {
-                    transaction_index,
-                    message: error.to_string(),
-                })?;
-            if let Some(binding) = first_use_binding {
+                    context,
+                    |receiver| wallet.authorize_ordinary_protected_credit(receiver, context, state),
+                ) {
+                    Ok(dispatch) => Ok((dispatch, None)),
+                    Err(NativeDispatchError::AccountNotEnrolled) => Ok((
+                        NativeTransferDispatcher::protected_credit_reversion(transaction),
+                        Some("ACCOUNT_NOT_ENROLLED"),
+                    )),
+                    Err(error) => Err(error.to_string()),
+                },
+                _ => self
+                    .dispatcher
+                    .execute(transaction, &action, context, state)
+                    .map(|dispatch| (dispatch, None))
+                    .map_err(|error| error.to_string()),
+            }
+            .map_err(|message| BlockExecutionError::Dispatcher {
+                transaction_index,
+                message,
+            })?;
+            if let Some(binding) = first_use_binding.filter(|_| rejection.is_none()) {
                 add_first_use_binding(
                     &mut dispatch.state_diff,
                     &overlay.staged().protocol,
@@ -626,10 +648,14 @@ where
                 state_root(overlay.staged()).map_err(BlockExecutionError::StateRoot)?;
             let receipt = TransactionReceipt {
                 transaction_id,
-                status: ReceiptStatus::Applied,
+                status: if rejection.is_some() {
+                    ReceiptStatus::Reverted
+                } else {
+                    ReceiptStatus::Applied
+                },
                 gas_used: settlement.gas_used,
                 state_root_after,
-                error_code: None,
+                error_code: rejection.map(str::to_owned),
             };
             if !receipt.validate() {
                 return Err(BlockExecutionError::InvalidReceipt { transaction_index });
@@ -1325,6 +1351,104 @@ mod permissionless_tests {
             parent,
         )
     }
+
+    #[test]
+    #[ignore = "requires an explicitly authenticated native APQE report"]
+    fn ordinary_protected_credit_requires_native_policy_and_settles_a_denial() {
+        use crate::{NativeDispatchError, ProcessingCandidateContext, ProcessingReadyRecord};
+        use synergy_etdag::EtdagDigest;
+        use synergy_state::world_resources::WorldResourceBudget;
+
+        const RECIPIENT: &str = "synw52908400098527886E0F7030069857D2E4169EE7";
+        struct CreditBoundary(bool);
+        impl ProcessingNativeWalletActions for CreditBoundary {
+            fn owns(&self, _: &ProcessingReadyRecord) -> bool {
+                false
+            }
+
+            fn authorize_ordinary_protected_credit(
+                &self,
+                receiver: &str,
+                context: TransactionExecutionContext<'_>,
+                ordered: &WorldState,
+            ) -> Result<(), NativeDispatchError> {
+                assert_eq!(receiver, RECIPIENT);
+                assert_eq!(context.block_height, 5);
+                assert_eq!(context.transaction_index, 0);
+                assert_eq!(ordered.accounts[RECIPIENT].balance_nwei, 1);
+                self.0.then_some(()).ok_or(NativeDispatchError::AccountNotEnrolled)
+            }
+
+            fn execute(
+                &self,
+                _: &ProcessingReadyRecord,
+                _: &BudgetedWorld,
+                _: &mut BudgetedWorld,
+            ) -> Result<(), BlockExecutionError> {
+                panic!("ordinary credit is not a protected processing action")
+            }
+        }
+        let (root, root_secret) = fndsa1024::keypair();
+        let (carrier, secret, key) = identity(&root, &root_secret);
+        let mut tx = transaction(&carrier, &secret, &key, 0);
+        tx.unsigned.receiver = RECIPIENT.into();
+        tx.signature = mldsa87::detached_sign(&tx.unsigned.signing_bytes().unwrap(), &secret)
+            .as_bytes()
+            .to_vec();
+        let sender = tx.unsigned.sender.clone();
+        let mut source = world(&sender, 100_000);
+        source.accounts.insert(
+            RECIPIENT.into(),
+            synergy_state::AccountState {
+                balance_nwei: 1,
+                ..Default::default()
+            },
+        );
+        let budget = WorldResourceBudget::new(16 * 1024 * 1024);
+        let parent = BudgetedWorld::try_clone_world(&source, &budget).unwrap();
+        let network = tx.unsigned.network.clone();
+        let body = BlockBody { transactions: vec![tx] };
+        let namespace = EtdagDigest::from_domain_bytes("credit-fixture", b"namespace");
+        let context = ProcessingCandidateContext {
+            ordered_group: None,
+            height: 5,
+            parent_block_id: "ordinary-credit-parent",
+            network: &network,
+            consensus_timestamp_unix: 10,
+            namespace_root: &namespace,
+            maximum_gas: 30_000_000,
+            maximum_bytes: 8 * 1024 * 1024,
+            finalized_authorization_state: &source,
+        };
+        let scheduler = BlockExecutionScheduler::new(
+            NativeTransferDispatcher,
+            RealVerifier::from_pinned_report(),
+            FeeSchedule { base_fee_per_gas_nwei: 1, collector: "fees".into() },
+        )
+        .unwrap();
+        let run = |wallet| scheduler.execute_budgeted_processing_with_native_actions(
+            &body, &context, &parent, wallet, |_, _| Ok(()),
+        );
+
+        assert!(matches!(run(None), Err(BlockExecutionError::Dispatcher { message, .. }) if message == "ACCOUNT_NOT_ENROLLED"));
+        let denied = run(Some(&CreditBoundary(false))).unwrap();
+        assert_eq!(denied.receipts[0].status, ReceiptStatus::Reverted);
+        assert_eq!(denied.receipts[0].error_code.as_deref(), Some("ACCOUNT_NOT_ENROLLED"));
+        assert_eq!(denied.state.accounts[RECIPIENT].balance_nwei, 1);
+        assert_eq!(denied.state.accounts[&sender].balance_nwei, 79_000);
+        assert_eq!(denied.state.accounts[&sender].nonce, 1);
+        assert_eq!(denied.total_fees_nwei, 21_000);
+        assert_eq!(denied.state.protocol, source.protocol);
+
+        let authorized = run(Some(&CreditBoundary(true))).unwrap();
+        assert_eq!(authorized.receipts[0].status, ReceiptStatus::Applied);
+        assert_eq!(authorized.state.accounts[RECIPIENT].balance_nwei, 8);
+        assert_eq!(authorized.state.accounts[&sender].balance_nwei, 78_993);
+        assert_eq!(authorized.state.accounts[&sender].nonce, 1);
+        assert_eq!(authorized.total_fees_nwei, 21_000);
+        assert_eq!(parent.as_ref(), &source);
+    }
+
     #[test]
     #[ignore = "requires an explicitly authenticated native APQE report"]
     fn unregistered_real_crypto_sender_binds_atomically_and_replays_deterministically() {

@@ -224,6 +224,7 @@ impl<'a> NativeProtectedJournal<'a> {
             ordinary,
             originals: DispatchOriginals::Journal(self),
             parent,
+            network: context.network,
             finalized,
             inclusion: Position {
                 height: context.height,
@@ -241,6 +242,7 @@ pub(in crate::services) struct NativeProtectedDispatch<'a> {
     ordinary: &'a NativeProcessingPipeline<'a>,
     originals: DispatchOriginals<'a>,
     parent: &'a BudgetedWorld,
+    network: &'a synergy_transaction::NetworkBinding,
     finalized: FinalizedSnapshot<'a>,
     inclusion: Position,
     parameters: EtdagParameters,
@@ -392,6 +394,7 @@ pub(in crate::services) fn with_live_wallet_dispatch<T>(
             ordinary,
             originals: DispatchOriginals::Live { completions, terms },
             parent,
+            network: context.network,
             finalized,
             inclusion: Position {
                 height: context.height,
@@ -467,6 +470,25 @@ impl ProcessingReadinessVerifier for NativeProtectedDispatch<'_> {
 impl ProcessingNativeWalletActions for NativeProtectedDispatch<'_> {
     fn owns(&self, record: &ProcessingReadyRecord) -> bool {
         self.owned.contains(&record.item.envelope_id)
+    }
+
+    fn authorize_ordinary_protected_credit(
+        &self,
+        receiver: &str,
+        context: synergy_execution::TransactionExecutionContext<'_>,
+        state: &WorldState,
+    ) -> Result<(), synergy_execution::NativeDispatchError> {
+        use synergy_execution::NativeDispatchError::AccountNotEnrolled;
+        if context.block_height != self.inclusion.height
+            || !matches!(
+                &self.finalized.registry.verifier,
+                super::super::EnrollmentVerifier::Activated { .. }
+            )
+        {
+            return Err(AccountNotEnrolled);
+        }
+        self.finalized
+            .authorize_ordinary_credit(self.network, receiver, context, state)
     }
 
     fn execute(

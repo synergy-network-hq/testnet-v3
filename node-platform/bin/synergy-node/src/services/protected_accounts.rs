@@ -343,6 +343,36 @@ impl FinalizedSnapshot<'_> {
             consensus_time: self.position.consensus_time,
         }
     }
+
+    fn authorize_ordinary_credit(
+        &self,
+        selected_network: &synergy_transaction::NetworkBinding,
+        receiver: &str,
+        context: synergy_execution::TransactionExecutionContext<'_>,
+        ordered: &WorldState,
+    ) -> Result<(), synergy_execution::NativeDispatchError> {
+        use synergy_execution::NativeDispatchError::AccountNotEnrolled;
+        if context.network != selected_network
+            || ChainId::from_u64(context.network.chain_id).as_be_bytes()
+                != &self.registry.network.native_chain
+            || context.block_height <= self.position.height
+        {
+            return Err(AccountNotEnrolled);
+        }
+        let account = synergy_address_engine::apqe::address::parse_address(&Primitives, receiver)
+            .map_err(|_| AccountNotEnrolled)?;
+        account
+            .validate_spending_destination()
+            .map_err(|_| AccountNotEnrolled)?;
+        let exact = self
+            .registry
+            .require_finalized_recipient(self, ordered, account)
+            .map_err(|_| AccountNotEnrolled)?;
+        if receiver != exact {
+            return Err(AccountNotEnrolled);
+        }
+        Ok(())
+    }
 }
 
 trait ProtectedExecutionWorld {

@@ -1,5 +1,5 @@
 //! Engineering qualification of ordinary treasury funding against finalized
-//! protected enrollment. The active runtime has no protected credit policy.
+//! protected enrollment using the shared recipient authorization.
 use std::{
     path::Path,
     sync::{Arc, Mutex},
@@ -7,7 +7,7 @@ use std::{
 
 use synergy_address_engine::{
     apqe::{
-        address::parse_address, crypto_engine::CryptoEngine, provider::SignOptions, SecretBytes,
+        crypto_engine::CryptoEngine, provider::SignOptions, SecretBytes,
     },
     types::Algorithm,
 };
@@ -25,7 +25,7 @@ use super::super::{
     socket_qualification::funded_transaction_fixture_for_network_provider_chain,
 };
 use super::{
-    account_key, tests, AccountIdentifier, ChainId, FinalizedSnapshot, Primitives, WorldState,
+    account_key, tests, AccountIdentifier, FinalizedSnapshot, Primitives, WorldState,
 };
 
 struct FundingCredit<'a> {
@@ -42,26 +42,7 @@ impl NativeOperation for FundingCredit<'_> {
         context: TransactionExecutionContext<'_>,
         state: &WorldState,
     ) -> Result<(), NativeDispatchError> {
-        let denied = NativeDispatchError::AccountNotEnrolled;
-        let registry = self.source.registry;
-        if context.network != self.selected_network
-            || ChainId::from_u64(context.network.chain_id).as_be_bytes()
-                != &registry.network.native_chain
-            || context.block_height <= self.source.position.height
-        {
-            return Err(denied);
-        }
-        let account = parse_address(&Primitives, receiver).map_err(|_| denied.clone())?;
-        account
-            .validate_spending_destination()
-            .map_err(|_| denied.clone())?;
-        let address = registry
-            .require_finalized_recipient(self.source, state, account)
-            .map_err(|_| denied.clone())?;
-        if address != receiver {
-            return Err(denied);
-        }
-        Ok(())
+        self.source.authorize_ordinary_credit(self.selected_network, receiver, context, state)
     }
 
     fn execute_native(

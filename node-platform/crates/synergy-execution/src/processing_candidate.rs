@@ -68,6 +68,17 @@ pub trait ProcessingPayloadProvider {
 pub trait ProcessingNativeWalletActions {
     fn owns(&self, record: &ProcessingReadyRecord) -> bool;
 
+    /// Use only the finalized Wallet policy and the ordered execution state.
+    /// A native Wallet action handler without that authority denies credit.
+    fn authorize_ordinary_protected_credit(
+        &self,
+        _receiver: &str,
+        _context: crate::TransactionExecutionContext<'_>,
+        _state: &WorldState,
+    ) -> Result<(), crate::NativeDispatchError> {
+        Err(crate::NativeDispatchError::AccountNotEnrolled)
+    }
+
     fn execute(
         &self,
         record: &ProcessingReadyRecord,
@@ -592,12 +603,16 @@ impl<D: TransactionExecutor, V: AegisTransactionVerifier> BlockExecutionSchedule
         }
         let body = BlockBody { transactions };
         let mut protected = protected.into_iter().peekable();
-        let outcome = self.execute_budgeted_processing_with_native_actions(&body, &context, parent, |index, working| {
-            while let Some((_, dispatch, record)) = protected.next_if(|(before, _, _)| *before == index) {
-                dispatch.execute(record, parent, working)?;
+        let outcome = self.execute_budgeted_processing_with_native_actions(
+            &body, &context, parent, wallet, |index, working| {
+                while let Some((_, dispatch, record)) =
+                    protected.next_if(|(before, _, _)| *before == index)
+                {
+                    dispatch.execute(record, parent, working)?;
+                }
+                Ok(())
             }
-            Ok(())
-        })?;
+        )?;
         for (sender, expected) in expected_nonces {
             if outcome.state.accounts.get(sender).map_or(0, |a| a.nonce) != expected {
                 return Err(ProcessingCandidateError::Invalid(
