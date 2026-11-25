@@ -33,6 +33,10 @@ pub(crate) struct SecureConnectionMaterial {
 pub(crate) trait SecureTransportFactory: Send + Sync {
     fn local_node_address(&self) -> &NodeAddress;
     fn contains_peer(&self, peer_id: &str) -> bool;
+    fn peer_is_shadow(&self,_peer_id:&str)->bool{false}
+    fn endpoint_announcements(&self)->Result<Vec<Vec<u8>>,String>{Ok(vec![])}
+    fn receive_endpoint(&self,_bytes:&[u8])->Result<bool,String>{Ok(false)}
+    fn allow_reverse_dial(&self)->bool{false}
     fn material(&self, peer_id: &str, inbound: bool) -> Result<SecureConnectionMaterial, String>;
     fn dial_peers(&self) -> Result<Vec<(NodeAddress, std::net::SocketAddr)>, String>;
 }
@@ -169,6 +173,7 @@ pub(super) fn run(
                 match receiver.try_recv() {
                     Ok(frame) => {
                         progressed = true;
+                        if context.factory.peer_is_shadow(&peer_id) && matches!(frame.protocol,synergy_protocol_types::ProtocolKind::Etdag|synergy_protocol_types::ProtocolKind::Transaction|synergy_protocol_types::ProtocolKind::Sxcp){continue;}
                         let body = encode_session_payload(
                             frame.protocol,
                             &frame.payload,
@@ -192,6 +197,11 @@ pub(super) fn run(
                 progressed = true;
                 let (protocol, payload) =
                     decode_session_payload(body.as_bytes(), context.max_payload_bytes)?;
+                // A bonded shadow may synchronize, but never supply consensus,
+                // processing, discovery or execution authority before its epoch.
+                if context.factory.peer_is_shadow(&peer_id) && !matches!(protocol,synergy_protocol_types::ProtocolKind::Sync|synergy_protocol_types::ProtocolKind::Snapshot|synergy_protocol_types::ProtocolKind::Status) {
+                    return Err("shadow validator attempted a pre-activation protocol".into());
+                }
                 let frame = InboundFrame::new(
                     peer.clone(),
                     protocol,

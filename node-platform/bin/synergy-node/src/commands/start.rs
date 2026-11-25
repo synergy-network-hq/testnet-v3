@@ -355,6 +355,8 @@ pub fn preflight(config_path: &Path) -> Result<serde_json::Value, String> {
     )?;
     Ok(serde_json::json!({
         "configuration_verified": true,
+        "validator_membership":crate::services::validator_shadow::membership_status(&configuration,verified_authority.as_ref())?,
+        "effective_listen_addresses":crate::services::transport_endpoint::local_listeners(&configuration)?,
         "engineering_transport_profile": configuration.apqe_transport.as_ref().map(|v| &v.profile),
         "production_approved": false,
         "signed_genesis_verified": true,
@@ -425,6 +427,7 @@ fn preflight_voting_binding(
         return Err("voting preflight requires the validator role".into());
     }
     let authority = authority.ok_or("voting preflight requires signed frozen authority")?;
+    if authority.registry.active_validator(node_address).is_err()&&authority.pending_validator_admissions()?.is_some_and(|s|s.records().iter().any(|r|r.validator_id==node_address)){return Ok(None);}
     let (key_id, _) = authority.consensus_binding(node_address)?;
     Ok(Some(key_id.to_owned()))
 }
@@ -688,7 +691,7 @@ fn register_builtin_services(
         // Canonical PoSy registration has verified active signed membership and
         // consensus-key possession. Role placement alone cannot set this marker.
         authorized_production_consensus =
-            configuration.consensus.mode == ConsensusMode::ValidateAndVote;
+            configuration.consensus.mode == ConsensusMode::ValidateAndVote&&verified_authority.as_ref().is_some_and(|a|super::super::services::validator_shadow::is_local(configuration,a).is_ok_and(|shadow|!shadow));
     }
     if rebind_only {
         return Ok(authorized_production_consensus);

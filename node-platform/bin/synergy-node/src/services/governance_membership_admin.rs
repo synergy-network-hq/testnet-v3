@@ -101,6 +101,7 @@ impl GovernanceApprovalOwner {
                 .checked_add(1)
                 .ok_or("retirement epoch overflow")?,
             retired_validator_id: target.into(),
+            automatic_admission_policy:Some(synergy_governance::AutomaticValidatorAdmissionPolicy{schema_version:1,minimum_bond_nwei:synergy_protocol_types::VALIDATOR_MINIMUM_BOND_NWEI.to_string(),initial_frozen_voting_weight:authority.registry.active().map(|r|r.frozen_voting_weight).min().ok_or("empty frozen committee")?,maximum_admissions_per_epoch:4,minimum_shadow_finalized_blocks:3}),
         };
         let members = authority.registry.quorum_validators();
         let mut constitution = Constitution {
@@ -204,7 +205,7 @@ impl GovernanceApprovalOwner {
             "validator_id":self.validator_id,"key_id":key_id,"finalized_height":height,"finalized_block_id":block.block_id,
             "old_validator_count":actual.len(),"old_count_quorum":actual.len()*2/3+1,
             "next_validator_count":actual.len()-1,"next_count_quorum":(actual.len()-1)*2/3+1,
-            "frozen_validators":authority.registry.quorum_validators(),"weighted_quorum_required":true}),
+            "frozen_validators":authority.registry.quorum_validators().into_iter().map(|v|json!({"validator_id":v.validator_id,"voting_weight":v.frozen_voting_weight.to_string()})).collect::<Vec<_>>(),"weighted_quorum_required":true}),
         )
     }
     pub(in crate::services) fn approve_membership(

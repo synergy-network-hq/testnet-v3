@@ -286,15 +286,39 @@ impl CanonicalGovernanceOperation {
     ) -> Result<TransactionDispatch, String> {
         let execution: GovernanceExecution = serde_json::from_slice(operation)
             .map_err(|error| format!("decode governance execution: {error}"))?;
-        if execution.mutation.action_kind==super::ethereum_activation::ACTION {
-            if authorization_id!=execution.authorization_root{return Err("EVM governance authorization identity differs".into());}
-            let state_diff=super::ethereum_activation::dispatch(self.authority.as_ref(),&execution,context.block_height,state)?;
-            return Ok(TransactionDispatch{state_diff,gas_used:75_000u64.checked_add(operation.len() as u64).ok_or("EVM governance gas overflow")?});
+        if execution.mutation.action_kind == super::ethereum_activation::ACTION {
+            if authorization_id != execution.authorization_root {
+                return Err("EVM governance authorization identity differs".into());
+            }
+            let state_diff = super::ethereum_activation::dispatch(
+                self.authority.as_ref(),
+                &execution,
+                context.block_height,
+                state,
+            )?;
+            return Ok(TransactionDispatch {
+                state_diff,
+                gas_used: 75_000u64
+                    .checked_add(operation.len() as u64)
+                    .ok_or("EVM governance gas overflow")?,
+            });
         }
-        if execution.mutation.action_kind==super::membership_retirement::ACTION {
-            if authorization_id!=execution.authorization_root{return Err("membership authorization identity differs".into());}
-            let state_diff=super::membership_retirement::dispatch(self.authority.as_ref(),&execution,context.block_height,state)?;
-            return Ok(TransactionDispatch{state_diff,gas_used:75_000u64.checked_add(operation.len() as u64).ok_or("membership governance gas overflow")?});
+        if execution.mutation.action_kind == super::membership_retirement::ACTION {
+            if authorization_id != execution.authorization_root {
+                return Err("membership authorization identity differs".into());
+            }
+            let state_diff = super::membership_retirement::dispatch(
+                self.authority.as_ref(),
+                &execution,
+                context.block_height,
+                state,
+            )?;
+            return Ok(TransactionDispatch {
+                state_diff,
+                gas_used: 75_000u64
+                    .checked_add(operation.len() as u64)
+                    .ok_or("membership governance gas overflow")?,
+            });
         }
         let key = execution.verify(
             self.authority.as_ref(),
@@ -336,18 +360,22 @@ impl GovernanceOperation for CanonicalGovernanceOperation {
         if transaction.unsigned.amount_nwei != 0 {
             return Err("governance transaction cannot transfer value".into());
         }
-        let governed:GovernanceExecution=serde_json::from_slice(operation).map_err(|error|error.to_string())?;
-        let evm_amendment=governed.mutation.action_kind==super::ethereum_activation::ACTION
-            ||governed.mutation.action_kind==super::membership_retirement::ACTION;
+        let governed: GovernanceExecution =
+            serde_json::from_slice(operation).map_err(|error| error.to_string())?;
+        let evm_amendment = governed.mutation.action_kind == super::ethereum_activation::ACTION
+            || governed.mutation.action_kind == super::membership_retirement::ACTION;
         drop(governed);
-        let mut dispatched=self.execute(authorization_id, operation, context, state)?;
+        let mut dispatched = self.execute(authorization_id, operation, context, state)?;
         // The EVM amendment travels as an authenticated asynchronous account
         // transaction. Its one-use governance CAS supplements the same native
         // sender nonce and fee settlement used by ordinary account actions.
         if evm_amendment {
             dispatched.state_diff.changes.push(AccountChange {
-                account:transaction.unsigned.sender.clone(),debit_nwei:0,credit_nwei:0,
-                expected_nonce:Some(transaction.unsigned.nonce),code_hash:None,
+                account: transaction.unsigned.sender.clone(),
+                debit_nwei: 0,
+                credit_nwei: 0,
+                expected_nonce: Some(transaction.unsigned.nonce),
+                code_hash: None,
             });
         }
         Ok(dispatched)
@@ -459,41 +487,92 @@ struct NativeAuthorizationVerifier<'a> {
     chain_id: u64,
     sender: &'a str,
     signer_public_key: &'a [u8],
-    provider_failed:&'a std::sync::atomic::AtomicBool,
+    provider_failed: &'a std::sync::atomic::AtomicBool,
 }
 
 #[derive(Debug)]
-struct NativeExecutionFailure {message:String,terminal:bool}
-impl std::fmt::Display for NativeExecutionFailure{
-    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{f.write_str(&self.message)}
+struct NativeExecutionFailure {
+    message: String,
+    terminal: bool,
 }
-struct NativeIdentityVerifier<'a>{verifier:&'a synergy_aegis::ApqeIdentityVerifier,provider_failed:&'a std::sync::atomic::AtomicBool}
-impl synergy_identity::authorization::AuthorizationSignatureVerifier for NativeIdentityVerifier<'_>{
-    fn verify(&self,algorithm:&str,public:&[u8],message:&[u8],signature:&[u8])->Result<(),String>{
-        self.verifier.verify_raw_classified(algorithm,public,message,signature).map_err(|e|{
-            if matches!(e,synergy_aegis::VerificationError::Provider(_)) {self.provider_failed.store(true,std::sync::atomic::Ordering::Relaxed);}
-            e.to_string()
-        })
+impl std::fmt::Display for NativeExecutionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+struct NativeIdentityVerifier<'a> {
+    verifier: &'a synergy_aegis::ApqeIdentityVerifier,
+    provider_failed: &'a std::sync::atomic::AtomicBool,
+}
+impl synergy_identity::authorization::AuthorizationSignatureVerifier
+    for NativeIdentityVerifier<'_>
+{
+    fn verify(
+        &self,
+        algorithm: &str,
+        public: &[u8],
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), String> {
+        self.verifier
+            .verify_raw_classified(algorithm, public, message, signature)
+            .map_err(|e| {
+                if matches!(e, synergy_aegis::VerificationError::Provider(_)) {
+                    self.provider_failed
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                e.to_string()
+            })
     }
 }
 
-fn native_state<T:serde::de::DeserializeOwned+Default>(state:&WorldState,key:&str,
-    local:&std::sync::atomic::AtomicBool)->Result<T,String>{
-    decode_protocol_state(state,key).map_err(|e|{local.store(true,std::sync::atomic::Ordering::Relaxed);e})
+fn native_state<T: serde::de::DeserializeOwned + Default>(
+    state: &WorldState,
+    key: &str,
+    local: &std::sync::atomic::AtomicBool,
+) -> Result<T, String> {
+    decode_protocol_state(state, key).map_err(|e| {
+        local.store(true, std::sync::atomic::Ordering::Relaxed);
+        e
+    })
 }
-fn native_ownership_failure(e:synergy_node_ownership::OwnershipError,local:&std::sync::atomic::AtomicBool)->String{
+fn native_ownership_failure(
+    e: synergy_node_ownership::OwnershipError,
+    local: &std::sync::atomic::AtomicBool,
+) -> String {
     use synergy_node_ownership::OwnershipError::*;
-    if matches!(e,CorruptState|InvalidVersion|Serialization(_)|Cache(_)){local.store(true,std::sync::atomic::Ordering::Relaxed);}
+    if matches!(
+        e,
+        CorruptState | InvalidVersion | Serialization(_) | Cache(_)
+    ) {
+        local.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     e.to_string()
 }
-fn native_naming_failure(e:synergy_naming::NamingError,local:&std::sync::atomic::AtomicBool)->String{
+fn native_naming_failure(
+    e: synergy_naming::NamingError,
+    local: &std::sync::atomic::AtomicBool,
+) -> String {
     use synergy_naming::NamingError::*;
-    if matches!(e,CorruptRegistry|InvalidRegistryVersion|Serialization(_)|Cache(_)){local.store(true,std::sync::atomic::Ordering::Relaxed);}
+    if matches!(
+        e,
+        CorruptRegistry | InvalidRegistryVersion | Serialization(_) | Cache(_)
+    ) {
+        local.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     e.to_string()
 }
-fn native_reward_failure(e:synergy_rewards::RewardError,local:&std::sync::atomic::AtomicBool)->String{
+fn native_reward_failure(
+    e: synergy_rewards::RewardError,
+    local: &std::sync::atomic::AtomicBool,
+) -> String {
     use synergy_rewards::RewardError::*;
-    if matches!(e,CorruptState|InvalidVersion|Serialization(_)|Cache(_)){local.store(true,std::sync::atomic::Ordering::Relaxed);}
+    if matches!(
+        e,
+        CorruptState | InvalidVersion | Serialization(_) | Cache(_)
+    ) {
+        local.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     e.to_string()
 }
 
@@ -527,8 +606,12 @@ impl NativeAuthorizationVerifier<'_> {
             "ML-DSA-87" | "ml_dsa_87" => SignatureAlgorithm::MlDsa87,
             _ => return Err("unsupported Aegis authorization signature algorithm".into()),
         };
-        let(public_bytes,signature_bytes)=if algorithm==SignatureAlgorithm::MlDsa65{(1952,3309)}else{(2592,4627)};
-        if proof.public_key.len()!=public_bytes||proof.signature.len()!=signature_bytes {
+        let (public_bytes, signature_bytes) = if algorithm == SignatureAlgorithm::MlDsa65 {
+            (1952, 3309)
+        } else {
+            (2592, 4627)
+        };
+        if proof.public_key.len() != public_bytes || proof.signature.len() != signature_bytes {
             return Err("invalid native authorization key or signature length".into());
         }
         let domain = if node_subject {
@@ -537,18 +620,37 @@ impl NativeAuthorizationVerifier<'_> {
             "SYNERGY-WALLET-AUTHORIZATION-V1"
         };
         SigningContext {
-                    domain: domain.into(),
-                    chain_id: self.chain_id,
-                    epoch: None,
-                    height: None,
-                }.validate().map_err(|e|e.to_string())?;
-        if payload.len()>64*1024{return Err("native authorization message exceeds its existing bound".into());}
-        let verifier=self.verifier.ok_or_else(||{
-            self.provider_failed.store(true,std::sync::atomic::Ordering::Relaxed);"native authorization provider unavailable".to_string()})?;
-        verifier.verify_raw_classified(if algorithm==SignatureAlgorithm::MlDsa65{"ML-DSA-65"}else{"ML-DSA-87"},
-                &proof.public_key,payload,&proof.signature)
+            domain: domain.into(),
+            chain_id: self.chain_id,
+            epoch: None,
+            height: None,
+        }
+        .validate()
+        .map_err(|e| e.to_string())?;
+        if payload.len() > 64 * 1024 {
+            return Err("native authorization message exceeds its existing bound".into());
+        }
+        let verifier = self.verifier.ok_or_else(|| {
+            self.provider_failed
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            "native authorization provider unavailable".to_string()
+        })?;
+        verifier
+            .verify_raw_classified(
+                if algorithm == SignatureAlgorithm::MlDsa65 {
+                    "ML-DSA-65"
+                } else {
+                    "ML-DSA-87"
+                },
+                &proof.public_key,
+                payload,
+                &proof.signature,
+            )
             .map_err(|error| {
-                if matches!(error,synergy_aegis::VerificationError::Provider(_)) {self.provider_failed.store(true,std::sync::atomic::Ordering::Relaxed);}
+                if matches!(error, synergy_aegis::VerificationError::Provider(_)) {
+                    self.provider_failed
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 error.to_string()
             })
     }
@@ -635,7 +737,9 @@ fn protocol_state_dispatch<T: serde::Serialize>(
 impl NativeOperation for CanonicalNativeOperation {
     type Error = NativeExecutionFailure;
 
-    fn terminal_rejection(&self,error:&Self::Error)->bool{error.terminal}
+    fn terminal_rejection(&self, error: &Self::Error) -> bool {
+        error.terminal
+    }
 
     fn execute_native(
         &self,
@@ -646,42 +750,74 @@ impl NativeOperation for CanonicalNativeOperation {
         context: TransactionExecutionContext<'_>,
         state: &WorldState,
     ) -> Result<TransactionDispatch, Self::Error> {
-        let local=std::sync::atomic::AtomicBool::new(false);
-        let result=(||->Result<TransactionDispatch,String>{
-        if transaction.unsigned.amount_nwei != 0 {
-            return Err("native protocol operation cannot transfer value".into());
-        }
-        let authorization = NativeAuthorizationVerifier {
-            verifier: self.authority.native_identity_verifier(),
-            chain_id: self.chain_id,
-            sender: &transaction.unsigned.sender,
-            signer_public_key: &transaction.signer_public_key,
-            provider_failed:&local,
-        };
-        match (module, method) {
-            ("ethereum", "fund_account") => {
-                use synergy_aivm::ethereum_execution::{NativeEvmFunding, EVM_POLICY_KEY};
-                if transaction.unsigned.receiver != transaction.unsigned.sender {
-                    return Err("native EOA funding requires its signed zero-value self target".into());
+        let local = std::sync::atomic::AtomicBool::new(false);
+        let result = (|| -> Result<TransactionDispatch, String> {
+            if transaction.unsigned.amount_nwei != 0 {
+                return Err("native protocol operation cannot transfer value".into());
+            }
+            let authorization = NativeAuthorizationVerifier {
+                verifier: self.authority.native_identity_verifier(),
+                chain_id: self.chain_id,
+                sender: &transaction.unsigned.sender,
+                signer_public_key: &transaction.signer_public_key,
+                provider_failed: &local,
+            };
+            match (module, method) {
+                ("validator", "register") => {
+                    let (state_diff, gas_used) = super::validator_admission::prepare(
+                        &self.authority,
+                        state,
+                        transaction,
+                        input,
+                        context.block_height,
+                        &local,
+                    )?;
+                    Ok(TransactionDispatch {
+                        state_diff,
+                        gas_used,
+                    })
                 }
-                let funding = NativeEvmFunding::decode(input).map_err(|e| e.to_string())?;
-                let selected = self.authority.ethereum_activation(state, None).map_err(|e| {
-                    local.store(true, std::sync::atomic::Ordering::Relaxed); e
-                })?.ok_or("native EOA funding requires governed EVM activation")?;
-                let active = super::ethereum_activation::is_active(&selected, state).map_err(|e| {
-                    local.store(true, std::sync::atomic::Ordering::Relaxed); e
-                })?;
-                if !active || context.block_height < selected.activation_height {
-                    return Err("native EOA funding precedes governed EVM activation".into());
-                }
-                let pin = synergy_posy::parse_hash_bytes(&selected.descriptor.policy_sha256).map_err(|e| {
-                    local.store(true, std::sync::atomic::Ordering::Relaxed); e.to_string()
-                })?;
-                if state.protocol.get(EVM_POLICY_KEY).map(|p| synergy_aegis::AegisProtectedPrimitives.sha256(p)) != Some(pin) {
-                    local.store(true, std::sync::atomic::Ordering::Relaxed);
-                    return Err("native EOA funding policy differs from authenticated authority".into());
-                }
-                let state_diff = funding.prepare(state, self.chain_id, &transaction.unsigned.sender,
+                ("ethereum", "fund_account") => {
+                    use synergy_aivm::ethereum_execution::{NativeEvmFunding, EVM_POLICY_KEY};
+                    if transaction.unsigned.receiver != transaction.unsigned.sender {
+                        return Err(
+                            "native EOA funding requires its signed zero-value self target".into(),
+                        );
+                    }
+                    let funding = NativeEvmFunding::decode(input).map_err(|e| e.to_string())?;
+                    let selected = self
+                        .authority
+                        .ethereum_activation(state, None)
+                        .map_err(|e| {
+                            local.store(true, std::sync::atomic::Ordering::Relaxed);
+                            e
+                        })?
+                        .ok_or("native EOA funding requires governed EVM activation")?;
+                    let active =
+                        super::ethereum_activation::is_active(&selected, state).map_err(|e| {
+                            local.store(true, std::sync::atomic::Ordering::Relaxed);
+                            e
+                        })?;
+                    if !active || context.block_height < selected.activation_height {
+                        return Err("native EOA funding precedes governed EVM activation".into());
+                    }
+                    let pin = synergy_posy::parse_hash_bytes(&selected.descriptor.policy_sha256)
+                        .map_err(|e| {
+                            local.store(true, std::sync::atomic::Ordering::Relaxed);
+                            e.to_string()
+                        })?;
+                    if state
+                        .protocol
+                        .get(EVM_POLICY_KEY)
+                        .map(|p| synergy_aegis::AegisProtectedPrimitives.sha256(p))
+                        != Some(pin)
+                    {
+                        local.store(true, std::sync::atomic::Ordering::Relaxed);
+                        return Err(
+                            "native EOA funding policy differs from authenticated authority".into(),
+                        );
+                    }
+                    let state_diff = funding.prepare(state, self.chain_id, &transaction.unsigned.sender,
                     transaction.unsigned.nonce).map_err(|e| {
                         if matches!(e, synergy_aivm::ethereum_execution::EvmExecutionError::InvalidPolicy
                             | synergy_aivm::ethereum_execution::EvmExecutionError::CorruptState) {
@@ -689,214 +825,238 @@ impl NativeOperation for CanonicalNativeOperation {
                         }
                         e.to_string()
                     })?;
-                Ok(TransactionDispatch { state_diff, gas_used: NativeEvmFunding::GAS_LIMIT })
-            }
-            ("identity", "register_authorization") => {
-                if input.len() > synergy_identity::registration::MAX_AUTHORIZATION_TABLE_BYTES {
-                    return Err("identity registration exceeds the byte limit".into());
+                    Ok(TransactionDispatch {
+                        state_diff,
+                        gas_used: NativeEvmFunding::GAS_LIMIT,
+                    })
                 }
-                let carrier = serde_json::from_slice(input)
-                    .map_err(|error| format!("decode identity registration: {error}"))?;
-                let key =
-                    synergy_identity::authorization::IDENTITY_AUTHORIZATION_BINDINGS_STATE_KEY;
-                let _:BTreeMap<String,synergy_identity::authorization::IdentityAuthorizationBindingCommitment>=native_state(state,key,&local)?;
-                let verifier=self.authority.native_identity_verifier().ok_or_else(||{
-                    local.store(true,std::sync::atomic::Ordering::Relaxed);"native identity provider unavailable".to_string()})?;
-                let verifier=NativeIdentityVerifier{verifier,provider_failed:&local};
-                let value = synergy_identity::registration::register_authorization_with_verifier(
-                    &state.protocol,
-                    &transaction.unsigned.sender,
-                    &carrier,
-                    context.network.chain_id,
-                    &context.network.network_id,
-                    self.authority
-                        .consensus_timestamp_unix(context.block_height).map_err(|e|{local.store(true,std::sync::atomic::Ordering::Relaxed);e})?,
-                    Some(&verifier),
-                )?;
-                let gas_used = 50_000u64
-                    .checked_add(value.len() as u64)
-                    .ok_or("identity registration gas overflow")?;
-                let changed = state.protocol.get(key) != Some(&value);
-                let mut protocol_changes = vec![ProtocolChange {
-                    key: key.into(),
-                    expected_value: state.protocol.get(key).cloned(),
-                    value: Some(value),
-                }];
-                if changed {
-                    let marker =
-                        synergy_identity::registration::AUTHORIZATION_UPDATED_HEIGHT_STATE_KEY;
-                    protocol_changes.push(ProtocolChange {
-                        key: marker.into(),
-                        expected_value: state.protocol.get(marker).cloned(),
-                        value: Some(
-                            serde_json::to_vec(&context.block_height).map_err(|e| e.to_string())?,
-                        ),
-                    });
-                }
-                Ok(TransactionDispatch {
-                    state_diff: StateDiff {
-                        changes: vec![synergy_state::AccountChange {
-                            account: transaction.unsigned.sender.clone(),
-                            debit_nwei: 0,
-                            credit_nwei: 0,
-                            expected_nonce: Some(transaction.unsigned.nonce),
-                            code_hash: None,
-                        }],
-                        protocol_changes,
-                    },
-                    gas_used,
-                })
-            }
-            ("node_ownership", "claim") => {
-                let input: OwnershipClaimInput = serde_json::from_slice(input)
-                    .map_err(|error| format!("decode ownership claim: {error}"))?;
-                let mut ownership: OwnershipRegistrySnapshot =
-                    native_state(state, OWNERSHIP_STATE_KEY,&local)?;
-                let transition = OwnershipEngine::new(authorization)
-                    .prepare_claim(
-                        &ownership,
-                        OwnershipClaimRequest {
-                            node_address: input.node_address,
-                            owner_wallet: transaction.unsigned.sender.clone(),
-                            nonce: input.nonce,
-                            wallet_proof: VERIFIED_TRANSACTION_PROOF.to_vec(),
-                            node_possession_proof: input.node_possession_proof,
+                ("identity", "register_authorization") => {
+                    if input.len() > synergy_identity::registration::MAX_AUTHORIZATION_TABLE_BYTES {
+                        return Err("identity registration exceeds the byte limit".into());
+                    }
+                    let carrier = serde_json::from_slice(input)
+                        .map_err(|error| format!("decode identity registration: {error}"))?;
+                    let key =
+                        synergy_identity::authorization::IDENTITY_AUTHORIZATION_BINDINGS_STATE_KEY;
+                    let _: BTreeMap<
+                        String,
+                        synergy_identity::authorization::IdentityAuthorizationBindingCommitment,
+                    > = native_state(state, key, &local)?;
+                    let verifier = self.authority.native_identity_verifier().ok_or_else(|| {
+                        local.store(true, std::sync::atomic::Ordering::Relaxed);
+                        "native identity provider unavailable".to_string()
+                    })?;
+                    let verifier = NativeIdentityVerifier {
+                        verifier,
+                        provider_failed: &local,
+                    };
+                    let value =
+                        synergy_identity::registration::register_authorization_with_verifier(
+                            &state.protocol,
+                            &transaction.unsigned.sender,
+                            &carrier,
+                            context.network.chain_id,
+                            &context.network.network_id,
+                            self.authority
+                                .consensus_timestamp_unix(context.block_height)
+                                .map_err(|e| {
+                                    local.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    e
+                                })?,
+                            Some(&verifier),
+                        )?;
+                    let gas_used = 50_000u64
+                        .checked_add(value.len() as u64)
+                        .ok_or("identity registration gas overflow")?;
+                    let changed = state.protocol.get(key) != Some(&value);
+                    let mut protocol_changes = vec![ProtocolChange {
+                        key: key.into(),
+                        expected_value: state.protocol.get(key).cloned(),
+                        value: Some(value),
+                    }];
+                    if changed {
+                        let marker =
+                            synergy_identity::registration::AUTHORIZATION_UPDATED_HEIGHT_STATE_KEY;
+                        protocol_changes.push(ProtocolChange {
+                            key: marker.into(),
+                            expected_value: state.protocol.get(marker).cloned(),
+                            value: Some(
+                                serde_json::to_vec(&context.block_height)
+                                    .map_err(|e| e.to_string())?,
+                            ),
+                        });
+                    }
+                    Ok(TransactionDispatch {
+                        state_diff: StateDiff {
+                            changes: vec![synergy_state::AccountChange {
+                                account: transaction.unsigned.sender.clone(),
+                                debit_nwei: 0,
+                                credit_nwei: 0,
+                                expected_nonce: Some(transaction.unsigned.nonce),
+                                code_hash: None,
+                            }],
+                            protocol_changes,
                         },
-                    )
-                    .map_err(|error| native_ownership_failure(error,&local))?;
-                ownership
-                    .apply_at_height(context.block_height, transition)
-                    .map_err(|error| native_ownership_failure(error,&local))?;
-                protocol_state_dispatch(state, OWNERSHIP_STATE_KEY, &ownership)
-            }
-            ("node_ownership", "transfer") => {
-                let input: OwnershipTransferInput = serde_json::from_slice(input)
-                    .map_err(|error| format!("decode ownership transfer: {error}"))?;
-                let mut ownership: OwnershipRegistrySnapshot =
-                    native_state(state, OWNERSHIP_STATE_KEY,&local)?;
-                let transition = OwnershipEngine::new(authorization)
-                    .prepare_transfer(
-                        &ownership,
-                        OwnershipTransferRequest {
-                            node_address: input.node_address,
-                            current_owner_wallet: transaction.unsigned.sender.clone(),
-                            new_owner_wallet: input.new_owner_wallet,
-                            nonce: input.nonce,
-                            current_owner_proof: VERIFIED_TRANSACTION_PROOF.to_vec(),
-                            new_owner_acceptance_proof: input.new_owner_acceptance_proof,
-                        },
-                    )
-                    .map_err(|error| native_ownership_failure(error,&local))?;
-                ownership
-                    .apply_at_height(context.block_height, transition)
-                    .map_err(|error| native_ownership_failure(error,&local))?;
-                protocol_state_dispatch(state, OWNERSHIP_STATE_KEY, &ownership)
-            }
-            ("naming", "register_wallet") => {
-                #[derive(serde::Deserialize)]
-                #[serde(deny_unknown_fields)]
-                struct WalletNamingInput {
-                    syn_id: String,
+                        gas_used,
+                    })
                 }
-                let input: WalletNamingInput = serde_json::from_slice(input)
-                    .map_err(|error| format!("decode wallet naming registration: {error}"))?;
-                let key = synergy_naming::WALLET_PROTOCOL_STATE_KEY;
-                let mut naming = synergy_naming::WalletSynIdRegistry::decode(
-                    state.protocol.get(key).map(Vec::as_slice),
-                ).map_err(|e|{local.store(true,std::sync::atomic::Ordering::Relaxed);e})?;
-                naming.register_authenticated(
-                    &input.syn_id,
-                    &transaction.unsigned.sender,
-                    context.block_height,
-                )?;
-                // Use the existing protocol-state dispatcher, fee accounting and
-                // atomic native execution; no independent registry writes.
-                let _ = naming.encode()?;
-                protocol_state_dispatch(state, key, &naming)
-            }
-            ("naming", "register") => {
-                let input: NamingRegistrationInput = serde_json::from_slice(input)
-                    .map_err(|error| format!("decode naming registration: {error}"))?;
-                let ownership: OwnershipRegistrySnapshot =
-                    native_state(state, OWNERSHIP_STATE_KEY,&local)?;
-                let mut naming: NamingRegistrySnapshot =
-                    native_state(state, NAMING_STATE_KEY,&local)?;
-                let transition = NamingEngine::new(ownership, authorization)
-                    .prepare_registration(
-                        &naming,
-                        RegistrationRequest {
-                            node_id: input.node_id,
-                            node_address: input.node_address,
-                            authorization: NamingAuthorization {
+                ("node_ownership", "claim") => {
+                    let input: OwnershipClaimInput = serde_json::from_slice(input)
+                        .map_err(|error| format!("decode ownership claim: {error}"))?;
+                    let mut ownership: OwnershipRegistrySnapshot =
+                        native_state(state, OWNERSHIP_STATE_KEY, &local)?;
+                    let transition = OwnershipEngine::new(authorization)
+                        .prepare_claim(
+                            &ownership,
+                            OwnershipClaimRequest {
+                                node_address: input.node_address,
                                 owner_wallet: transaction.unsigned.sender.clone(),
                                 nonce: input.nonce,
-                                proof: VERIFIED_TRANSACTION_PROOF.to_vec(),
+                                wallet_proof: VERIFIED_TRANSACTION_PROOF.to_vec(),
+                                node_possession_proof: input.node_possession_proof,
                             },
-                        },
-                    )
-                    .map_err(|error| native_naming_failure(error,&local))?;
-                naming
-                    .apply_at_height(context.block_height, transition)
-                    .map_err(|error| native_naming_failure(error,&local))?;
-                protocol_state_dispatch(state, NAMING_STATE_KEY, &naming)
-            }
-            ("naming", "rename") => {
-                let input: NamingRenameInput = serde_json::from_slice(input)
-                    .map_err(|error| format!("decode naming rename: {error}"))?;
-                let ownership: OwnershipRegistrySnapshot =
-                    native_state(state, OWNERSHIP_STATE_KEY,&local)?;
-                let mut naming: NamingRegistrySnapshot =
-                    native_state(state, NAMING_STATE_KEY,&local)?;
-                let transition = NamingEngine::new(ownership, authorization)
-                    .prepare_rename(
-                        &naming,
-                        RenameRequest {
-                            current_node_id: input.current_node_id,
-                            replacement_node_id: input.replacement_node_id,
-                            node_address: input.node_address,
-                            authorization: NamingAuthorization {
-                                owner_wallet: transaction.unsigned.sender.clone(),
+                        )
+                        .map_err(|error| native_ownership_failure(error, &local))?;
+                    ownership
+                        .apply_at_height(context.block_height, transition)
+                        .map_err(|error| native_ownership_failure(error, &local))?;
+                    protocol_state_dispatch(state, OWNERSHIP_STATE_KEY, &ownership)
+                }
+                ("node_ownership", "transfer") => {
+                    let input: OwnershipTransferInput = serde_json::from_slice(input)
+                        .map_err(|error| format!("decode ownership transfer: {error}"))?;
+                    let mut ownership: OwnershipRegistrySnapshot =
+                        native_state(state, OWNERSHIP_STATE_KEY, &local)?;
+                    let transition = OwnershipEngine::new(authorization)
+                        .prepare_transfer(
+                            &ownership,
+                            OwnershipTransferRequest {
+                                node_address: input.node_address,
+                                current_owner_wallet: transaction.unsigned.sender.clone(),
+                                new_owner_wallet: input.new_owner_wallet,
                                 nonce: input.nonce,
-                                proof: VERIFIED_TRANSACTION_PROOF.to_vec(),
+                                current_owner_proof: VERIFIED_TRANSACTION_PROOF.to_vec(),
+                                new_owner_acceptance_proof: input.new_owner_acceptance_proof,
                             },
-                        },
+                        )
+                        .map_err(|error| native_ownership_failure(error, &local))?;
+                    ownership
+                        .apply_at_height(context.block_height, transition)
+                        .map_err(|error| native_ownership_failure(error, &local))?;
+                    protocol_state_dispatch(state, OWNERSHIP_STATE_KEY, &ownership)
+                }
+                ("naming", "register_wallet") => {
+                    #[derive(serde::Deserialize)]
+                    #[serde(deny_unknown_fields)]
+                    struct WalletNamingInput {
+                        syn_id: String,
+                    }
+                    let input: WalletNamingInput = serde_json::from_slice(input)
+                        .map_err(|error| format!("decode wallet naming registration: {error}"))?;
+                    let key = synergy_naming::WALLET_PROTOCOL_STATE_KEY;
+                    let mut naming = synergy_naming::WalletSynIdRegistry::decode(
+                        state.protocol.get(key).map(Vec::as_slice),
                     )
-                    .map_err(|error| native_naming_failure(error,&local))?;
-                naming
-                    .apply_at_height(context.block_height, transition)
-                    .map_err(|error| native_naming_failure(error,&local))?;
-                protocol_state_dispatch(state, NAMING_STATE_KEY, &naming)
+                    .map_err(|e| {
+                        local.store(true, std::sync::atomic::Ordering::Relaxed);
+                        e
+                    })?;
+                    naming.register_authenticated(
+                        &input.syn_id,
+                        &transaction.unsigned.sender,
+                        context.block_height,
+                    )?;
+                    // Use the existing protocol-state dispatcher, fee accounting and
+                    // atomic native execution; no independent registry writes.
+                    let _ = naming.encode()?;
+                    protocol_state_dispatch(state, key, &naming)
+                }
+                ("naming", "register") => {
+                    let input: NamingRegistrationInput = serde_json::from_slice(input)
+                        .map_err(|error| format!("decode naming registration: {error}"))?;
+                    let ownership: OwnershipRegistrySnapshot =
+                        native_state(state, OWNERSHIP_STATE_KEY, &local)?;
+                    let mut naming: NamingRegistrySnapshot =
+                        native_state(state, NAMING_STATE_KEY, &local)?;
+                    let transition = NamingEngine::new(ownership, authorization)
+                        .prepare_registration(
+                            &naming,
+                            RegistrationRequest {
+                                node_id: input.node_id,
+                                node_address: input.node_address,
+                                authorization: NamingAuthorization {
+                                    owner_wallet: transaction.unsigned.sender.clone(),
+                                    nonce: input.nonce,
+                                    proof: VERIFIED_TRANSACTION_PROOF.to_vec(),
+                                },
+                            },
+                        )
+                        .map_err(|error| native_naming_failure(error, &local))?;
+                    naming
+                        .apply_at_height(context.block_height, transition)
+                        .map_err(|error| native_naming_failure(error, &local))?;
+                    protocol_state_dispatch(state, NAMING_STATE_KEY, &naming)
+                }
+                ("naming", "rename") => {
+                    let input: NamingRenameInput = serde_json::from_slice(input)
+                        .map_err(|error| format!("decode naming rename: {error}"))?;
+                    let ownership: OwnershipRegistrySnapshot =
+                        native_state(state, OWNERSHIP_STATE_KEY, &local)?;
+                    let mut naming: NamingRegistrySnapshot =
+                        native_state(state, NAMING_STATE_KEY, &local)?;
+                    let transition = NamingEngine::new(ownership, authorization)
+                        .prepare_rename(
+                            &naming,
+                            RenameRequest {
+                                current_node_id: input.current_node_id,
+                                replacement_node_id: input.replacement_node_id,
+                                node_address: input.node_address,
+                                authorization: NamingAuthorization {
+                                    owner_wallet: transaction.unsigned.sender.clone(),
+                                    nonce: input.nonce,
+                                    proof: VERIFIED_TRANSACTION_PROOF.to_vec(),
+                                },
+                            },
+                        )
+                        .map_err(|error| native_naming_failure(error, &local))?;
+                    naming
+                        .apply_at_height(context.block_height, transition)
+                        .map_err(|error| native_naming_failure(error, &local))?;
+                    protocol_state_dispatch(state, NAMING_STATE_KEY, &naming)
+                }
+                ("rewards", "withdraw") => {
+                    let input: RewardWithdrawalInput = serde_json::from_slice(input)
+                        .map_err(|error| format!("decode reward withdrawal: {error}"))?;
+                    let ownership: OwnershipRegistrySnapshot =
+                        native_state(state, OWNERSHIP_STATE_KEY, &local)?;
+                    let mut rewards: RewardLedgerSnapshot =
+                        native_state(state, REWARD_STATE_KEY, &local)?;
+                    let transition = RewardEngine::new(ownership, authorization)
+                        .prepare_withdrawal(
+                            &rewards,
+                            RewardWithdrawalRequest {
+                                withdrawal_id: input.withdrawal_id,
+                                node_address: input.node_address,
+                                owner_wallet: transaction.unsigned.sender.clone(),
+                                destination_wallet: input.destination_wallet,
+                                amount_nwei: input.amount_nwei,
+                                nonce: input.nonce,
+                                owner_proof: VERIFIED_TRANSACTION_PROOF.to_vec(),
+                            },
+                        )
+                        .map_err(|error| native_reward_failure(error, &local))?;
+                    rewards
+                        .apply_at_height(context.block_height, transition)
+                        .map_err(|error| native_reward_failure(error, &local))?;
+                    protocol_state_dispatch(state, REWARD_STATE_KEY, &rewards)
+                }
+                _ => Err(format!("unsupported native operation {module}.{method}")),
             }
-            ("rewards", "withdraw") => {
-                let input: RewardWithdrawalInput = serde_json::from_slice(input)
-                    .map_err(|error| format!("decode reward withdrawal: {error}"))?;
-                let ownership: OwnershipRegistrySnapshot =
-                    native_state(state, OWNERSHIP_STATE_KEY,&local)?;
-                let mut rewards: RewardLedgerSnapshot =
-                    native_state(state, REWARD_STATE_KEY,&local)?;
-                let transition = RewardEngine::new(ownership, authorization)
-                    .prepare_withdrawal(
-                        &rewards,
-                        RewardWithdrawalRequest {
-                            withdrawal_id: input.withdrawal_id,
-                            node_address: input.node_address,
-                            owner_wallet: transaction.unsigned.sender.clone(),
-                            destination_wallet: input.destination_wallet,
-                            amount_nwei: input.amount_nwei,
-                            nonce: input.nonce,
-                            owner_proof: VERIFIED_TRANSACTION_PROOF.to_vec(),
-                        },
-                    )
-                    .map_err(|error| native_reward_failure(error,&local))?;
-                rewards
-                    .apply_at_height(context.block_height, transition)
-                    .map_err(|error| native_reward_failure(error,&local))?;
-                protocol_state_dispatch(state, REWARD_STATE_KEY, &rewards)
-            }
-            _ => Err(format!("unsupported native operation {module}.{method}")),
-        }
         })();
-        result.map_err(|message|NativeExecutionFailure{message,terminal:!local.load(std::sync::atomic::Ordering::Relaxed)})
+        result.map_err(|message| NativeExecutionFailure {
+            message,
+            terminal: !local.load(std::sync::atomic::Ordering::Relaxed),
+        })
     }
 }
 
@@ -909,27 +1069,76 @@ type CanonicalExecutionDispatcher = CanonicalTransactionDispatcher<
 >;
 
 #[cfg(test)]
-pub(super) fn qualification_governance_transition(configuration:&NodeConfiguration,authority:Arc<VerifiedAuthority>,
-    transaction:SignedTransaction,height:u64,state:&BudgetedWorld)->Result<synergy_execution::BudgetedBlockExecutionOutcome,String>{
-    let network=transaction.unsigned.network.clone();
-    let scheduler=BlockExecutionScheduler::new(GovernanceDispatcher::new(CanonicalGovernanceOperation{authority:authority.clone()}),
-        TransactionPqvmVerifier::from_configuration(configuration)?,FeeSchedule{base_fee_per_gas_nwei:40,
-            collector:synergy_address::derive_object_address("synq",b"governance-fixture-fees").map_err(|error|error.to_string())?})
-        .map_err(|error|error.to_string())?;
-    scheduler.execute_async_at_budgeted(&synergy_block::BlockBody{transactions:vec![transaction]},&network,height,
-        authority.consensus_timestamp_unix(height)?,state,state.as_ref()).map_err(|error|error.to_string())
+pub(super) fn qualification_governance_transition(
+    configuration: &NodeConfiguration,
+    authority: Arc<VerifiedAuthority>,
+    transaction: SignedTransaction,
+    height: u64,
+    state: &BudgetedWorld,
+) -> Result<synergy_execution::BudgetedBlockExecutionOutcome, String> {
+    let network = transaction.unsigned.network.clone();
+    let scheduler = BlockExecutionScheduler::new(
+        GovernanceDispatcher::new(CanonicalGovernanceOperation {
+            authority: authority.clone(),
+        }),
+        TransactionPqvmVerifier::from_configuration(configuration)?,
+        FeeSchedule {
+            base_fee_per_gas_nwei: 40,
+            collector: synergy_address::derive_object_address("synq", b"governance-fixture-fees")
+                .map_err(|error| error.to_string())?,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    scheduler
+        .execute_async_at_budgeted(
+            &synergy_block::BlockBody {
+                transactions: vec![transaction],
+            },
+            &network,
+            height,
+            authority.consensus_timestamp_unix(height)?,
+            state,
+            state.as_ref(),
+        )
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
-pub(super) fn qualification_native_transition(configuration:&NodeConfiguration,authority:Arc<VerifiedAuthority>,
-    transactions:Vec<SignedTransaction>,height:u64,state:&BudgetedWorld)->Result<synergy_execution::BudgetedBlockExecutionOutcome,String>{
-    let network=transactions.first().ok_or("native qualification transactions absent")?.unsigned.network.clone();
-    let scheduler=BlockExecutionScheduler::new(NativeDispatcher::new(CanonicalNativeOperation{authority:authority.clone(),
-        chain_id:configuration.chain_id}),
-        TransactionPqvmVerifier::from_configuration(configuration)?,FeeSchedule{base_fee_per_gas_nwei:40,collector:TESTNET_V3_FEE_COLLECTOR.into()})
-        .map_err(|e|e.to_string())?;
-    scheduler.execute_async_at_budgeted(&BlockBody{transactions},&network,height,
-        authority.consensus_timestamp_unix(height)?,state,state.as_ref()).map_err(|e|e.to_string())
+pub(super) fn qualification_native_transition(
+    configuration: &NodeConfiguration,
+    authority: Arc<VerifiedAuthority>,
+    transactions: Vec<SignedTransaction>,
+    height: u64,
+    state: &BudgetedWorld,
+) -> Result<synergy_execution::BudgetedBlockExecutionOutcome, String> {
+    let network = transactions
+        .first()
+        .ok_or("native qualification transactions absent")?
+        .unsigned
+        .network
+        .clone();
+    let scheduler = BlockExecutionScheduler::new(
+        NativeDispatcher::new(CanonicalNativeOperation {
+            authority: authority.clone(),
+            chain_id: configuration.chain_id,
+        }),
+        TransactionPqvmVerifier::from_configuration(configuration)?,
+        FeeSchedule {
+            base_fee_per_gas_nwei: 40,
+            collector: TESTNET_V3_FEE_COLLECTOR.into(),
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    scheduler
+        .execute_async_at_budgeted(
+            &BlockBody { transactions },
+            &network,
+            height,
+            authority.consensus_timestamp_unix(height)?,
+            state,
+            state.as_ref(),
+        )
+        .map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -966,9 +1175,7 @@ impl TransactionPqvmVerifier {
 
     #[cfg(test)]
     pub(super) fn from_fixture_engine(
-        engine: Arc<
-            std::sync::Mutex<synergy_address_engine::apqe::crypto_engine::CryptoEngine>,
-        >,
+        engine: Arc<std::sync::Mutex<synergy_address_engine::apqe::crypto_engine::CryptoEngine>>,
         chain_id: u64,
     ) -> Result<Self, String> {
         Ok(Self {
@@ -1172,6 +1379,32 @@ pub fn registration(
         },
     )
     .map_err(|error| format!("construct deterministic execution scheduler: {error:?}"))?;
+    let bootstrap_source = super::validator_shadow::bootstrap_source(configuration, &authority)?;
+    if let Some((original, source)) = &bootstrap_source {
+        if state_store
+            .current()
+            .is_none_or(|current| current.finalized_height < source.finalized.height)
+        {
+            let verified =
+                synergy_genesis::validator_admission::VerifiedValidatorAdmissionWorld::verify(
+                    &original.epoch,
+                    &original.registry,
+                    &source.finalized,
+                    &source.witness,
+                    &source.evidence,
+                    original.as_ref(),
+                )?;
+            let snapshot = synergy_state::FinalizedState {
+                finalized_height: source.finalized.height,
+                finalized_block_id: source.finalized.block_id.clone(),
+                state_root: synergy_state::state_root(verified.world())
+                    .map_err(|e| format!("{e:?}"))?,
+            };
+            state_store
+                .commit_verified_snapshot(snapshot, verified.world())
+                .map_err(|e| format!("bootstrap finalized World: {e:?}"))?;
+        }
+    }
     let finalized_height = state_store
         .current()
         .map(|state| state.finalized_height)
@@ -1290,7 +1523,14 @@ pub fn registration(
         .current()
         .map(|record| record.finalized_block_id.clone())
         .unwrap_or_else(|| authority.anchor_parent.block_id().to_string());
-    if processing.is_some() && finalized_height > 0 {
+    if processing.is_some()
+        && finalized_height > 0
+        && !(bootstrap_source.is_some()
+            && candidate_store
+                .get_budgeted(finalized_height)
+                .map_err(|e| e.to_string())?
+                .is_none())
+    {
         let historical = previous_processing.as_ref().filter(|previous| {
             previous.authority.epoch.contains_height(finalized_height)
                 && finalized_height >= previous.transition.finalized().height
@@ -1321,6 +1561,9 @@ pub fn registration(
         }
         candidate.state = Arc::clone(&recovered_state);
         candidates.insert(finalized_height, Arc::new(candidate));
+    }
+    if bootstrap_source.is_some() && !candidates.contains_key(&finalized_height) {
+        ingress.request_processing_bootstrap(finalized_height, &expected_parent)?;
     }
     if processing.is_some() {
         ingress.publish_processing_finalized_world(
@@ -2332,6 +2575,42 @@ impl ExecutionService {
                     })
                     .ok_or("Sync replay lacks exact durable finalized commitment")?;
                 verify_committed_sync_replay(&candidate, &committed)?;
+                if self.processing.is_some()
+                    && candidate.height == self.execution_height
+                    && !self.candidates.contains_key(&candidate.height)
+                {
+                    if let Some(replay) = super::processing_handoff::bootstrap_replay(
+                        &candidate.block_id,
+                        &self.ingress,
+                    )? {
+                        let authority = self.processing_authority_at(candidate.height)?;
+                        let qc = self
+                            .qc_store
+                            .get_verified(
+                                candidate.height,
+                                &authority.epoch,
+                                &authority.registry,
+                                authority,
+                            )
+                            .map_err(|e| e.to_string())?
+                            .ok_or("bootstrap lacks original verified QC")?;
+                        let owner = self
+                            .processing
+                            .as_ref()
+                            .ok_or("bootstrap processing owner absent")?;
+                        let store = self.processing_store_at(&owner.store, candidate.height)?;
+                        store
+                            .lock()
+                            .map_err(|_| "bootstrap processing journal poisoned")?
+                            .try_import_certified(replay.as_bytes(), &qc)
+                            .map_err(|e| e.to_string())?;
+                        self.candidate_store
+                            .put_budgeted(&candidate, &self.state)
+                            .map_err(|e| e.to_string())?;
+                        self.candidates.insert(candidate.height, candidate.clone());
+                    }
+                }
+
                 if self.processing.is_some() {
                     // Restart can leave Sync awaiting an already durable
                     // transition. Re-acknowledge its verified exact commitment
@@ -2634,42 +2913,82 @@ impl ExecutionService {
                 .state_store
                 .as_mut()
                 .ok_or("execution finalized-state store unavailable")?;
-            if candidate.transactions.len() != candidate.receipts.len() || candidate.transactions.iter().zip(&candidate.receipts).any(|(transaction, receipt)|
-                !receipt.validate() || transaction.id().ok().as_ref() != Some(&receipt.transaction_id)) {
+            if candidate.transactions.len() != candidate.receipts.len()
+                || candidate.transactions.iter().zip(&candidate.receipts).any(
+                    |(transaction, receipt)| {
+                        !receipt.validate()
+                            || transaction.id().ok().as_ref() != Some(&receipt.transaction_id)
+                    },
+                )
+            {
                 return Err("finalized receipt differs from its transaction".into());
             }
-            let receipt_metadata_bytes = candidate.transactions.iter().zip(&candidate.receipts).try_fold(0usize, |total, (transaction, receipt)| {
-                transaction.unsigned.sender.len().checked_add(transaction.unsigned.receiver.len())
-                    .and_then(|bytes| bytes.checked_add(receipt.error_code.as_ref().map_or(0, String::len)))
-                    .and_then(|bytes| bytes.checked_mul(4)).and_then(|bytes| bytes.checked_add(2048))
-                    .and_then(|bytes| total.checked_add(bytes)).ok_or("finalized receipt metadata overflow")
-            })?;
-            let _receipt_metadata = match self.ingress.world_budget().reserve(receipt_metadata_bytes) {
-                Ok(permit) => permit,
-                Err(synergy_state::world_resources::WorldResourceError::Capacity { .. }) => break,
-                Err(error) => return Err(format!("reserve finalized receipts: {error:?}")),
-            };
-            let public_receipts = (!candidate.transactions.is_empty()).then(|| synergy_state::FinalizedReceiptBatch {
-                schema_version: 1,
-                finalized: finalized.clone(),
-                parent_block_id: candidate.parent_block_id.clone(),
-                protected_execution_root: record.protected_execution_root.clone(),
-                finality_certificate_id: record.finality_certificate_id.clone(),
-                transactions: candidate.transactions.iter().zip(&candidate.receipts).map(|(transaction, receipt)| synergy_state::FinalizedReceiptEntry {
-                    sender: transaction.unsigned.sender.clone(),
-                    receiver: transaction.unsigned.receiver.clone(),
-                    amount_nwei: transaction.unsigned.amount_nwei,
-                    nonce: transaction.unsigned.nonce,
-                    gas_limit: transaction.unsigned.fee_limit.gas_limit,
-                    max_fee_per_gas_nwei: transaction.unsigned.fee_limit.max_fee_per_gas_nwei,
-                    receipt: synergy_state::FinalizedPublicReceipt {
-                        transaction_id: receipt.transaction_id.0.clone(),
-                        status: match receipt.status { synergy_transaction::ReceiptStatus::Applied => synergy_state::FinalizedReceiptStatus::Applied, synergy_transaction::ReceiptStatus::Reverted => synergy_state::FinalizedReceiptStatus::Reverted },
-                        gas_used: receipt.gas_used,
-                        state_root_after: receipt.state_root_after.clone(),
-                        error_code: receipt.error_code.clone(),
-                    },
-                }).collect(),
+            let receipt_metadata_bytes = candidate
+                .transactions
+                .iter()
+                .zip(&candidate.receipts)
+                .try_fold(0usize, |total, (transaction, receipt)| {
+                    transaction
+                        .unsigned
+                        .sender
+                        .len()
+                        .checked_add(transaction.unsigned.receiver.len())
+                        .and_then(|bytes| {
+                            bytes.checked_add(receipt.error_code.as_ref().map_or(0, String::len))
+                        })
+                        .and_then(|bytes| bytes.checked_mul(4))
+                        .and_then(|bytes| bytes.checked_add(2048))
+                        .and_then(|bytes| total.checked_add(bytes))
+                        .ok_or("finalized receipt metadata overflow")
+                })?;
+            let _receipt_metadata =
+                match self.ingress.world_budget().reserve(receipt_metadata_bytes) {
+                    Ok(permit) => permit,
+                    Err(synergy_state::world_resources::WorldResourceError::Capacity {
+                        ..
+                    }) => break,
+                    Err(error) => return Err(format!("reserve finalized receipts: {error:?}")),
+                };
+            let public_receipts = (!candidate.transactions.is_empty()).then(|| {
+                synergy_state::FinalizedReceiptBatch {
+                    schema_version: 1,
+                    finalized: finalized.clone(),
+                    parent_block_id: candidate.parent_block_id.clone(),
+                    protected_execution_root: record.protected_execution_root.clone(),
+                    finality_certificate_id: record.finality_certificate_id.clone(),
+                    transactions: candidate
+                        .transactions
+                        .iter()
+                        .zip(&candidate.receipts)
+                        .map(
+                            |(transaction, receipt)| synergy_state::FinalizedReceiptEntry {
+                                sender: transaction.unsigned.sender.clone(),
+                                receiver: transaction.unsigned.receiver.clone(),
+                                amount_nwei: transaction.unsigned.amount_nwei,
+                                nonce: transaction.unsigned.nonce,
+                                gas_limit: transaction.unsigned.fee_limit.gas_limit,
+                                max_fee_per_gas_nwei: transaction
+                                    .unsigned
+                                    .fee_limit
+                                    .max_fee_per_gas_nwei,
+                                receipt: synergy_state::FinalizedPublicReceipt {
+                                    transaction_id: receipt.transaction_id.0.clone(),
+                                    status: match receipt.status {
+                                        synergy_transaction::ReceiptStatus::Applied => {
+                                            synergy_state::FinalizedReceiptStatus::Applied
+                                        }
+                                        synergy_transaction::ReceiptStatus::Reverted => {
+                                            synergy_state::FinalizedReceiptStatus::Reverted
+                                        }
+                                    },
+                                    gas_used: receipt.gas_used,
+                                    state_root_after: receipt.state_root_after.clone(),
+                                    error_code: receipt.error_code.clone(),
+                                },
+                            },
+                        )
+                        .collect(),
+                }
             });
             match state_store.commit_verified_world_transition_with_receipts(
                 finalized,
@@ -2854,7 +3173,8 @@ pub(super) fn wallet_naming_execution_fixture(
             transaction_index: 0,
         },
         state,
-    ).map_err(|e|e.to_string())
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

@@ -151,6 +151,8 @@ pub(in crate::services) fn validate_public_wallet_record(
                 (FEE_FREE_ENROLL_COMMIT,FeeFreeEnrollmentOutcome::CommitApplied|FeeFreeEnrollmentOutcome::CommitAlreadyPresent|FeeFreeEnrollmentOutcome::Expired)
                 |(FEE_FREE_ENROLL_REVEAL,FeeFreeEnrollmentOutcome::RevealApplied|FeeFreeEnrollmentOutcome::RevealRejectedCommitUsed|FeeFreeEnrollmentOutcome::Expired))
         {return Err("invalid public fee-free enrollment settlement".into());}
+    } else if validator_bond::validate_public(world,key,bytes,scope.height,scope.network.genesis)? {
+        // Closed typed node bond settlement; no arbitrary protocol disclosure.
     } else if sponsor_settlement::owns_key(key) {
         sponsor_settlement::validate_public_record(scope, key, bytes)?;
     } else if settlement::owns_key(key) {

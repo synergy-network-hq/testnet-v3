@@ -27,3 +27,9 @@ dp-enrollment = {
 ; Digest SHA3-512("AEGIS/ACCOUNT-ENROLL-DP/v1" || DCBOR(dp-enrollment)).
 ; EIP-712 ownership binds SHA3-256(same domain || DCBOR(dp-enrollment)).
 ; Commit remains SHA3-256(DCBOR(dp-enrollment) || bytes32(salt)).
+
+; Closed paid validator bond; transfer and initial fee-free operations remain distinct.
+validator-bond-content = [28683, bstr, [validator-bond-role-d, validator-bond-role-p], null]
+validator-bond-role-d = [1, 1, uint, 0, bstr .size 32, bstr .size 64, bstr .size 4627]
+validator-bond-role-p = [1, 1, uint, 1, bstr .size 32, bstr .size 64, bstr .size 4627]
+; Native intent action=28683, action-payload=canonical ValidatorAdmissionRequest JSON <=131072 bytes.

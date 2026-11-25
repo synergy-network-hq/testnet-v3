@@ -146,6 +146,7 @@ pub(crate) fn qualification_authority_for_network(
         ethereum_genesis: None,
         ethereum_activation_cache:Arc::new(Mutex::new(None)),
         membership_retirement:Arc::new(Mutex::new(None)),
+        validator_admissions:Arc::new(Mutex::new(None)),
         managed_wallet_release: None,
         anchor_parent: SimplifiedFinalityParent::Genesis {
             genesis_hash: "c".repeat(64),
@@ -214,6 +215,7 @@ pub struct VerifiedAuthority {
     ethereum_genesis: Option<EthereumGenesisAuthority>,
     pub(super) ethereum_activation_cache:Arc<Mutex<Option<super::ethereum_activation::CachedActivation>>>,
     pub(super) membership_retirement:Arc<Mutex<Option<Arc<synergy_genesis::membership::VerifiedMembershipRetirement>>>>,
+    pub(super) validator_admissions:Arc<Mutex<Option<Arc<synergy_genesis::validator_admission::NativeMembershipAdmissionSet>>>>,
     managed_wallet_release: Option<Arc<managed_wallet::ManagedWalletRelease>>,
     verifier: PqvmVerifier,
     wallet_verifier: PqvmVerifier,
@@ -240,6 +242,22 @@ thread_local! {
 }
 impl VerifiedAuthority {
     pub(super) fn ethereum_genesis(&self)->Option<&EthereumGenesisAuthority> {self.ethereum_genesis.as_ref()}
+    /// Transport credentials earned by finalized admissions across this authenticated
+    /// lineage, including current shadow candidates. Retired identities are filtered
+    /// by the caller's current-role check, never by deleting historical keys.
+    pub(super) fn earned_transport_records(&self)->Result<Vec<synergy_governance::FinalizedValidatorAdmissionRecord>,String>{
+        let mut records=std::collections::BTreeMap::new();
+        let mut selected=self;
+        loop {
+            if let Some(set)=selected.validator_admissions.lock().map_err(|_|"admission cache poisoned")?.as_ref(){
+                for r in set.records(){
+                    if records.insert(r.validator_id.clone(),r.clone()).is_some_and(|old|old!=*r){return Err("admitted transport lineage rewrote identity".into());}
+                }
+            }
+            let Some(previous)=selected.timeout_predecessor.as_deref() else{break;};selected=previous;
+        }
+        Ok(records.into_values().collect())
+    }
     pub(super) fn authenticated_genesis_hash(&self)->Result<&str,String>{
         let mut origin=self;while let Some(previous)=origin.timeout_predecessor.as_deref(){origin=previous;}
         match &origin.anchor_parent {SimplifiedFinalityParent::Genesis{genesis_hash,..}=>Ok(genesis_hash),
@@ -456,6 +474,7 @@ impl Clone for VerifiedAuthority {
             ethereum_genesis:self.ethereum_genesis.clone(),
             ethereum_activation_cache:self.ethereum_activation_cache.clone(),
             membership_retirement:self.membership_retirement.clone(),
+            validator_admissions:self.validator_admissions.clone(),
             managed_wallet_release: self.managed_wallet_release.clone(),
             verifier: self.verifier.clone(),
             wallet_verifier: self.wallet_verifier.clone(),
@@ -510,6 +529,7 @@ impl VerifiedAuthority {
             assigned_cluster_membership_root: self.epoch.active_validator_set_root.clone(),
             wallet_dispatch: None,
             membership_authorization_root: None,
+            automatic_validator_admission:None,
         }));
         authority
     }
@@ -548,6 +568,17 @@ impl VerifiedAuthority {
             .map(|timestamp_ms| timestamp_ms / 1_000)
     }
 
+    pub(super) fn protected_policy(&self)->Option<&ProtectedEpochPolicy>{self.protected.as_deref()}
+    pub(super) fn automatic_admission_policy(&self)->Result<Option<synergy_governance::AutomaticValidatorAdmissionPolicy>,String>{
+        if let Some(p)=self.protected.as_ref().and_then(|p|p.automatic_validator_admission.as_ref()){p.validate()?;return Ok(Some(p.clone()));}
+        Ok(self.pending_membership_retirement()?.and_then(|r|r.spec().automatic_admission_policy.clone()))
+    }
+    pub(super) fn has_historical_validator(&self,id:&str)->bool{
+        let mut authority=self;loop{if authority.registry.active_validator(id).is_ok(){return true;}let Some(previous)=authority.timeout_predecessor.as_deref()else{return false;};authority=previous;}
+    }
+    pub(super) fn has_historical_consensus_key(&self,id:&str,public:&[u8])->bool{
+        let mut authority=self;loop{if authority.keys.values().any(|k|k.validator.consensus_key_id==id||k.public_key==public){return true;}let Some(previous)=authority.timeout_predecessor.as_deref()else{return false;};authority=previous;}
+    }
     pub fn consensus_binding(&self, validator_id: &str) -> Result<(&str, &[u8]), String> {
         let key = self
             .keys
@@ -897,7 +928,7 @@ pub fn load(configuration: &NodeConfiguration) -> Result<Option<Arc<VerifiedAuth
     {
         return Err("fresh autonomous Genesis cannot be mixed with a historical bootstrap".into());
     }
-    match configuration.consensus.autonomous_epoch_activation.as_ref() {
+    let loaded=match configuration.consensus.autonomous_epoch_activation.as_ref() {
         None => match origin {
             Some(origin) if origin.genesis_autonomous => recovery::successor::load_fresh_autonomous(configuration, origin).map(Some),
             other => Ok(other),
@@ -908,7 +939,8 @@ pub fn load(configuration: &NodeConfiguration) -> Result<Option<Arc<VerifiedAuth
             origin.ok_or("autonomous epochs require their authenticated signed origin")?,
         )
         .map(Some),
-    }
+    }?;
+    loaded.map(|authority|super::validator_shadow::attach(configuration,authority)).transpose()
 }
 
 /// The observer starts its independent proof cursor at signed Genesis. A
@@ -1124,6 +1156,7 @@ fn verify_binding_with_explicit_key(
         ethereum_genesis: None,
         ethereum_activation_cache:Arc::new(Mutex::new(None)),
         membership_retirement:Arc::new(Mutex::new(None)),
+        validator_admissions:Arc::new(Mutex::new(None)),
         managed_wallet_release: None,
         anchor_parent: binding.payload.anchor_parent,
         verifier,

@@ -8,7 +8,7 @@ use synergy_state::world_resources::WorldResourceBudget;
 pub(crate) fn qualify_membership_transition(
     previous: Arc<VerifiedAuthority>,
     signers: &[Arc<dyn synergy_aegis::AegisSigner>],
-) {
+) -> GovernanceExecution {
     let records = previous.registry.active().cloned().collect::<Vec<_>>();
     assert_eq!(records.len(), 5);
     assert!(signers.len() >= 5);
@@ -25,6 +25,7 @@ pub(crate) fn qualify_membership_transition(
         install_not_before_finalized_height: first + 1,
         effective_epoch: previous.epoch.epoch + 1,
         retired_validator_id: records[4].validator_id.clone(),
+        automatic_admission_policy:Some(AutomaticValidatorAdmissionPolicy{schema_version:1,minimum_bond_nwei:synergy_protocol_types::VALIDATOR_MINIMUM_BOND_NWEI.to_string(),initial_frozen_voting_weight:100,maximum_admissions_per_epoch:4,minimum_shadow_finalized_blocks:3}),
     };
     let mutation = spec.mutation().unwrap();
     let mut constitution = Constitution {
@@ -284,6 +285,7 @@ pub(crate) fn qualify_membership_transition(
         closing_material: material.into(),
         next_validators: next_registry.active().cloned().collect(),
         membership_execution: Some(execution.clone()),
+        membership_admissions:None,
     };
     let decoded = serde_json::from_slice(&serde_json::to_vec(&proof).unwrap()).unwrap();
     let next = verify_native_successor(previous.clone(), decoded, None).unwrap();
@@ -314,6 +316,14 @@ pub(crate) fn qualify_membership_transition(
     std::fs::create_dir(&root).unwrap();
     struct Cleanup(std::path::PathBuf);impl Drop for Cleanup{fn drop(&mut self){let _=std::fs::remove_dir_all(&self.0);}}
     let _cleanup=Cleanup(root.clone());
+    let anchor_root=root.join("verified-snapshot-anchor");
+    let anchors=synergy_posy::persistence::AtomicConsensusTransitionStore::new(&anchor_root).unwrap();
+    assert!(anchors.commit_verified_snapshot_anchor(&proof.finalized,&proof.witness,&previous.epoch,&previous.registry,previous.as_ref()).unwrap());
+    assert!(!anchors.commit_verified_snapshot_anchor(&proof.finalized,&proof.witness,&previous.epoch,&previous.registry,previous.as_ref()).unwrap());
+    let mut wrong=proof.finalized.clone();wrong.block_id="f1".repeat(32);
+    assert!(anchors.commit_verified_snapshot_anchor(&wrong,&proof.witness,&previous.epoch,&previous.registry,previous.as_ref()).is_err());
+    drop(anchors);
+    assert_eq!(synergy_posy::persistence::FinalityStore::new(&anchor_root).unwrap().get(proof.finalized.height).unwrap(),Some(proof.finalized.clone()));
     let ingress=crate::services::ingress::AuthenticatedIngress::with_world_budget(budget.clone());
     let initial=previous.initial_world_state_budgeted(&budget).unwrap();
     ingress.submit_finality(FinalizedBlockRecord{height:first,block_id:"31".repeat(32),finality_certificate_id:"32".repeat(32),protected_execution_root:"33".repeat(32)},vec![1]).unwrap();
@@ -353,4 +363,5 @@ pub(crate) fn qualify_membership_transition(
     missing.membership_execution = None;
     assert!(verify_native_successor(previous, missing, None).is_err());
     eprintln!("Real native ML65 old4/5 retirement authorization + three-QC successor/new3/4, exact KEM projection, source/restart decoding and stable processing namespace passed");
+    execution
 }

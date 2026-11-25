@@ -151,6 +151,8 @@ pub fn registration_with_authority_transition(
         })
         .transpose()?;
     let consensus = &configuration.consensus;
+    let shadow_source=super::validator_shadow::source(configuration,&authority)?;
+    let selected_mode=if shadow_source.is_some(){ConsensusMode::Observe}else{consensus.mode};
     if consensus.mode == ConsensusMode::Disabled {
         return Err("PoSy service cannot be registered when consensus is disabled".into());
     }
@@ -208,7 +210,7 @@ pub fn registration_with_authority_transition(
         .map_err(|error| format!("open PoSy verified-timeout store: {error:?}"))?;
     let sign_once = SignOnceJournal::load(root.join("sign-once.json"))
         .map_err(|error| format!("load PoSy sign-once journal: {error:?}"))?;
-    let last_finalized = replay_verified_safety_state_from_floor(
+    let mut last_finalized = replay_verified_safety_state_from_floor(
         &mut state_machine,
         &authority,
         &certificates,
@@ -216,6 +218,14 @@ pub fn registration_with_authority_transition(
         &finality,
         Some(sign_once.finalized_floor()),
     )?;
+    if let Some(source)=shadow_source.as_ref(){
+        if last_finalized.is_none(){
+            state_machine.seed_committed_lease_boundary(source.finalized.clone(),source.witness.clone(),authority.as_ref()).map_err(|e|format!("seed verified shadow lease snapshot: {e}"))?;
+            for tc in &source.witness.timeout_certificates{timeout_certificates.put_verified(tc,&authority.epoch,&authority.registry,authority.as_ref()).map_err(|e|e.to_string())?;}
+            atomic_transitions.commit_verified_snapshot_anchor(&source.finalized,&source.witness,&authority.epoch,&authority.registry,authority.as_ref()).map_err(|e|e.to_string())?;
+            last_finalized=replay_verified_safety_state_into(&mut state_machine,&authority,&certificates,&timeout_certificates,&finality)?;
+        }
+    }
     if let Some(record) = last_finalized.as_ref() {
         if let Some(witness) = state_machine.finality_witness(record.height) {
             ingress.submit_finality(
@@ -245,7 +255,7 @@ pub fn registration_with_authority_transition(
     delivery
         .activate(state_machine.active_slot())
         .map_err(|e| e.to_string())?;
-    let (mut local_signer,governance_owner) = match consensus.mode {
+    let (mut local_signer,governance_owner) = match selected_mode {
         ConsensusMode::ValidateAndVote => {
             let signer=load_local_signer(configuration,&authority)?;
             let governance=super::governance_admin::GovernanceApprovalOwner::new(
@@ -329,7 +339,7 @@ pub fn registration_with_authority_transition(
                         signal: transition_signal,
                     }
                 }),
-                mode: consensus.mode,
+                mode: selected_mode,
                 preparation,
                 authority_binding,
                 authority,

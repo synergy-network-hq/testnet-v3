@@ -144,22 +144,13 @@ pub(super) struct TransferRoleProof<'a> {
     pub signature: &'a [u8],
 }
 
-pub(super) fn decode_transfer_content(bytes: &[u8]) -> Result<TransferContent<'_>, &'static str> {
-    let mut reader = Reader(bytes);
-    reader.byte(0x84)?;
-    if reader.uint()? != u64::from(TRANSFER) {
-        return Err("INVALID_PROTECTED_TRANSFER_CONTENT_ACTION");
-    }
-    // The nested native body contains a 60-byte bounded action payload and
-    // fixed-size account, nonce, network and fee fields.
-    let intent = reader.bytes(1, 512)?;
-    reader.byte(0x82)?;
-    let proofs = [reader.transfer_role(0)?, reader.transfer_role(1)?];
-    reader.byte(0xf6)?; // A transfer has no replacement-key proof.
-    if !reader.0.is_empty() {
-        return Err("NONCANONICAL_PROTECTED_PAYLOAD");
-    }
-    Ok(TransferContent { intent, proofs })
+pub(super) fn decode_transfer_content(bytes:&[u8])->Result<TransferContent<'_>,&'static str>{decode_paid_content(bytes,TRANSFER,512)}
+pub(super) fn decode_validator_bond_content(bytes:&[u8])->Result<TransferContent<'_>,&'static str>{decode_paid_content(bytes,synergy_governance::PROTECTED_VALIDATOR_BOND_ACTION,128*1024+512)}
+pub(super) fn is_validator_bond_content(bytes:&[u8])->bool{let mut r=Reader(bytes);r.byte(0x84).is_ok()&&r.uint()==Ok(u64::from(synergy_governance::PROTECTED_VALIDATOR_BOND_ACTION))}
+fn decode_paid_content(bytes:&[u8],action:u16,maximum:usize)->Result<TransferContent<'_>,&'static str>{
+ let mut reader=Reader(bytes);reader.byte(0x84)?;if reader.uint()?!=u64::from(action){return Err("INVALID_PROTECTED_PAID_CONTENT_ACTION");}
+ let intent=reader.bytes(1,maximum)?;reader.byte(0x82)?;let proofs=[reader.transfer_role(0)?,reader.transfer_role(1)?];reader.byte(0xf6)?;
+ if !reader.0.is_empty(){return Err("NONCANONICAL_PROTECTED_PAYLOAD");}Ok(TransferContent{intent,proofs})
 }
 
 pub(super) struct SponsorIntent<'a> {
@@ -280,6 +271,10 @@ impl<'a> Reader<'a> {
                     return Err("NONCANONICAL_PROTECTED_PAYLOAD");
                 }
                 n
+            }
+            0x5a => {
+                let n=usize::try_from(u32::from_be_bytes(self.take(4)?.try_into().expect("fixed size"))).map_err(|_|"PROTECTED_PAYLOAD_SIZE")?;
+                if n<65536{return Err("NONCANONICAL_PROTECTED_PAYLOAD");}n
             }
             _ => return Err("NONCANONICAL_PROTECTED_PAYLOAD"),
         };

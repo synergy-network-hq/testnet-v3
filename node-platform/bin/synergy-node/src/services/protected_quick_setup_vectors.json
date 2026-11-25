@@ -27,5 +27,20 @@
     "initial_synid_fee_nwei": "0",
     "financial_nonce_consumed": false,
     "payer_required": false
+  },
+  "validator_bond": {
+    "action_id": 28683,
+    "outer_cbor_prefix_hex": "8419700b",
+    "inner_payload": "canonical ValidatorAdmissionRequest JSON",
+    "negative_boundaries": [
+      "outer/inner action mismatch",
+      "foreign owner",
+      "forged node possession",
+      "stale epoch",
+      "duplicate identity",
+      "insufficient bond",
+      "nonce replay"
+    ],
+    "fee_free": false
   }
 }

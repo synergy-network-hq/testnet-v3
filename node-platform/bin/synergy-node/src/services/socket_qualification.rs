@@ -4253,6 +4253,9 @@ fn processing_async_native_order_reveal_ready_and_execution_use_existing_posy_pr
         &shares,
         &completion.record,
     );
+    let mut handoff_progress=ProcessingProgressEvidence::from_vertex(&vertex);handoff_progress.availability=Some(availability.clone());
+    crate::services::processing_handoff::qualify_genesis(&context,&vertex.admission,&handoff_progress,&evidence,&third,&authority);
+    crate::services::processing_handoff::qualify_bootstrap(&first,[qc1.clone(),qc2.clone(),qc3.clone()],&vc1,&authority,&prepared.root);
     let original_pending = fs::read(pending_root.join("slots/0000.json")).unwrap();
     let mut progress = ProcessingProgressEvidence::from_vertex(&vertex);
     let full_pressure = budget.reserve(budget.available()).unwrap();
@@ -10496,6 +10499,8 @@ fn prepare_socket_fixture_with_protocol(
         assigned_cluster_id: 0,
         assigned_cluster_membership_root: preliminary.active_validator_set_root,
         wallet_dispatch: None,
+        membership_authorization_root: None,
+        automatic_validator_admission:None,
     };
     let mut payload = AuthorityPayload {
         version: 1,

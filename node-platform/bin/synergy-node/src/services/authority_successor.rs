@@ -37,14 +37,16 @@ struct Proposal {
 /// structure never activates a successor or authorizes peer membership.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DerivedEpochProof {
-    authorization: EpochTransitionAuthorization,
-    finalized: FinalizedBlockRecord,
-    witness: synergy_posy::FinalitySyncWitness,
-    closing_material: synergy_etdag::execution::CandidateProtectedMaterial,
-    next_validators: Vec<ValidatorRecord>,
+pub(crate) struct DerivedEpochProof {
+    pub(crate) authorization: EpochTransitionAuthorization,
+    pub(crate) finalized: FinalizedBlockRecord,
+    pub(crate) witness: synergy_posy::FinalitySyncWitness,
+    pub(crate) closing_material: synergy_etdag::execution::CandidateProtectedMaterial,
+    pub(crate) next_validators: Vec<ValidatorRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    membership_execution: Option<synergy_governance::GovernanceExecution>,
+    pub(crate) membership_execution: Option<synergy_governance::GovernanceExecution>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub(crate) membership_admissions:Option<synergy_genesis::validator_admission::MembershipAdmissionEvidence>,
 }
 
 #[derive(Deserialize)]
@@ -61,6 +63,7 @@ struct VerifiedDerivedEpoch {
     registry: FrozenValidatorRegistry,
     policy: ProtectedEpochPolicy,
     membership:Option<Arc<synergy_genesis::membership::VerifiedMembershipRetirement>>,
+    admissions:Option<Arc<synergy_genesis::validator_admission::VerifiedMembershipAdmissions>>,
 }
 
 /// A one-time protocol activation on an already certified chain. Its exact
@@ -82,13 +85,16 @@ fn native_autonomous_authority(
     verified: VerifiedDerivedEpoch,
     closure: VerifiedAutonomousClosure,
 ) -> Arc<VerifiedAuthority> {
-    let previous=if let Some(membership)=verified.membership.as_ref() {
+    let previous=if verified.membership.is_some()||verified.admissions.is_some() {
         let mut historical=previous.as_ref().clone();
-        historical.membership_retirement=Arc::new(std::sync::Mutex::new(Some(membership.clone())));
+        if let Some(membership)=verified.membership.as_ref(){historical.membership_retirement=Arc::new(std::sync::Mutex::new(Some(membership.clone())));}
+        if let Some(admissions)=verified.admissions.as_ref(){historical.validator_admissions=Arc::new(std::sync::Mutex::new(Some(Arc::new(admissions.native_projection().clone()))));}
         Arc::new(historical)
     }else{previous};
     let mut native = previous.as_ref().clone();
     native.membership_retirement=Arc::new(std::sync::Mutex::new(None));
+    native.validator_admissions=Arc::new(std::sync::Mutex::new(None));
+    if let Some(admissions)=verified.admissions.as_ref(){for key in admissions.admitted_validators(){native.keys.insert(key.record.validator_id.clone(),ConsensusKey{validator:key.record,algorithm:key.algorithm,public_key:key.public_key});}}
     native.registry = verified.registry;
     // Historical authorities retain the old keys for old votes/encrypted work.
     // The new frozen owner must not present a retired key as current authority.
@@ -285,7 +291,7 @@ fn verify_autonomous_bootstrap(
             parent,
             registry,
             policy,
-            membership:None,
+            membership:None,admissions:None,
         },
         VerifiedAutonomousClosure {
             authorization: subject,
@@ -330,6 +336,9 @@ fn verify_native_successor(
         .authorization
         .subject_root_v2()
         .map_err(|e| e.to_string())?;
+    if let Some(admissions)=verified.admissions.as_ref(){
+        if admissions.admitted_validators().iter().any(|v|previous.has_historical_validator(&v.record.validator_id)||previous.has_historical_consensus_key(&v.record.consensus_key_id,&v.public_key)){return Err("admission reused historical identity or consensus key".into());}
+    }
     Ok(native_autonomous_authority(
         previous,
         verified,
@@ -365,8 +374,9 @@ pub(crate) fn persist_native_successor(
         .as_ref()
         .ok_or("active processing policy missing")?;
     let membership=current.pending_membership_retirement()?;
+    let admissions=current.pending_validator_admissions()?;
     let (authorization, _) = governed_successor_subject(
-        &current.epoch, &current.registry, policy, current.pending_wallet_release(&current.epoch),membership.as_deref(),
+        &current.epoch, &current.registry, policy, current.pending_wallet_release(&current.epoch),membership.as_deref(),admissions.as_deref(),
     )?;
     let epoch = authorization.next_epoch;
     let proof = DerivedEpochProof {
@@ -374,8 +384,9 @@ pub(crate) fn persist_native_successor(
         finalized,
         witness,
         closing_material: candidate.protected_material.clone(),
-        next_validators: membership.as_ref().map_or_else(||current.registry.active().cloned().collect(),|m|m.next_registry().active().cloned().collect()),
+        next_validators: if let Some(a)=admissions.as_ref(){a.prepare_successor(&current.epoch,policy,&current.registry,membership.as_deref(),current.pending_wallet_release(&current.epoch))?.2.active().cloned().collect()}else{membership.as_ref().map_or_else(||current.registry.active().cloned().collect(),|m|m.next_registry().active().cloned().collect())},
         membership_execution:membership.as_ref().map(|m|m.execution().clone()),
+        membership_admissions:if admissions.is_some(){Some(synergy_genesis::validator_admission::MembershipAdmissionEvidence{closing_block_commitment:serde_json::to_vec(&(candidate.height,&candidate.parent_block_id,&candidate.protected_execution_root,&candidate.state_root,&candidate.transactions,&candidate.receipts)).map_err(|e|e.to_string())?,closing_world:serde_json::to_vec(candidate.state.as_ref().as_ref()).map_err(|e|e.to_string())?})}else{None},
     };
     let bytes = serde_json::to_vec(&proof).map_err(|e| e.to_string())?;
     let expected = verify_native_successor(Arc::clone(current), proof, None)?;
@@ -403,12 +414,14 @@ struct DerivedEpochVerifier<'a> {
     context: SimplifiedEpochContext,
     registry: FrozenValidatorRegistry,
     policy: Arc<ProtectedEpochPolicy>,
+    signature_authority:VerifiedAuthority,
 }
 
 impl<'a> DerivedEpochVerifier<'a> {
     fn new(origin: &'a VerifiedAuthority) -> Result<Self, String> {
         Ok(Self {
             origin,
+            signature_authority:origin.clone(),
             context: origin.epoch.clone(),
             registry: origin.registry.clone(),
             policy: origin
@@ -428,6 +441,9 @@ impl<'a> DerivedEpochVerifier<'a> {
             self.origin.pending_wallet_release(&self.context),
             crate::services::membership_retirement::genesis(self.origin)?,
         )?;
+        let mut keys=self.signature_authority.keys.clone();
+        if let Some(admissions)=verified.admissions.as_ref(){for new in admissions.admitted_validators(){if keys.contains_key(&new.record.validator_id)||keys.values().any(|k|k.validator.consensus_key_id==new.record.consensus_key_id||k.public_key==new.public_key){return Err("admission reused historical key or identity".into());}keys.insert(new.record.validator_id.clone(),ConsensusKey{validator:new.record,algorithm:new.algorithm,public_key:new.public_key});}}
+        self.signature_authority.keys=keys;
         self.context = verified.context;
         self.registry = verified.registry;
         self.policy = Arc::new(verified.policy);
@@ -445,7 +461,7 @@ impl ConsensusSignatureVerifier for DerivedEpochVerifier<'_> {
         epoch: u64,
         signature: &[u8],
     ) -> PosyResult<()> {
-        self.origin.verify_consensus_signature_in_epoch(
+        self.signature_authority.verify_consensus_signature_in_epoch(
             domain,
             payload,
             validator,
@@ -476,7 +492,7 @@ impl synergy_governance::VoteVerifier for DerivedEpochVerifier<'_> {
     fn verify(&self,vote:&synergy_governance::GovernanceVote)->Result<(),String>{
         vote.validate_shape()?;
         let frozen=self.registry.active_validator(&vote.authority_id).map_err(|e|e.to_string())?;
-        let key=self.origin.keys.get(&vote.authority_id).ok_or("membership voter public key absent")?;
+        let key=self.signature_authority.keys.get(&vote.authority_id).ok_or("membership voter public key absent")?;
         if frozen.consensus_key_id!=vote.key_id||key.algorithm!=SignatureAlgorithm::MlDsa65
             ||key.validator.consensus_key_id!=vote.key_id{return Err("membership vote differs from original frozen key".into());}
         self.origin.verifier.verify(&SigningContext{domain:"SYNERGY-GOVERNANCE-VOTE-V1".into(),chain_id:self.context.chain_id,
@@ -520,11 +536,11 @@ fn verify_derived_epoch_in_scope(
     let membership=proof.membership_execution.as_ref().map(|execution|
         synergy_genesis::membership::VerifiedMembershipRetirement::verify(execution,genesis_hash,previous,previous_registry,verifier)
             .map(Arc::new)).transpose()?;
-    if membership.as_ref().is_some_and(|m|m.next_registry()!=&next_registry){
+    if proof.membership_admissions.is_none() && membership.as_ref().is_some_and(|m|m.next_registry()!=&next_registry){
         return Err("successor registry differs from authenticated finalized retirement".into());
     }
-    let (expected, next_policy) =
-        governed_successor_subject(previous, previous_registry, policy, wallet_release,membership.as_deref())?;
+    let admissions=proof.membership_admissions.as_ref().map(|evidence|synergy_genesis::validator_admission::VerifiedMembershipAdmissions::verify(previous,previous_registry,policy,genesis_hash,&proof.finalized,&proof.witness,evidence,membership.as_deref(),verifier).map(Arc::new)).transpose()?;
+    let (expected,next_policy)=if let Some(admissions)=admissions.as_ref(){let(auth,p,r)=admissions.prepare_successor(previous,policy,previous_registry,membership.as_deref(),wallet_release)?;if r!=next_registry{return Err("admitted registry differs from exact finalized eligibility".into());}(auth,p)}else{governed_successor_subject(previous,previous_registry,policy,wallet_release,membership.as_deref(),None)?};
     if proof.authorization != expected {
         return Err("epoch subject differs from independently derived rollover policy".into());
     }
@@ -556,6 +572,7 @@ fn verify_derived_epoch_in_scope(
         registry: next_registry,
         policy: next_policy,
         membership,
+        admissions,
     })
 }
 
@@ -633,7 +650,9 @@ fn governed_successor_subject(
     policy: &ProtectedEpochPolicy,
     wallet_release: Option<&VerifiedWalletDispatchRelease>,
     membership:Option<&synergy_genesis::membership::VerifiedMembershipRetirement>,
+    admissions:Option<&synergy_genesis::validator_admission::NativeMembershipAdmissionSet>,
 ) -> Result<(EpochTransitionAuthorization, ProtectedEpochPolicy), String> {
+    if let Some(admissions)=admissions {let(subject,p,_) = admissions.prepare_successor(previous,policy,previous_registry,membership,wallet_release)?;return Ok((subject,p));}
     if let Some(retirement)=membership {
         let (subject,policy,_)=retirement.prepare_successor_with_wallet(previous,policy,previous_registry,wallet_release)?;
         return Ok((subject,policy));
@@ -664,6 +683,10 @@ fn unchanged_successor_subject(
 }
 
 impl VerifiedAuthority {
+    pub(crate) fn pending_validator_admissions(&self)->Result<Option<Arc<synergy_genesis::validator_admission::NativeMembershipAdmissionSet>>,String>{
+        let root=self.epoch.root().map_err(|e|e.to_string())?;
+        self.validator_admissions.lock().map_err(|_|"validator admission cache poisoned".into()).map(|value|value.as_ref().filter(|v|v.records().first().is_some_and(|r|r.frozen_epoch_context_root==root)).cloned())
+    }
     pub(crate) fn pending_membership_retirement(&self)->Result<Option<Arc<synergy_genesis::membership::VerifiedMembershipRetirement>>,String>{
         let root=self.epoch.root().map_err(|e|e.to_string())?;
         Ok(self.membership_retirement.lock().map_err(|_|"membership cache poisoned")?.as_ref()
@@ -680,8 +703,9 @@ impl VerifiedAuthority {
             .as_ref()
             .ok_or("active processing policy missing")?;
         let membership=self.pending_membership_retirement()?;
+        let admissions=self.pending_validator_admissions()?;
         let (subject, _) = governed_successor_subject(
-            &self.epoch, &self.registry, policy, self.pending_wallet_release(&self.epoch),membership.as_deref(),
+            &self.epoch, &self.registry, policy, self.pending_wallet_release(&self.epoch),membership.as_deref(),admissions.as_deref(),
         )?;
         subject
             .subject_root_v2()
@@ -1840,7 +1864,7 @@ fn signed_derived_test_proof(
             },
             closing_material: closing_material.into(),
             next_validators,
-            membership_execution:None,
+            membership_execution:None,membership_admissions:None,
         },
         closing_candidate,
     )

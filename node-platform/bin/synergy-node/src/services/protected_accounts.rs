@@ -22,6 +22,9 @@ pub(super) mod processing_execution;
 mod policy_variant;
 #[path = "protected_transfer_admission.rs"]
 mod transfer_admission;
+#[path="protected_validator_bond.rs"]
+mod validator_bond;
+#[cfg(test)]pub(crate) use validator_bond::qualify_real_dp_bond;
 #[path = "protected_sponsored_admission.rs"]
 mod sponsored_admission;
 #[path = "protected_fee_free_enrollment.rs"]
@@ -2369,6 +2372,7 @@ mod tests {
                 use_native.then_some(etdag_candidate::NativeSourceTerms {
                     source: snapshot,
                     recovery: super::processing_execution::ProtectedRecoveryTerms {
+                        validator_authority:None,
                         provider: &provider,
                         sponsor_verifier: Some(&verifier),
                         fee_schedule: &schedule,
@@ -2575,6 +2579,7 @@ mod tests {
         let (ordered, ordered_result) = first_opening
             .execute_ordered(
                 CandidateDispatch {
+                    validator_authority:None,
                     source: &snapshot,
                     provider: &provider,
                     sponsor_verifier: Some(&verifier),
@@ -2864,6 +2869,7 @@ mod tests {
         let (ordered, ordered_result) = reveal_opening
             .execute_ordered(
                 CandidateDispatch {
+                    validator_authority:None,
                     source: &snapshot,
                     provider: &provider,
                     sponsor_verifier: Some(&verifier),
@@ -3892,6 +3898,7 @@ mod tests {
                 use_native.then_some(etdag_candidate::NativeSourceTerms {
                     source: snapshot,
                     recovery: super::processing_execution::ProtectedRecoveryTerms {
+                        validator_authority:None,
                         provider: &provider,
                         sponsor_verifier: None,
                         fee_schedule: &schedule,
@@ -4076,6 +4083,7 @@ mod tests {
             ..inclusion
         };
         let dispatch = |admission| CandidateDispatch {
+                    validator_authority:None,
             source: &snapshot,
             provider: &provider,
             sponsor_verifier: None,

@@ -183,7 +183,9 @@ fn real_apqe_governance_evm_scope_native_settlement_history_and_restart() {
         .collect::<Vec<_>>();
     let mut membership_signers=signers.clone();
     membership_signers.push(posy::qualification_protocol_signer(&prepared.configurations[4],&authority).unwrap());
-    crate::services::authority::recovery::successor::qualify_membership_transition(authority.clone(), &membership_signers);
+    crate::services::transport_endpoint::qualify(configuration,authority.clone(),&membership_signers);
+    let membership_execution=crate::services::authority::recovery::successor::qualify_membership_transition(authority.clone(), &membership_signers);
+    qualify_automatic_admissions(&prepared.configurations,authority.clone(),&membership_signers,membership_execution,&transaction,&account_secret);
     let budget = WorldResourceBudget::new(512 * 1024 * 1024);
     let initial = authority.initial_world_state_budgeted(&budget).unwrap();
     // Real native dispatcher and actual APQE authorization. A registration
@@ -208,10 +210,11 @@ fn real_apqe_governance_evm_scope_native_settlement_history_and_restart() {
             sign(transaction.clone(),1,50000,TransactionAction::Native{module:"unassigned-module".into(),method:"rejected".into(),input:vec![]},40),
             sign(transaction.clone(),2,21000,TransactionAction::Transfer,40),
             sign(transaction.clone(),3,21000,TransactionAction::Transfer,1),
-            sign(transaction.clone(),4,100000,registration,40)];
+            sign(transaction.clone(),4,100000,registration,40),
+            sign(transaction.clone(),5,50000,TransactionAction::Native{module:"naming".into(),method:"register_wallet".into(),input:br#"{"syn_id":"retired-name.syn"}"#.to_vec()},40)];
         let sender=transaction.unsigned.sender.clone();let receiver=transaction.unsigned.receiver.clone();
         let outcome=crate::services::execution::qualification_native_transition(configuration,authority.clone(),txs.clone(),5,&initial).unwrap();
-        assert_eq!(outcome.receipts.len(),5);
+        assert_eq!(outcome.receipts.len(),6);
         assert_eq!(outcome.receipts[0].error_code.as_deref(),Some("async_out_of_gas_v1"));
         assert_eq!(outcome.receipts[0].gas_used,1);
         assert_eq!(outcome.receipts[1].error_code.as_deref(),Some("native_execution_rejected_v1"));
@@ -220,7 +223,9 @@ fn real_apqe_governance_evm_scope_native_settlement_history_and_restart() {
         assert_eq!(outcome.receipts[3].error_code.as_deref(),Some("async_fee_cap_below_base_v1"));
         assert_eq!(outcome.receipts[3].gas_used,0);
         assert_eq!(outcome.receipts[4].status,ReceiptStatus::Applied);
-        assert_eq!(outcome.state.accounts[&sender].nonce,5);
+        assert_eq!(outcome.receipts[5].error_code.as_deref(),Some("legacy_wallet_registration_retired_v1"));
+        assert_eq!(outcome.receipts[5].gas_used,0);
+        assert_eq!(outcome.state.accounts[&sender].nonce,6);
         assert_eq!(outcome.state.accounts[&receiver].balance_nwei,7);
         assert_eq!(initial.accounts[&sender].balance_nwei-outcome.state.accounts[&sender].balance_nwei,
             outcome.total_fees_nwei+7);
@@ -915,4 +920,101 @@ pub(super) fn qualify_final_world_pages(configs: &[NodeConfiguration]) {
             proof["total_bytes"]
         );
     }
+}
+
+fn membership_qcs(authority:&authority::VerifiedAuthority,signers:&BTreeMap<String,Arc<dyn AegisSigner>>,height:u64,block_id:&str,protected:&str)
+ ->(synergy_posy::FinalizedBlockRecord,synergy_posy::FinalitySyncWitness){
+    let mut records=authority.registry.active().collect::<Vec<_>>();records.sort_by(|a,b|b.frozen_voting_weight.cmp(&a.frozen_voting_weight).then(a.validator_id.cmp(&b.validator_id)));records.truncate(authority.registry.active_count()*2/3+1);
+    let mut parent=synergy_posy::SimplifiedFinalityParent::QuorumCertificate{height:height-1,block_id:"81".repeat(32),qc_id:"82".repeat(32)};
+    let mut finality=synergy_posy::ThreeQcFinality::default();let mut qcs=vec![];
+    for h in height..=height+2 {
+        let votes=records.iter().map(|r|{
+            let mut vote=synergy_posy::BlockVote{context:synergy_posy::ConsensusObjectContext::for_height(&authority.epoch,h,0).unwrap(),
+                block_id:if h==height{block_id.into()}else{format!("{h:064x}")},parent_block_id:parent.block_id().into(),parent:parent.clone(),takeover_tc_id:None,
+                protected_execution_root:if h==height{protected.into()}else{"83".repeat(32)},validator_id:r.validator_id.clone(),key_id:r.consensus_key_id.clone(),signature:vec![]};
+            vote.signature=signers[&r.consensus_key_id].sign(&KeyId::new(r.consensus_key_id.clone()).unwrap(),
+                &SigningContext{domain:"SYNERGY-POSY-BLOCK-VOTE-V1".into(),chain_id:authority.epoch.chain_id,epoch:Some(authority.epoch.epoch),height:Some(h)},
+                &synergy_posy::block_vote_signing_bytes(&vote).unwrap()).unwrap().bytes;vote
+        }).collect();
+        let qc=synergy_posy::SimplifiedQuorumCertificate::from_votes(votes).unwrap();qc.verify(&authority.epoch,&authority.registry,authority).unwrap();
+        finality.accept(qc.clone()).unwrap();parent=synergy_posy::SimplifiedFinalityParent::QuorumCertificate{height:h,block_id:qc.block_id.clone(),qc_id:qc.id().unwrap()};qcs.push(qc);
+    }
+    (finality.last_finalized().unwrap().clone(),synergy_posy::FinalitySyncWitness{quorum_certificates:qcs.try_into().unwrap(),timeout_certificates:vec![]})
+}
+fn qualify_automatic_admissions(configurations:&[synergy_config::NodeConfiguration],previous:Arc<authority::VerifiedAuthority>,signers:&[Arc<dyn AegisSigner>],retirement_execution:GovernanceExecution,template:&SignedTransaction,account_secret:&[u8]){
+    use synergy_governance::{ValidatorAdmissionSpec,ValidatorAdmissionRequest,FinalizedValidatorAdmissionRecord};
+    use synergy_genesis::validator_admission::{MembershipAdmissionEvidence,NativeMembershipAdmissionSet,VerifiedMembershipAdmissions};
+    let configuration=&configurations[0];
+    let mut signer_map=signers.iter().enumerate().map(|(i,s)|(format!("consensus-{i}"),s.clone())).collect::<BTreeMap<_,_>>();
+    let mut admitted_signers=BTreeMap::<String,Arc<dyn AegisSigner>>::new();
+    let genesis=previous.authenticated_genesis_hash().unwrap().to_owned();
+    let retirement=synergy_genesis::membership::VerifiedMembershipRetirement::verify(&retirement_execution,&genesis,&previous.epoch,&previous.registry,previous.as_ref()).unwrap();
+    let mut selected=previous.as_ref().clone();selected.membership_retirement=Arc::new(std::sync::Mutex::new(Some(Arc::new(retirement.clone()))));selected.validator_admissions=Arc::new(std::sync::Mutex::new(None));let mut selected=Arc::new(selected);
+    let budget=WorldResourceBudget::new(64*1024*1024);let mut raw=previous.protected_policy().unwrap().initial_world_state.clone();
+    raw.accounts.get_mut(&template.unsigned.sender).unwrap().balance_nwei=synergy_protocol_types::VALIDATOR_MINIMUM_BOND_NWEI*6;
+    let install=retirement.spec().install_not_before_finalized_height;
+    crate::services::membership_retirement::dispatch(&previous,&retirement_execution,install,&raw).unwrap().apply(&mut raw).unwrap();
+    let mut height=install+6;let source_height=install+2;
+    let (mut source,mut witness)=membership_qcs(&selected,&signer_map,source_height,&"84".repeat(32),&"85".repeat(32));
+    // Exact struct field order is part of the native public authoring boundary.
+    let mut sync=synergy_genesis::validator_admission::encode_validator_admission_sync(&source,&witness).unwrap();
+    let _=sync.len();
+    let engine=crate::services::apqe_provider::load(configuration).unwrap();
+    let mut world=synergy_state::world_resources::BudgetedWorld::try_clone_world(&raw,&budget).unwrap();let mut first_record=None;
+    for index in 0..5u64 {
+        let (root,consensus,transport,kem)={let e=engine.lock().unwrap();(e.generate_keypair(synergy_address_engine::types::Algorithm::FnDsa1024).unwrap(),e.generate_keypair(synergy_address_engine::types::Algorithm::MlDsa65).unwrap(),e.generate_keypair(synergy_address_engine::types::Algorithm::MlDsa65).unwrap(),e.generate_keypair(synergy_address_engine::types::Algorithm::MlKem1024).unwrap())};
+        let validator_id=synergy_address::generate_validator_address(&lower_hex(&root.public_key),1).unwrap();
+        let spec=ValidatorAdmissionSpec{schema_version:1,chain_id:selected.epoch.chain_id,network_id:selected.epoch.network_id.clone(),genesis_hash:genesis.clone(),frozen_epoch:selected.epoch.epoch,frozen_epoch_context_root:selected.epoch.root().unwrap(),effective_epoch:selected.epoch.epoch+1,
+            owner_wallet:template.unsigned.sender.clone(),validator_id:validator_id.clone(),identity_root_public_key:root.public_key.clone(),consensus_key_id:format!("automatic-consensus-{index}"),consensus_public_key:consensus.public_key.clone(),transport_key_id:format!("automatic-transport-{index}"),transport_public_key:transport.public_key.clone(),ingress_kem_key_id:format!("automatic-kem-{index}"),ingress_kem_public_key:kem.public_key.clone(),sync_finalized_height:source.height,sync_finalized_block_id:source.block_id.clone(),dial_address:format!("10.69.240.{}:5622",index+1),enrollment_sha256:format!("{index:064x}")};
+        let message=spec.signing_bytes().unwrap();
+        let mut request=ValidatorAdmissionRequest{spec,identity_root_signature:vec![],consensus_possession_signature:vec![],transport_possession_signature:vec![],sync_finality_document:sync.clone()};
+        {let e=engine.lock().unwrap();let options=synergy_address_engine::apqe::provider::SignOptions::default();request.identity_root_signature=e.sign(synergy_address_engine::types::Algorithm::FnDsa1024,root.private_key.as_bytes(),&message,options).unwrap();request.consensus_possession_signature=e.sign(synergy_address_engine::types::Algorithm::MlDsa65,consensus.private_key.as_bytes(),&message,options).unwrap();request.transport_possession_signature=e.sign(synergy_address_engine::types::Algorithm::MlDsa65,transport.private_key.as_bytes(),&message,options).unwrap();}
+        if index==0||index==4{crate::services::protected_accounts::qualify_real_dp_bond(&selected,&world,&source,|owner|{
+            let mut protected=request.clone();protected.spec.owner_wallet=owner.into();let message=protected.spec.signing_bytes().unwrap();let e=engine.lock().unwrap();let options=synergy_address_engine::apqe::provider::SignOptions::default();protected.identity_root_signature=e.sign(synergy_address_engine::types::Algorithm::FnDsa1024,root.private_key.as_bytes(),&message,options).unwrap();protected.consensus_possession_signature=e.sign(synergy_address_engine::types::Algorithm::MlDsa65,consensus.private_key.as_bytes(),&message,options).unwrap();protected.transport_possession_signature=e.sign(synergy_address_engine::types::Algorithm::MlDsa65,transport.private_key.as_bytes(),&message,options).unwrap();protected
+        });}
+        admitted_signers.insert(request.spec.consensus_key_id.clone(),Arc::new(synergy_aegis::PqvmSigner::with_apqe(synergy_aegis::AegisPolicy{allowed_algorithms:vec![SignatureAlgorithm::MlDsa65],maximum_message_bytes:1024*1024,maximum_signature_bytes:16384},KeyId::new(request.spec.consensus_key_id.clone()).unwrap(),&consensus.public_key,consensus.private_key.as_bytes().to_vec(),engine.clone()).unwrap()));
+        let input=serde_json::to_vec(&request).unwrap();eprintln!("Native admission request {}B; raw sync {}B",input.len(),request.sync_finality_document.len());assert!(input.len()<128*1024);
+        let mut transaction=template.clone();transaction.unsigned.nonce=index;transaction.unsigned.receiver=transaction.unsigned.sender.clone();transaction.unsigned.amount_nwei=0;transaction.unsigned.timestamp_unix=selected.consensus_timestamp_unix(height).unwrap();transaction.unsigned.fee_limit.gas_limit=250000;transaction.unsigned.fee_limit.max_fee_per_gas_nwei=40;
+        transaction.unsigned.payload=synergy_transaction::TransactionAction::Native{module:"validator".into(),method:"register".into(),input:input.clone()}.encode().unwrap();
+        transaction.signature=fixture_sign(account_secret,SignatureAlgorithm::MlDsa87,"transaction-presented-key","SYNERGY-TRANSACTION-SIGNING-V1",None,&transaction.unsigned.signing_bytes().unwrap());
+        let local=std::sync::atomic::AtomicBool::new(false);
+        let mut forged=request.clone();forged.transport_possession_signature[0]^=1;
+        assert!(crate::services::validator_admission::prepare(&selected,&world,&transaction,&serde_json::to_vec(&forged).unwrap(),height,&local).is_err());assert!(!local.load(std::sync::atomic::Ordering::Relaxed));
+        crate::services::validator_admission::prepare(&selected,&world,&transaction,&input,height,&local).unwrap();
+        let before=world.accounts[&transaction.unsigned.sender].balance_nwei;
+        let outcome=crate::services::execution::qualification_native_transition(configuration,selected.clone(),vec![transaction.clone()],height,&world).unwrap();
+        assert_eq!(outcome.receipts[0].status,synergy_transaction::ReceiptStatus::Applied,"{:?}",outcome.receipts[0]);
+        assert_eq!(before-outcome.state.accounts[&transaction.unsigned.sender].balance_nwei,synergy_protocol_types::VALIDATOR_MINIMUM_BOND_NWEI+outcome.total_fees_nwei);
+        assert_eq!(outcome.state.accounts[&request.spec.escrow_account()].balance_nwei,synergy_protocol_types::VALIDATOR_MINIMUM_BOND_NWEI);
+        assert!(crate::services::validator_admission::prepare(&selected,&outcome.state,&transaction,&input,height+1,&local).is_err());
+        world=outcome.state;
+        crate::services::validator_admission::refresh_finalized(&selected,height,&world).unwrap();
+        let r:FinalizedValidatorAdmissionRecord=serde_json::from_slice(&world.protocol[&request.spec.record_key()]).unwrap();if first_record.is_none(){first_record=Some(r);}
+        crate::services::rpc::proofs::require_public_world(&world,None).unwrap();crate::services::rpc::proofs::bounded_document(world.as_ref()).unwrap();
+        let close=selected.epoch.epoch_end_height-2;
+        let set=NativeMembershipAdmissionSet::from_finalized_world(&selected.epoch,&selected.registry,selected.protected_policy().unwrap(),&genesis,close,&world,(index<4).then_some(&retirement)).unwrap();
+        let (authorization,policy,registry)=set.prepare_successor(&selected.epoch,selected.protected_policy().unwrap(),&selected.registry,(index<4).then_some(&retirement),None).unwrap();
+        assert_eq!(registry.active_count(),4+index as usize+1);assert_eq!(policy.ingress_kem_registry.records.len(),registry.active_count());
+        let ns=synergy_etdag::EtdagDigest::from_domain_bytes("automatic-admission-test",b"canonical");
+        let(material,commitment)=synergy_etdag::execution::ProcessingProposalMaterial{material_version:1,profile_id:synergy_etdag::PROCESSING_PROFILE_ID.into(),height:close,namespace_root:ns.clone(),selection:synergy_etdag::execution::ProcessingReadyView{namespace_root:ns.clone(),items:vec![]}.select(30000000,1048576).unwrap(),transition_root:ns,ordered_group:None,epoch_transition_subject_root:None}.with_epoch_close_subject(authorization.subject_root_v2().unwrap()).unwrap();
+        let protected=synergy_block::hash_block_bytes(&commitment);let block=serde_json::to_vec(&(close,"86".repeat(32),&protected,synergy_state::state_root(&world).unwrap(),Vec::<u8>::new(),Vec::<u8>::new())).unwrap();
+        let(finalized,closing_witness)=membership_qcs(&selected,&signer_map,close,&synergy_block::hash_block_bytes(&block),&protected);
+        let evidence=MembershipAdmissionEvidence{closing_block_commitment:block,closing_world:serde_json::to_vec(world.as_ref()).unwrap()};
+        let earned=VerifiedMembershipAdmissions::verify(&selected.epoch,&selected.registry,selected.protected_policy().unwrap(),&genesis,&finalized,&closing_witness,&evidence,(index<4).then_some(&retirement),selected.as_ref()).unwrap();assert_eq!(earned.admitted_validators().len(),if index<4{index as usize+1}else{1});
+        let proof=crate::services::authority::recovery::successor::DerivedEpochProof{authorization,finalized,witness:closing_witness,closing_material:material.into(),next_validators:registry.active().cloned().collect(),membership_execution:(index<4).then(||retirement_execution.clone()),membership_admissions:Some(evidence)};
+        let bytes=serde_json::to_vec(&proof).unwrap();let outer=serde_json::to_vec(&serde_json::json!({"version":1,"artifact_json":std::str::from_utf8(&bytes).unwrap()})).unwrap();assert!(outer.len()<1_000_000,"escaped outer proof exceeds 1000000B: {}",outer.len());assert!(bytes.len()<1_100_000,"max batch proof {}B exceeds actual consumer transport",bytes.len());
+        let next=crate::services::authority::recovery::successor::verify_next_derived_bytes(selected.clone(),&bytes).unwrap();assert_eq!(next.registry.active_count(),5+index as usize);assert!(next.consensus_binding(&validator_id).is_ok());
+        eprintln!("Automatic native admission batch{}: World{}B successor{}B, old4/5-authenticated exit+join, new committee{}",index+1,proof.membership_admissions.as_ref().unwrap().closing_world.len(),bytes.len(),next.registry.active_count());
+        if index==3 {
+            signer_map.clear();for r in next.registry.active(){let signer=if let Some(text)=r.consensus_key_id.strip_prefix("consensus-"){posy::qualification_protocol_signer(&configurations[text.parse::<usize>().unwrap()],&next).unwrap()}else{admitted_signers[&r.consensus_key_id].clone()};signer_map.insert(r.consensus_key_id.clone(),signer);}
+            selected=next.clone();height=selected.epoch.epoch_start_height+8;
+            (source,witness)=membership_qcs(&selected,&signer_map,selected.epoch.epoch_start_height+2,&"91".repeat(32),&"92".repeat(32));
+            sync=synergy_genesis::validator_admission::encode_validator_admission_sync(&source,&witness).unwrap();
+        }
+        if index==3 {if let Some(path)=std::env::var_os("SYNERGY_AUTOMATIC_ADMISSION_PUBLIC_FIXTURE"){
+            let public=serde_json::json!({"signed_authority":serde_json::from_slice::<serde_json::Value>(previous.binding_bytes()).unwrap(),"signed_genesis":serde_json::from_slice::<serde_json::Value>(&fs::read(configuration.genesis_path.as_ref().unwrap()).unwrap()).unwrap(),"genesis_trust_key":fs::read(configuration.consensus.authority_trust_key_path.as_ref().unwrap()).unwrap(),"proof":proof});
+            fs::write(path,serde_json::to_vec(&public).unwrap()).unwrap();
+        }}
+    }
+    assert_eq!(selected.pending_validator_admissions().unwrap().unwrap().records().len(),1);
 }

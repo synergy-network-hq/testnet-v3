@@ -52,5 +52,15 @@
     "replay": "exact envelope settlement; terminal failure permits a fresh signed attempt",
     "successful_owner_aliases": 1,
     "actual_fee_nwei": "0"
+  },
+  "validator_bond": {
+    "action_id": 28683,
+    "outer_content_action_id": 28683,
+    "payload": "exact canonical ValidatorAdmissionRequest JSON only",
+    "authorization": "current native D/P inner intent and separate exact-envelope D/P paid PW13 resources",
+    "profile_id": "etdag-pw13-transfer-candidate-v1",
+    "fee": "normal governed paid PW13 resource fee; approved validator bond is separate",
+    "financial_account_nonce": "consumed exactly once",
+    "network_authority": "automatic finalized eligibility; never per-user engineering approval"
   }
 }

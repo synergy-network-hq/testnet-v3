@@ -1256,6 +1256,10 @@ pub fn registration_with_preparation(
     if !configuration.etdag.enabled {
         return Err("ETDAG service cannot be registered when ETDAG is disabled".into());
     }
+    if super::validator_shadow::is_local(configuration,&authority)?{
+        if let Some(handle)=&wallet_admission{handle.bind_ingress(ingress.clone())?;handle.publish_context(None)?;}
+        return super::validator_shadow::registration(configuration,authority,ingress);
+    }
     if let Some(handle) = &wallet_admission {
         handle.bind_ingress(ingress.clone())?;
     }

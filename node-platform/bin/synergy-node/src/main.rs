@@ -36,6 +36,8 @@ fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
         args.next();
         return services::delivery_stage::cli(args);
     }
+    if args.peek().is_some_and(|arg|arg=="transport-endpoint"){args.next();return services::transport_endpoint::cli(args);}
+    if args.peek().is_some_and(|arg|arg=="validator-admission"){args.next();return services::validator_shadow::cli(args);}
     let cli = Cli::parse(args)?;
     match &cli.command {
         Command::Help => println!("{HELP}"),

@@ -6,12 +6,12 @@ use super::{
     network_secure::{SecureConnectionMaterial, SecureTransportFactory},
 };
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap,BTreeSet},
     fs,
     io::Read,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc,Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 use synergy_address_engine::{
@@ -127,6 +127,8 @@ impl Stamp {
     }
 }
 pub(super) struct Snapshot {
+    earned:BTreeMap<String,synergy_governance::FinalizedValidatorAdmissionRecord>,
+    shadow:BTreeSet<String>,
     pub(super) payload: RegistryPayload,
     pub(super) registry_bytes: Vec<u8>,
     pub(super) genesis_bytes: Vec<u8>,
@@ -134,8 +136,15 @@ pub(super) struct Snapshot {
     pub(super) entries: Vec<TransportEntry>,
     pub(super) stamps: Vec<Stamp>,
 }
+impl Clone for Snapshot {fn clone(&self)->Self{Self{earned:self.earned.clone(),shadow:self.shadow.clone(),payload:self.payload.clone(),registry_bytes:self.registry_bytes.clone(),genesis_bytes:self.genesis_bytes.clone(),network:NetworkBinding{chain_id_hex:self.network.chain_id_hex.clone(),genesis_sha256:self.network.genesis_sha256.clone()},entries:self.entries.clone(),stamps:self.stamps.clone()}}}
 impl Snapshot {
-    pub(super) fn load(config: &NodeConfiguration, anchors: &[String; 2]) -> Result<Self, String> {
+    pub(super) fn load(config:&NodeConfiguration,anchors:&[String;2])->Result<Self,String>{
+        let snapshot=Self::load_origin(config,anchors)?;
+        let local:synergy_identity::PublicNodeIdentity=serde_json::from_slice(&read(&config.public_identity_path,65536,false)?).map_err(|_|"invalid installed public identity")?;
+        if snapshot.entry(local.validate().map_err(|e|format!("{e:?}"))?.node_address.as_str()).is_ok(){return Ok(snapshot);}
+        match authority::load(config)?{Some(current)=>snapshot.with_current(&current),None=>Ok(snapshot)}
+    }
+    pub(super) fn load_origin(config: &NodeConfiguration, anchors: &[String; 2]) -> Result<Self, String> {
         config.validate().map_err(|e| e.to_string())?;
         let selected = config
             .apqe_transport
@@ -278,14 +287,34 @@ impl Snapshot {
         if !before.iter().all(Stamp::unchanged) {
             return Err("canary trust artifacts changed during verification".into());
         }
-        Ok(Self {
+        let snapshot=Self {
+            earned:BTreeMap::new(),shadow:BTreeSet::new(),
             entries: payload.validators.clone(),
             payload,
             registry_bytes,
             genesis_bytes,
             network,
             stamps: before,
-        })
+        };
+        Ok(snapshot)
+    }
+    fn with_current(mut self,authority:&authority::VerifiedAuthority)->Result<Self,String>{
+        self.entries=self.payload.validators.clone();self.earned.clear();self.shadow.clear();
+        if authority.epoch.chain_id!=self.payload.chain_id||authority.epoch.network_id!=self.payload.network_id
+            ||authority.authenticated_genesis_hash()?!=self.payload.genesis_hash{return Err("transport authority changed network".into());}
+        let current_root=authority.epoch.root().map_err(|e|e.to_string())?;
+        for record in authority.earned_transport_records()? {
+            let active=authority.registry.active_validator(&record.validator_id).is_ok();
+            let shadow=record.frozen_epoch_context_root==current_root&&record.effective_epoch==authority.epoch.epoch.checked_add(1).ok_or("transport epoch overflow")?;
+            if !active&&!shadow{continue;}
+            if self.entries.iter().any(|e|e.node_address==record.validator_id){return Err("earned transport identity collides with signed origin".into());}
+            let entry=TransportEntry{node_address:record.validator_id.clone(),dial_address:record.dial_address.parse().map_err(|_|"invalid earned endpoint")?,
+                transport_key_id:record.transport_key_id.clone(),transport_key_version:1,transport_public_key:record.transport_public_key.clone(),enrollment_sha256:record.enrollment_sha256.clone(),revoked:false};
+            if shadow {self.shadow.insert(record.validator_id.clone());}
+            self.earned.insert(record.validator_id.clone(),record);self.entries.push(entry);
+        }
+        self.entries.retain(|e|authority.registry.active_validator(&e.node_address).is_ok()||self.shadow.contains(&e.node_address));
+        Ok(self)
     }
     pub(super) fn entry(&self, id: &str) -> Result<&TransportEntry, String> {
         self.entries
@@ -298,6 +327,10 @@ impl Snapshot {
         let r = self.entry(r)?;
         let mut chain_id = [0; 32];
         chain_id[24..].copy_from_slice(&self.payload.chain_id.to_be_bytes());
+        let supplemental=[i,r].into_iter().filter_map(|e|self.earned.get(&e.node_address)).collect::<Vec<_>>();
+        let (format,registry)=if supplemental.is_empty(){("synergy-canary-transport-registry-v1-json",self.registry_bytes.clone())}
+            else{let mut supplemental=supplemental;supplemental.sort_by(|a,b|a.validator_id.cmp(&b.validator_id));
+                ("synergy-native-membership-peer-pair-v1-json",serde_json::to_vec(&(sha256(&self.registry_bytes),supplemental)).map_err(|e|e.to_string())?)};
         Ok(SessionContext {
             chain_id,
             genesis_commitment: artifact_commitment(
@@ -309,8 +342,8 @@ impl Snapshot {
             registry_epoch: self.payload.epoch,
             registry_commitment: artifact_commitment(
                 b"SYNERGY/VSESSION/REGISTRY/v1",
-                "synergy-canary-transport-registry-v1-json",
-                &self.registry_bytes,
+                format,
+                &registry,
             )?,
             initiator_node: i.node_address.clone(),
             responder_node: r.node_address.clone(),
@@ -320,7 +353,7 @@ impl Snapshot {
             responder_key_version: r.transport_key_version,
             network_id: self.payload.network_id.clone(),
             genesis_format: "synergy-signed-genesis-v2-json".into(),
-            registry_format: "synergy-canary-transport-registry-v1-json".into(),
+            registry_format: format.into(),
         })
     }
 }
@@ -359,6 +392,7 @@ pub(super) fn artifact_commitment(
         .map_err(|_| "incorrect transport commitment length".into())
 }
 struct CurrentTrust {
+    ingress:Option<super::ingress::AuthenticatedIngress>,
     context: SessionContext,
     i: Vec<u8>,
     r: Vec<u8>,
@@ -372,7 +406,13 @@ impl CurrentTransportTrust for CurrentTrust {
         i: &PublicKey<Mldsa65>,
         r: &PublicKey<Mldsa65>,
     ) -> Result<(), SessionError> {
-        if context == &self.context
+        let roles_current=self.ingress.as_ref().is_none_or(|ingress|ingress.transport_authority().is_ok_and(|authority|authority.is_some_and(|authority|{
+            let records=authority.earned_transport_records().unwrap_or_default();
+            let root=authority.epoch.root().ok();
+            [&context.initiator_node,&context.responder_node].into_iter().all(|id|authority.registry.active_validator(id).is_ok()
+                ||records.iter().any(|r|&r.validator_id==id&&Some(&r.frozen_epoch_context_root)==root.as_ref()&&r.effective_epoch==authority.epoch.epoch.saturating_add(1)))
+        })));
+        if roles_current && context == &self.context
             && Primitives.constant_time_equal(i.as_bytes(), &self.i)
             && Primitives.constant_time_equal(r.as_bytes(), &self.r)
             && clock().is_ok_and(|now| now < self.expires)
@@ -389,10 +429,28 @@ struct Factory {
     local: NodeAddress,
     anchors: [String; 2],
     routing: Option<Snapshot>,
+    ingress:Option<super::ingress::AuthenticatedIngress>,
+    endpoint_verified:Mutex<BTreeSet<String>>,
 }
 impl Factory {
     fn snapshot(&self) -> Result<Snapshot, String> {
-        Snapshot::load(&self.config, &self.anchors)
+        let snapshot=if let Some(snapshot)=&self.routing{
+            if !snapshot.stamps.iter().all(Stamp::unchanged)||clock()? >= snapshot.payload.expires_at_unix{return Err("authenticated transport artifacts changed or expired".into());}
+            snapshot.clone()
+        }else{Snapshot::load(&self.config,&self.anchors)?};
+        self.current(snapshot)
+    }
+    fn current(&self,snapshot:Snapshot)->Result<Snapshot,String>{
+        let Some(authority)=self.ingress.as_ref().map(|i|i.transport_authority()).transpose()?.flatten() else{return Ok(snapshot);};
+        let mut snapshot=snapshot.with_current(&authority)?;
+        for endpoint in super::transport_endpoint::load(&self.config)?.into_values(){
+            if authority.registry.active_validator(&endpoint.validator_id).is_err(){continue;}
+            let digest=sha256(&super::transport_endpoint::encode(&endpoint)?);
+            let mut cache=self.endpoint_verified.lock().map_err(|_|"endpoint signature cache poisoned")?;
+            if !cache.contains(&digest){endpoint.verify(&authority)?;if cache.len()>=self.config.p2p.max_authenticated_peers{cache.pop_first();}cache.insert(digest);}
+            if let Some(entry)=snapshot.entries.iter_mut().find(|e|e.node_address==endpoint.validator_id){entry.dial_address=endpoint.dial_address;}
+        }
+        Ok(snapshot)
     }
 }
 impl SecureTransportFactory for Factory {
@@ -401,17 +459,14 @@ impl SecureTransportFactory for Factory {
     }
     fn contains_peer(&self, id: &str) -> bool {
         id != self.local.as_str()
-            && self.routing.as_ref().is_some_and(|snapshot| {
+            && self.routing.as_ref().and_then(|s|self.current(s.clone()).ok()).is_some_and(|snapshot| {
                 clock().is_ok_and(|now| now < snapshot.payload.expires_at_unix)
                     && snapshot.stamps.iter().all(Stamp::unchanged)
                     && snapshot.entry(id).is_ok()
             })
     }
     fn dial_peers(&self) -> Result<Vec<(NodeAddress, SocketAddr)>, String> {
-        let snapshot = self
-            .routing
-            .as_ref()
-            .ok_or("missing authenticated routing")?;
+        let snapshot = self.current(self.routing.as_ref().ok_or("missing authenticated routing")?.clone())?;
         if clock()? >= snapshot.payload.expires_at_unix
             || !snapshot.stamps.iter().all(Stamp::unchanged)
         {
@@ -429,6 +484,18 @@ impl SecureTransportFactory for Factory {
             })
             .collect()
     }
+    fn endpoint_announcements(&self)->Result<Vec<Vec<u8>>,String>{
+        // Each owner announces its own latest record at authentication. Peers
+        // learn exact dial hints without a separate discovery authority.
+        super::transport_endpoint::load(&self.config)?.get(self.local.as_str()).map(super::transport_endpoint::encode).transpose().map(|v|v.into_iter().collect())
+    }
+    fn receive_endpoint(&self,bytes:&[u8])->Result<bool,String>{
+        let Some(record)=super::transport_endpoint::decode(bytes)? else{return Ok(false);};
+        let authority=self.ingress.as_ref().ok_or("native endpoint requires runtime finality")?.transport_authority()?.ok_or("native endpoint requires authenticated authority")?;
+        super::transport_endpoint::accept(&self.config,&authority,record)?;Ok(true)
+    }
+    fn allow_reverse_dial(&self)->bool{super::transport_endpoint::load(&self.config).is_ok_and(|m|m.contains_key(self.local.as_str()))}
+    fn peer_is_shadow(&self,id:&str)->bool{self.routing.as_ref().and_then(|s|self.current(s.clone()).ok()).is_some_and(|s|s.shadow.contains(id))}
     fn material(&self, peer_id: &str, inbound: bool) -> Result<SecureConnectionMaterial, String> {
         let snapshot = self.snapshot()?;
         let local = snapshot.entry(self.local.as_str())?;
@@ -485,6 +552,7 @@ impl SecureTransportFactory for Factory {
         let peer_public = PublicKey::from_bytes(&peer.transport_public_key)
             .map_err(|e| format!("peer key rejected: {e:?}"))?;
         let trust = Arc::new(CurrentTrust {
+            ingress:self.ingress.clone(),
             context: context.clone(),
             i: i.transport_public_key.clone(),
             r: r.transport_public_key.clone(),
@@ -513,19 +581,21 @@ pub(super) fn decode_digest(text: &str) -> Result<[u8; 32], String> {
 pub(super) fn factory(
     config: &NodeConfiguration,
 ) -> Result<Option<Arc<dyn SecureTransportFactory>>, String> {
-    build_factory(config, true)
+    build_factory(config, true, None)
 }
+pub(super) fn factory_with_ingress(config:&NodeConfiguration,ingress:super::ingress::AuthenticatedIngress)->Result<Option<Arc<dyn SecureTransportFactory>>,String>{build_factory(config,true,Some(ingress))}
 pub(crate) fn verify_runtime(config: &NodeConfiguration) -> Result<(), String> {
     factory(config)?.ok_or("missing explicit APQE transport")?;
     Ok(())
 }
 pub(crate) fn preflight(config: &NodeConfiguration) -> Result<(), String> {
-    build_factory(config, false)?.ok_or("missing explicit APQE transport")?;
+    build_factory(config, false,None)?.ok_or("missing explicit APQE transport")?;
     Ok(())
 }
 fn build_factory(
     config: &NodeConfiguration,
     unlock: bool,
+    ingress:Option<super::ingress::AuthenticatedIngress>,
 ) -> Result<Option<Arc<dyn SecureTransportFactory>>, String> {
     let Some(selected) = &config.apqe_transport else {
         return Ok(None);
@@ -538,7 +608,7 @@ fn build_factory(
     let mut value = Factory {
         config: config.clone(),
         local,
-        routing: None,
+        routing: None,ingress,endpoint_verified:Mutex::new(BTreeSet::new()),
         anchors: [
             selected.registry_trust_key_sha256.clone(),
             selected.genesis_trust_key_sha256.clone(),

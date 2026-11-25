@@ -649,6 +649,7 @@ fn construct_sync(
             local_peer_id,
             ingress,
             outbox: SyncOutbox::default(),
+            processing_handoff: Default::default(),
             request_store,
             snapshot_store,
             authority,
@@ -687,6 +688,9 @@ fn load_snapshot_signer(
     let Some(authority) = authority else {
         return Ok(None);
     };
+    if super::validator_shadow::is_local(configuration, authority)? {
+        return Ok(None);
+    }
     let Some(path) = configuration.consensus.signing_key_path.as_ref() else {
         return Ok(None);
     };
@@ -836,6 +840,7 @@ struct SyncService {
     local_peer_id: String,
     ingress: AuthenticatedIngress,
     outbox: SyncOutbox,
+    processing_handoff: super::processing_handoff::Transport,
     request_store: SyncRequestStore,
     snapshot_store: SnapshotChunkStore,
     authority: Option<Arc<VerifiedAuthority>>,
@@ -1691,7 +1696,11 @@ impl SyncService {
         &mut self,
         authenticated: &BTreeSet<String>,
     ) -> Result<bool, String> {
-        if self.authority.as_ref().is_some_and(|authority| authority.autonomous_epochs_enabled()) {
+        if self
+            .authority
+            .as_ref()
+            .is_some_and(|authority| authority.autonomous_epochs_enabled())
+        {
             return Ok(false);
         }
         let Some(authority) = self.authority.as_ref() else {
@@ -2923,6 +2932,16 @@ impl SyncService {
         );
     }
     fn poll_sync(&mut self) -> Result<(), String> {
+        if let Some(authority) = &self.authority {
+            let layout = NodeStorageLayout::new(self.configuration.storage.data_directory.clone())
+                .map_err(|e| e.to_string())?;
+            let root = layout.blocks().join("native-processing-handoff");
+            self.ingress
+                .configure_processing_handoff_root(root.clone())?;
+            self.processing_handoff
+                .poll(authority, &self.ingress, &root)?;
+        }
+
         if !self.started {
             return Err("sync service is not started".into());
         }
@@ -3005,6 +3024,9 @@ impl SyncService {
             let Some(frame) = self.ingress.take(ProtocolKind::Sync)? else {
                 break;
             };
+            if self.processing_handoff.route(&frame, &self.ingress)? {
+                continue;
+            }
             SyncAdapter
                 .deliver(AdapterEnvelope::from(frame), self)
                 .map_err(|error| format!("route authenticated Sync frame: {error:?}"))?;

@@ -712,7 +712,8 @@ pub(in crate::services) fn require_public_world(world: &synergy_state::WorldStat
                 if names.encode().map_err(|_| invalid())? != *bytes { return Err(invalid()); }
             }
             _ => {
-                if crate::services::membership_retirement::validate_public_record(key,bytes).map_err(|_|invalid())?
+                if crate::services::validator_admission::validate_public_record(world,key,bytes).map_err(|_|invalid())?
+                    || crate::services::membership_retirement::validate_public_record(key,bytes).map_err(|_|invalid())?
                     || public_ethereum::validate_record(world,key,bytes).map_err(|_|invalid())?
                     || public_processing::validate_record(key,bytes).map_err(|_|invalid())? {continue;}
                 let Some(scope) = wallet else { return Err(invalid()); };

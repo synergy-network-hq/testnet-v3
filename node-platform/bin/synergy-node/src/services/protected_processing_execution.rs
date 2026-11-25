@@ -216,6 +216,7 @@ impl CandidateProtectedAccounts<'_> {
 /// never from the pending journal or the proposal under review.
 #[derive(Clone, Copy)]
 pub(super) struct ProtectedRecoveryTerms<'a> {
+    pub(super) validator_authority:Option<&'a VerifiedAuthority>,
     pub(super) provider: &'a PqProvider<Mldsa87>,
     pub(super) sponsor_verifier: Option<&'a ApqeIdentityVerifier>,
     pub(super) fee_schedule: &'a FeeSchedule,
@@ -264,6 +265,7 @@ impl RecoveredProtectedAction<'_> {
     ) -> Result<PreparedProtectedAction<'a>, String> {
         PreparedProtectedAction::from_opening(
             CandidateDispatch {
+                validator_authority:self.terms.validator_authority,
                 source: &self.source,
                 provider: self.terms.provider,
                 sponsor_verifier: self.terms.sponsor_verifier,
@@ -347,6 +349,7 @@ impl NativeProtectedCompletion {
         };
         let original = PreparedProtectedAction::from_opening(
             CandidateDispatch {
+                validator_authority:terms.validator_authority,
                 source: &source,
                 provider: terms.provider,
                 sponsor_verifier: terms.sponsor_verifier,
@@ -499,6 +502,7 @@ fn with_native_wallet_registry<T>(
     action(
         &registry,
         ProtectedRecoveryTerms {
+            validator_authority:Some(finalized.authority),
             provider: &provider,
             sponsor_verifier: sponsor.as_ref(),
             fee_schedule: &release.fees,
@@ -763,6 +767,7 @@ impl AuthorizedCandidateAdmission {
 
 #[derive(Clone, Copy)]
 pub(super) struct CandidateDispatch<'a> {
+    pub(super) validator_authority:Option<&'a VerifiedAuthority>,
     pub(super) source: &'a FinalizedSnapshot<'a>,
     pub(super) provider: &'a PqProvider<Mldsa87>,
     pub(super) sponsor_verifier: Option<&'a ApqeIdentityVerifier>,
@@ -781,6 +786,7 @@ pub(super) struct CandidateSlot<'a> {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum CandidateActionOutcome {
     Transfer(CandidateTransferExecution),
+    ValidatorBond(synergy_governance::ValidatorBondSettlement,String),
     SponsoredEnrollment(SponsoredOutcome, u128),
     Disposition(Disposition),
     FeeFreeEnrollment(synergy_etdag::admission::FeeFreeEnrollmentOutcome,String),
@@ -946,6 +952,7 @@ impl<'a> PreparedProtectedAction<'a> {
             let outcome = self.execute(candidate, slot)?;
             let key = match &outcome {
                 CandidateActionOutcome::Transfer(transfer) => transfer.settlement_key.clone(),
+                CandidateActionOutcome::ValidatorBond(_,key)=>key.clone(),
                 CandidateActionOutcome::FeeFreeEnrollment(_,key)|CandidateActionOutcome::FeeFreeSynId(_,key)=>key.clone(),
                 CandidateActionOutcome::SponsoredEnrollment(..) => super::sponsor_settlement::receipt_key(
                     &self.record.sender_wallet,
@@ -985,7 +992,11 @@ impl<'a> PreparedProtectedAction<'a> {
         let outcome = match &dispatch.admission.action {
             ActionAuthorization::FeeFreeEnrollment(_)|ActionAuthorization::FeeFreeSynId(_)=>unreachable!("handled before financial nonce lookup"),
             ActionAuthorization::Transfer(proof) => {
-                CandidateActionOutcome::Transfer(registry.execute_engineering_transfer(
+                if super::super::protected_action_wire::is_validator_bond_content(self.opened.plaintext()){
+                    let authority=dispatch.validator_authority.ok_or("native validator admission authority unavailable")?;
+                    let receipt=registry.execute_validator_bond(authority,dispatch.provider,dispatch.source,candidate,self.opened,proof,dispatch.fee_schedule,proof.gas(),inclusion)?;
+                    let key=receipt.record_key();CandidateActionOutcome::ValidatorBond(receipt,key)
+                }else{CandidateActionOutcome::Transfer(registry.execute_engineering_transfer(
                     dispatch.provider,
                     dispatch.source,
                     candidate,
@@ -993,7 +1004,7 @@ impl<'a> PreparedProtectedAction<'a> {
                     dispatch.fee_schedule,
                     proof.gas(),
                     inclusion,
-                )?)
+                )?)}
             }
             ActionAuthorization::SponsoredEnrollment(proof) => {
                 let identity = dispatch

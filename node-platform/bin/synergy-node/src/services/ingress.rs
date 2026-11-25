@@ -144,6 +144,12 @@ struct Queues {
         synergy_etdag::EtdagDigest,
         Arc<super::processing_pipeline::NativeProcessingMember>,
     >,
+    processing_handoff_exports: BTreeSet<synergy_etdag::EtdagDigest>,
+    processing_bootstrap_exports: BTreeMap<synergy_etdag::EtdagDigest, u64>,
+    processing_bootstrap_heights: BTreeMap<synergy_etdag::EtdagDigest, u64>,
+    processing_handoff_requests: BTreeMap<synergy_etdag::EtdagDigest, bool>,
+    processing_handoff_root: Option<std::path::PathBuf>,
+    processing_handoffs: BTreeMap<synergy_etdag::EtdagDigest, super::processing_handoff::Export>,
     processing_completions: BTreeMap<
         synergy_etdag::EtdagDigest,
         Arc<super::processing_pipeline::NativeProcessingCompletion>,
@@ -199,7 +205,8 @@ pub(super) struct ProcessingInputFrame {
 pub(super) struct ProcessingSnapshot {
     pub members: Vec<Arc<super::processing_pipeline::NativeProcessingMember>>,
     pub completions: Vec<Arc<super::processing_pipeline::NativeProcessingCompletion>>,
-    pub wallet_completions: Vec<Arc<super::protected_accounts::processing_execution::NativeProtectedCompletion>>,
+    pub wallet_completions:
+        Vec<Arc<super::protected_accounts::processing_execution::NativeProtectedCompletion>>,
     _permit: WorldResourcePermit,
 }
 
@@ -337,7 +344,7 @@ pub struct EtdagControlRequest {
 pub(super) struct GovernanceControlRequest {
     pub operation: synergy_admin_api::operations::GovernanceOperation,
     pub deadline: std::time::Instant,
-    pub response: mpsc::SyncSender<Result<serde_json::Value,String>>,
+    pub response: mpsc::SyncSender<Result<serde_json::Value, String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -894,20 +901,43 @@ impl AuthenticatedIngress {
             .map_err(|_| "runtime pipeline lock poisoned".to_string())
             .map(|mut queues| queues.etdag_controls.pop_front())
     }
-    pub(super) fn request_governance_control(&self,
-        operation:synergy_admin_api::operations::GovernanceOperation,timeout:Duration)->Result<serde_json::Value,String> {
-        operation.validate().map_err(|e|e.message)?;
-        let (response,receiver)=mpsc::sync_channel(1);
-        let deadline=std::time::Instant::now().checked_add(timeout).ok_or("governance request deadline overflow")?;
+    pub(super) fn request_governance_control(
+        &self,
+        operation: synergy_admin_api::operations::GovernanceOperation,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, String> {
+        operation.validate().map_err(|e| e.message)?;
+        let (response, receiver) = mpsc::sync_channel(1);
+        let deadline = std::time::Instant::now()
+            .checked_add(timeout)
+            .ok_or("governance request deadline overflow")?;
         {
-            let mut queues=self.0.lock().map_err(|_|"runtime pipeline lock poisoned")?;
-            if queues.governance_controls.len()>=4 {return Err("native governance owner queue is full".into())}
-            queues.governance_controls.push_back(GovernanceControlRequest{operation,deadline,response});
+            let mut queues = self
+                .0
+                .lock()
+                .map_err(|_| "runtime pipeline lock poisoned")?;
+            if queues.governance_controls.len() >= 4 {
+                return Err("native governance owner queue is full".into());
+            }
+            queues
+                .governance_controls
+                .push_back(GovernanceControlRequest {
+                    operation,
+                    deadline,
+                    response,
+                });
         }
         receiver.recv_timeout(timeout).map_err(|_|"native governance outcome unavailable; inspect original approval before another request")?
     }
-    pub(super) fn take_governance_control(&self)->Result<Option<GovernanceControlRequest>,String> {
-        Ok(self.0.lock().map_err(|_|"runtime pipeline lock poisoned")?.governance_controls.pop_front())
+    pub(super) fn take_governance_control(
+        &self,
+    ) -> Result<Option<GovernanceControlRequest>, String> {
+        Ok(self
+            .0
+            .lock()
+            .map_err(|_| "runtime pipeline lock poisoned")?
+            .governance_controls
+            .pop_front())
     }
 
     pub fn submit_head_claim(
@@ -1680,6 +1710,163 @@ impl AuthenticatedIngress {
             .processing_proposal_store
             .clone())
     }
+    pub(super) fn request_processing_bootstrap(
+        &self,
+        height: u64,
+        block_id: &str,
+    ) -> Result<(), String> {
+        let id = super::processing_handoff::bootstrap_id(block_id);
+        self.0
+            .lock()
+            .map_err(|_| "pipeline lock poisoned")?
+            .processing_bootstrap_heights
+            .insert(id.clone(), height);
+        self.request_processing_handoff(id, false)
+    }
+    pub(super) fn processing_bootstrap_height(
+        &self,
+        id: &synergy_etdag::EtdagDigest,
+    ) -> Result<Option<u64>, String> {
+        Ok(self
+            .0
+            .lock()
+            .map_err(|_| "pipeline lock poisoned")?
+            .processing_bootstrap_heights
+            .get(id)
+            .copied())
+    }
+    pub(super) fn request_processing_bootstrap_export(
+        &self,
+        id: synergy_etdag::EtdagDigest,
+        height: u64,
+    ) -> Result<(), String> {
+        let mut q = self.0.lock().map_err(|_| "pipeline lock poisoned")?;
+        if q.processing_bootstrap_exports.len() < 4 {
+            q.processing_bootstrap_exports.insert(id, height);
+        }
+        Ok(())
+    }
+    pub(super) fn take_processing_bootstrap_export(
+        &self,
+    ) -> Result<Option<(synergy_etdag::EtdagDigest, u64)>, String> {
+        Ok(self
+            .0
+            .lock()
+            .map_err(|_| "pipeline lock poisoned")?
+            .processing_bootstrap_exports
+            .pop_first())
+    }
+    pub(super) fn request_processing_handoff_export(
+        &self,
+        id: synergy_etdag::EtdagDigest,
+    ) -> Result<(), String> {
+        let mut q = self.0.lock().map_err(|_| "pipeline lock poisoned")?;
+        if q.processing_handoff_exports.len() < 64 {
+            q.processing_handoff_exports.insert(id);
+        }
+        Ok(())
+    }
+    pub(super) fn take_processing_handoff_export(
+        &self,
+    ) -> Result<Option<synergy_etdag::EtdagDigest>, String> {
+        Ok(self
+            .0
+            .lock()
+            .map_err(|_| "pipeline lock poisoned")?
+            .processing_handoff_exports
+            .pop_first())
+    }
+    pub(super) fn configure_processing_handoff_root(
+        &self,
+        root: std::path::PathBuf,
+    ) -> Result<(), String> {
+        let mut q = self.0.lock().map_err(|_| "pipeline lock poisoned")?;
+        if q.processing_handoff_root
+            .as_ref()
+            .is_some_and(|r| r != &root)
+        {
+            return Err("processing handoff owner root changed".into());
+        }
+        q.processing_handoff_root = Some(root);
+        Ok(())
+    }
+    pub(super) fn request_processing_handoff(
+        &self,
+        id: synergy_etdag::EtdagDigest,
+        completion: bool,
+    ) -> Result<(), String> {
+        let mut q = self.0.lock().map_err(|_| "pipeline lock poisoned")?;
+        if q.processing_handoff_requests.len() < 64
+            || q.processing_handoff_requests.contains_key(&id)
+        {
+            q.processing_handoff_requests
+                .entry(id)
+                .and_modify(|v| *v |= completion)
+                .or_insert(completion);
+        }
+        Ok(())
+    }
+    pub(super) fn processing_handoff_requests(
+        &self,
+    ) -> Result<Vec<(synergy_etdag::EtdagDigest, bool)>, String> {
+        Ok(self
+            .0
+            .lock()
+            .map_err(|_| "pipeline lock poisoned")?
+            .processing_handoff_requests
+            .iter()
+            .map(|(i, c)| (i.clone(), *c))
+            .collect())
+    }
+    pub(super) fn complete_processing_handoff(
+        &self,
+        id: &synergy_etdag::EtdagDigest,
+    ) -> Result<(), String> {
+        let mut q = self.0.lock().map_err(|_| "pipeline lock poisoned")?;
+        q.processing_handoff_requests.remove(id);
+        q.processing_bootstrap_heights.remove(id);
+        Ok(())
+    }
+    pub(super) fn processing_handoff_bytes(
+        &self,
+        id: &synergy_etdag::EtdagDigest,
+        completion: bool,
+    ) -> Result<Option<String>, String> {
+        let q = self.0.lock().map_err(|_| "pipeline lock poisoned")?;
+        Ok(q.processing_handoffs
+            .get(id)
+            .or_else(|| q.processing_handoffs.values().find(|v| &v.vertex_id == id))
+            .filter(|v| !completion || v.completion)
+            .map(|v| v.bytes.clone()))
+    }
+    pub(super) fn publish_processing_handoff(
+        &self,
+        id: synergy_etdag::EtdagDigest,
+        value: super::processing_handoff::Export,
+    ) -> Result<(), String> {
+        let mut q = self
+            .0
+            .lock()
+            .map_err(|_| "runtime pipeline lock poisoned")?;
+        if q.processing_handoffs.len() >= 4096 && !q.processing_handoffs.contains_key(&id) {
+            return Err("native handoff cache full".into());
+        }
+        if value.bytes.starts_with("{\"bootstrap_candidate\":")
+            && !q.processing_handoffs.contains_key(&id)
+        {
+            let bootstrap = q
+                .processing_handoffs
+                .iter()
+                .filter(|(_, v)| v.bytes.starts_with("{\"bootstrap_candidate\":"))
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            if bootstrap.len() >= 4 {
+                q.processing_handoffs.remove(&bootstrap[0]);
+            }
+        }
+        q.processing_handoffs.insert(id, value);
+        Ok(())
+    }
     pub(super) fn publish_processing_member(
         &self,
         member: Arc<super::processing_pipeline::NativeProcessingMember>,
@@ -1723,7 +1910,8 @@ impl AuthenticatedIngress {
                 Err("conflicting native processing completion".into())
             };
         }
-        if queues.processing_completions.len() + queues.processing_wallet_completions.len() >= 4096 {
+        if queues.processing_completions.len() + queues.processing_wallet_completions.len() >= 4096
+        {
             return Err("processing completion index full".into());
         }
         queues.processing_completions.insert(id.clone(), completion);
@@ -1733,7 +1921,10 @@ impl AuthenticatedIngress {
         &self,
         completion: Arc<super::protected_accounts::processing_execution::NativeProtectedCompletion>,
     ) -> Result<(), String> {
-        let mut queues = self.0.lock().map_err(|_| "runtime pipeline lock poisoned")?;
+        let mut queues = self
+            .0
+            .lock()
+            .map_err(|_| "runtime pipeline lock poisoned")?;
         let id = &completion.record.item.envelope_id;
         if queues.processing_completions.contains_key(id) {
             return Err("protected Wallet completion conflicts with an ordinary original".into());
@@ -1745,10 +1936,13 @@ impl AuthenticatedIngress {
                 Err("conflicting native Wallet processing completion".into())
             };
         }
-        if queues.processing_completions.len() + queues.processing_wallet_completions.len() >= 4096 {
+        if queues.processing_completions.len() + queues.processing_wallet_completions.len() >= 4096
+        {
             return Err("processing completion index full".into());
         }
-        queues.processing_wallet_completions.insert(id.clone(), completion);
+        queues
+            .processing_wallet_completions
+            .insert(id.clone(), completion);
         Ok(())
     }
     pub(super) fn processing_snapshot(&self) -> Result<Option<ProcessingSnapshot>, String> {
@@ -1757,11 +1951,12 @@ impl AuthenticatedIngress {
             .lock()
             .map_err(|_| "runtime pipeline lock poisoned")?;
         let reservation = self.1.reserve(
-            (queues.processing_members.len() + queues.processing_completions.len()
+            (queues.processing_members.len()
+                + queues.processing_completions.len()
                 + queues.processing_wallet_completions.len())
-                .checked_mul(256)
-                .and_then(|n| n.checked_add(4096))
-                .ok_or("processing snapshot size overflow")?,
+            .checked_mul(256)
+            .and_then(|n| n.checked_add(4096))
+            .ok_or("processing snapshot size overflow")?,
         );
         let permit = match reservation {
             Ok(permit) => permit,
@@ -1773,7 +1968,11 @@ impl AuthenticatedIngress {
         Ok(Some(ProcessingSnapshot {
             members: queues.processing_members.values().cloned().collect(),
             completions: queues.processing_completions.values().cloned().collect(),
-            wallet_completions: queues.processing_wallet_completions.values().cloned().collect(),
+            wallet_completions: queues
+                .processing_wallet_completions
+                .values()
+                .cloned()
+                .collect(),
             _permit: permit,
         }))
     }
@@ -1788,8 +1987,29 @@ impl AuthenticatedIngress {
             .map_err(|_| "runtime pipeline lock poisoned")?;
         for identity in proof.identities() {
             queues.processing_members.remove(&identity.envelope_id);
+            let export = queues.processing_handoffs.remove(&identity.envelope_id);
+            if let Some(root) = &queues.processing_handoff_root {
+                for kind in ["complete", "member"] {
+                    let path = root.join(format!("{}-{}.json", identity.envelope_id.0, kind));
+                    match std::fs::remove_file(path) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(e.to_string()),
+                    }
+                }
+                if let Some(export) = export {
+                    let path = root.join(format!("{}.link", export.vertex_id.0));
+                    match std::fs::remove_file(path) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(e.to_string()),
+                    }
+                }
+            }
             queues.processing_completions.remove(&identity.envelope_id);
-            queues.processing_wallet_completions.remove(&identity.envelope_id);
+            queues
+                .processing_wallet_completions
+                .remove(&identity.envelope_id);
         }
         Ok(())
     }
@@ -2036,6 +2256,7 @@ impl AuthenticatedIngress {
         queues.processing_finalized_world = None;
         queues.processing_proof_refs = None;
         queues.processing_members.clear();
+        queues.processing_handoffs.clear();
         queues.processing_completions.clear();
         queues.processing_wallet_completions.clear();
         queues.processing_input_frames.clear();
@@ -2230,8 +2451,13 @@ impl AuthenticatedIngress {
             .0
             .lock()
             .map_err(|_| "runtime pipeline lock poisoned")?;
-        if let Some(authority)=queues.finality_history.as_ref().and_then(|history|history.authority.autonomous_authority_at(height)) {
-            super::membership_retirement::refresh_finalized(authority,height,&world)?;
+        if let Some(authority) = queues
+            .finality_history
+            .as_ref()
+            .and_then(|history| history.authority.autonomous_authority_at(height))
+        {
+            super::membership_retirement::refresh_finalized(authority, height, &world)?;
+            super::validator_admission::refresh_finalized(authority, height, &world)?;
         }
         if queues
             .processing_finalized_world
@@ -2242,6 +2468,23 @@ impl AuthenticatedIngress {
             queues.processing_finalized_world = Some((height, world));
         }
         Ok(())
+    }
+    /// Snapshot only the authenticated authority selected by the finalized owner.
+    /// No received peer registry or configuration can create this capability.
+    pub(super) fn transport_authority(
+        &self,
+    ) -> Result<Option<Arc<super::authority::VerifiedAuthority>>, String> {
+        let queues = self
+            .0
+            .lock()
+            .map_err(|_| "runtime pipeline lock poisoned")?;
+        let Some(history) = queues.finality_history.as_ref() else {
+            return Ok(None);
+        };
+        // The certified successor is active before its first block finalizes.
+        // Selecting the previous finalized height here would keep newly active
+        // peers in shadow mode and prevent the very quorum needed for progress.
+        Ok(Some(history.authority.clone()))
     }
     pub(super) fn processing_finalized_world(
         &self,
@@ -2382,35 +2625,58 @@ impl AuthenticatedIngress {
     /// Public evidence is reconstructed under each certificate's original
     /// authenticated authority, including the cross-epoch finality tail.
     pub(crate) fn finality_proof(&self, height: u64) -> Result<PublicFinalityEvidence, String> {
-        let _permit = self.world_budget().reserve(super::rpc::proofs::PROOF_SCRATCH)
+        let _permit = self
+            .world_budget()
+            .reserve(super::rpc::proofs::PROOF_SCRATCH)
             .map_err(|error| error.to_string())?;
         let mut timeout_work = 128u64;
-        let history = self.0.lock().map_err(|_| "runtime pipeline lock poisoned")?
-            .finality_history.clone().ok_or("authenticated finality history unavailable")?;
+        let history = self
+            .0
+            .lock()
+            .map_err(|_| "runtime pipeline lock poisoned")?
+            .finality_history
+            .clone()
+            .ok_or("authenticated finality history unavailable")?;
         let store = synergy_posy::persistence::FinalityStore::new(&history.root)
             .map_err(|error| error.to_string())?;
-        let record = store.get(height).map_err(|error| error.to_string())?
+        let record = store
+            .get(height)
+            .map_err(|error| error.to_string())?
             .ok_or("requested finalized record unavailable")?;
         let qcs = synergy_posy::VerifiedQuorumCertificateStore::new(&history.root)
             .map_err(|error| error.to_string())?;
         let tcs = synergy_posy::VerifiedTimeoutCertificateStore::new(&history.root)
             .map_err(|error| error.to_string())?;
-        let end = height.checked_add(2).ok_or("finality proof height overflow")?;
+        let end = height
+            .checked_add(2)
+            .ok_or("finality proof height overflow")?;
         let mut certificates = Vec::with_capacity(3);
         let mut timeouts = BTreeMap::new();
         let mut finality = synergy_posy::ThreeQcFinality::default();
         for certified_height in height..=end {
-            let qc = history.verified_qc(&qcs, certified_height)?
+            let qc = history
+                .verified_qc(&qcs, certified_height)?
                 .ok_or("finality proof lacks certified history")?;
-            let selected = history.authority.authenticated_history_at(certified_height)
+            let selected = history
+                .authority
+                .authenticated_history_at(certified_height)
                 .ok_or("finality proof lies outside authenticated history")?;
             let owner = super::authority::VerifiedAuthority::worker_context(selected)?;
             for tc in synergy_posy::FinalitySyncWitness::collect_verified_timeouts_bounded(
-                &qc, &tcs, &owner.epoch, &owner.registry, owner.as_ref(), &mut timeout_work
-            ).map_err(|error| error.to_string())? {
+                &qc,
+                &tcs,
+                &owner.epoch,
+                &owner.registry,
+                owner.as_ref(),
+                &mut timeout_work,
+            )
+            .map_err(|error| error.to_string())?
+            {
                 timeouts.insert((tc.context.height, tc.context.round), tc);
             }
-            finality.accept(qc.clone()).map_err(|error| error.to_string())?;
+            finality
+                .accept(qc.clone())
+                .map_err(|error| error.to_string())?;
             certificates.push(qc);
         }
         if finality.last_finalized() != Some(&record) {
@@ -2420,8 +2686,12 @@ impl AuthenticatedIngress {
             quorum_certificates: certificates.try_into().map_err(|_| "three QCs required")?,
             timeout_certificates: timeouts.into_values().collect(),
         };
-        let evidence = PublicFinalityEvidence { version: 1, finalized: record,
-            witness, _permit };
+        let evidence = PublicFinalityEvidence {
+            version: 1,
+            finalized: record,
+            witness,
+            _permit,
+        };
         super::rpc::proofs::bounded_document(&evidence)?;
         Ok(evidence)
     }
@@ -3334,7 +3604,10 @@ mod outbound_tests {
         let posy = InboundFrame::new(peer, ProtocolKind::Posy, vec![2], 8).unwrap();
         ingress.publish(posy.clone()).unwrap();
         ingress.publish(posy.clone()).unwrap();
-        assert_eq!(ingress.take(ProtocolKind::Posy).unwrap(), Some(posy.clone()));
+        assert_eq!(
+            ingress.take(ProtocolKind::Posy).unwrap(),
+            Some(posy.clone())
+        );
         assert_eq!(ingress.take(ProtocolKind::Posy).unwrap(), Some(posy));
         for sequence in 0..64u8 {
             assert_eq!(

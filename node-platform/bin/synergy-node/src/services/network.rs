@@ -173,7 +173,7 @@ fn registration_service(
             restart_policy: RestartPolicy::OnFailure { max_attempts: 3 },
         },
         NetworkService {
-            addresses: network.listen_addresses.clone(),
+            addresses: if configuration.apqe_transport.is_some(){super::transport_endpoint::local_listeners(configuration)?}else{network.listen_addresses.clone()},
             transport,
             limits,
             listeners: Vec::new(),
@@ -236,7 +236,7 @@ fn build_session_context(
     max_frame_bytes: usize,
     ingress: AuthenticatedIngress,
 ) -> Result<Option<SessionOwner>, String> {
-    if let Some(factory) = super::apqe_transport::factory(configuration)? {
+    if let Some(factory) = super::apqe_transport::factory_with_ingress(configuration,ingress.clone())? {
         let local_node_address = factory.local_node_address().clone();
         return Ok(Some(SessionOwner::Secure(Arc::new(SecureSessionContext {
             ingress,
@@ -578,6 +578,11 @@ impl ManagedService for NetworkService {
                     // The router records bounded global/per-peer rejection.
                     // Remote bursts are packet loss for reliable owners, not a
                     // local service-integrity failure.
+                    if frame.protocol==synergy_protocol_types::ProtocolKind::Discovery {
+                        if let Some(SessionOwner::Secure(context))=&self.session {
+                            match context.factory.receive_endpoint(&frame.payload){Ok(true)=>continue,Ok(false)=>{},Err(_)=>continue}
+                        }
+                    }
                     let _ = self.router.try_admit(frame);
                 }
                 Ok(NetworkEvent::Closed {
@@ -622,6 +627,12 @@ impl ManagedService for NetworkService {
                     self.ingress.admit_session(peer_id.clone(), session_id)?;
                     if apqe_engineering_session {
                         self.ingress.mark_apqe_session(&peer_id, session_id)?;
+                    }
+                    if let Some(SessionOwner::Secure(context))=&self.session {
+                        for payload in context.factory.endpoint_announcements()? {
+                            let _=sender.try_send(OutboundPayload{protocol:synergy_protocol_types::ProtocolKind::Discovery,payload,
+                                #[cfg(feature="qualification-timing")] diagnostic_enqueued_at:None});
+                        }
                     }
                     self.senders
                         .insert(peer_id, (connection_id, session_id, sender));
@@ -764,7 +775,7 @@ impl ManagedService for NetworkService {
             for (peer, address) in context.factory.dial_peers()? {
                 // Same canonical direction as PeerManager duplicate arbitration,
                 // selected before APQE's single-pending-peer admission barrier.
-                if context.local_node_address.as_str() >= peer.as_str()
+                if (context.local_node_address.as_str() >= peer.as_str() && !context.factory.allow_reverse_dial())
                     || self.senders.contains_key(peer.as_str())
                     || self
                         .dialing
@@ -791,7 +802,7 @@ impl ManagedService for NetworkService {
             let Some(context) = &self.session else {
                 continue;
             };
-            if matches!(context, SessionOwner::Secure(c) if c.local_node_address.as_str() >= request.peer_id.as_str())
+            if matches!(context, SessionOwner::Secure(c) if c.local_node_address.as_str() >= request.peer_id.as_str() && !c.factory.allow_reverse_dial())
                 || self.senders.contains_key(&request.peer_id)
                 || self
                     .dialing
