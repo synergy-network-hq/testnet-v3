@@ -32,6 +32,19 @@ impl FinalityStore {
         self.0.storage_write(&format!("h{}", record.height), record)
     }
 
+    pub(super) fn snapshot_anchor_write(
+        &self,
+        record: &FinalizedBlockRecord,
+    ) -> PosyResult<synergy_storage::StorageWrite> {
+        if record.height == 0
+            || !is_hash(&record.block_id)
+            || !is_hash(&record.finality_certificate_id)
+            || !is_hash(&record.protected_execution_root)
+        {
+            return Err(PosyError::invalid("invalid certified snapshot anchor"));
+        }
+        self.0.storage_write(&format!("h{}", record.height), record)
+    }
     fn validate_contiguous(
         &self,
         record: &FinalizedBlockRecord,

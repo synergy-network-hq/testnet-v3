@@ -11,12 +11,15 @@ serde.workspace = true
 serde_json.workspace = true
 sha3.workspace = true
 synergy-aegis = { path = "../../crates/synergy-aegis" }
+synergy-address = { path = "../../crates/synergy-address" }
 synergy-etdag = { path = "../../crates/synergy-etdag" }
 synergy-posy = { path = "../../crates/synergy-posy" }
 synergy-governance = { path = "../../crates/synergy-governance" }
 synergy-storage = { path = "../../crates/synergy-storage" }
 
 synergy-state = { path = "../../crates/synergy-state" }
+synergy-block = { path = "../../crates/synergy-block" }
+synergy-protocol-types = { path = "../../crates/synergy-protocol-types" }
 
 [dev-dependencies]
 synergy-address-engine = { version = "=2.0.0", path = "../../../../21-Aegis-Engine/synergy-address-engine" }

@@ -132,6 +132,8 @@ pub struct ProtectedEpochPolicy {
     /// original policy bytes and all historical unchanged-rollover proofs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub membership_authorization_root: Option<String>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub automatic_validator_admission:Option<synergy_governance::AutomaticValidatorAdmissionPolicy>,
 }
 
 impl ProtectedEpochPolicy {
@@ -181,6 +183,7 @@ impl ProtectedEpochPolicy {
         registry: &FrozenValidatorRegistry,
         epoch: &SimplifiedEpochContext,
     ) -> Result<(), String> {
+        if let Some(policy)=&self.automatic_validator_admission {policy.validate()?;}
         self.timestamp_for_height_ms(
             epoch.epoch_start_height,
             epoch.epoch_end_height,
@@ -335,6 +338,7 @@ mod protected_key_schedule_tests {
             assigned_cluster_membership_root: "d".repeat(64),
             wallet_dispatch: None,
             membership_authorization_root: None,
+            automatic_validator_admission:None,
         };
         assert_eq!(
             policy.timestamp_for_height_ms(1, 100, 1).unwrap(),

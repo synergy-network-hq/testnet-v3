@@ -10,6 +10,8 @@ pub mod emergency;
 pub mod ethereum_activation;
 pub mod execution;
 pub mod membership;
+pub mod validator_admission;
+pub use validator_admission::*;
 pub mod proposal;
 pub mod vote;
 

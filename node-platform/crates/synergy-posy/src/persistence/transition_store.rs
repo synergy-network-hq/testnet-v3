@@ -26,6 +26,36 @@ impl AtomicConsensusTransitionStore {
         })
     }
 
+    /// Imports an independently authenticated sparse snapshot anchor, including
+    /// all three QCs in the same atomic evidence commit. This never changes a
+    /// signing journal or supplies authorization for a current validator to roll
+    /// back. Native startup restricts it to an admitted, non-voting new identity.
+    pub fn commit_verified_snapshot_anchor(
+        &self,
+        record: &FinalizedBlockRecord,
+        witness: &crate::FinalitySyncWitness,
+        epoch: &SimplifiedEpochContext,
+        validators: &FrozenValidatorRegistry,
+        verifier: &impl ConsensusSignatureVerifier,
+    ) -> PosyResult<bool> {
+        if witness.timeout_certificates.len() > 128 {
+            return Err(PosyError::invalid("snapshot timeout work exceeds bound"));
+        }
+        witness.verified_timeout_closure(epoch, validators, verifier)?;
+        let mut verified = crate::ThreeQcFinality::default();
+        let mut writes = vec![];
+        for qc in &witness.quorum_certificates {
+            writes.push(verified_qc_write(qc, epoch, validators, verifier)?);
+            verified.accept(qc.clone())?;
+        }
+        if verified.last_finalized() != Some(record) {
+            return Err(PosyError::Conflict(
+                "snapshot anchor differs from its complete three-QC finality".into(),
+            ));
+        }
+        writes.push(self.finality.snapshot_anchor_write(record)?);
+        self.store.commit_finality_atomic(&writes, record.height)
+    }
     pub fn commit_verified_qc_and_finality(
         &self,
         certificate: &SimplifiedQuorumCertificate,

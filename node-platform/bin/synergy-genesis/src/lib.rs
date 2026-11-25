@@ -3,6 +3,7 @@ pub mod authority;
 pub mod builder;
 pub mod etdag;
 pub mod membership;
+pub mod validator_admission;
 pub mod network;
 pub mod signing;
 pub mod validator_set;

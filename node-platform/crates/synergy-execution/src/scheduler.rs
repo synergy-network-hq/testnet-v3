@@ -543,6 +543,18 @@ where
                     source,
                 }
             })?;
+            // Initial Wallet naming now has a dedicated fee-free D/P carrier.
+            // An old authenticated ordinary carrier cannot charge for naming,
+            // execute a fallback, or poison ordering after an upgrade. Retire
+            // its exact financial nonce with an explicit zero-fee rejection.
+            if matches!(&action,TransactionAction::Native{module,method,..} if module=="naming"&&method=="register_wallet") {
+                consume_async_rejection_nonce(&mut overlay,&transaction.unsigned.sender,transaction.unsigned.nonce)
+                    .map_err(|source|BlockExecutionError::State{transaction_index,source})?;
+                receipts.push(TransactionReceipt{transaction_id,status:ReceiptStatus::Reverted,gas_used:0,
+                    state_root_after:state_root(overlay.staged()).map_err(BlockExecutionError::StateRoot)?,
+                    error_code:Some("legacy_wallet_registration_retired_v1".into())});
+                continue;
+            }
             let transaction_position =
                 u32::try_from(transaction_index).map_err(|_| BlockExecutionError::Dispatcher {
                     transaction_index,

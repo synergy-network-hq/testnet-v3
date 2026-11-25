@@ -25,6 +25,7 @@ impl VerifiedMembershipRetirement {
             return Err("unsupported bounded membership retirement".into());
         }
         let spec:MembershipRetirementSpec=serde_json::from_slice(&execution.mutation.value).map_err(|e|e.to_string())?;
+        if let Some(policy)=&spec.automatic_admission_policy {policy.validate()?;}
         let close=previous.epoch_end_height.checked_sub(2).ok_or("membership close underflow")?;
         if spec.schema_version!=1 || spec.chain_id!=previous.chain_id || spec.network_id!=previous.network_id
             || spec.genesis_hash!=genesis_hash || spec.frozen_epoch!=previous.epoch
@@ -79,6 +80,7 @@ impl VerifiedMembershipRetirement {
         current.validate(registry,previous)?;
         let mut next=current.successor_clock(previous.epoch_start_height,previous.epoch_end_height)?;
         next.membership_authorization_root=Some(self.execution.authorization_root.clone());
+        if let Some(policy)=&self.spec.automatic_admission_policy {next.automatic_validator_admission=Some(policy.clone());}
         let active:std::collections::BTreeSet<_>=self.next_registry.active().map(|v|v.validator_id.as_str()).collect();
         next.ingress_kem_registry.records.retain(|record|active.contains(record.validator_id.as_str()));
         next.assigned_cluster_membership_root=self.next_registry.active_set_root().map_err(|e|e.to_string())?;
@@ -100,7 +102,7 @@ impl VerifiedMembershipRetirement {
 
 // Exact serialization/domain definitions are the existing native single-cluster
 // descriptors, extended to the next authenticated membership and epoch range.
-fn rebind_processing_membership(
+pub(crate) fn rebind_processing_membership(
     next:&mut ProtectedEpochPolicy, previous:&SimplifiedEpochContext, registry:&FrozenValidatorRegistry,
 ) ->Result<(),String> {
     #[derive(serde::Serialize)]

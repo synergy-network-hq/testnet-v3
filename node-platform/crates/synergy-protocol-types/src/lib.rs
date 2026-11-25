@@ -5,6 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Existing network validator bond, in the canonical nine-decimal native unit.
+pub const VALIDATOR_MINIMUM_BOND_NWEI:u128=50_000_000_000_000;
+
 mod block;
 mod certificate;
 mod chain;
@@ -17,6 +20,7 @@ mod role;
 mod serialization;
 mod transaction;
 mod validator;
+pub mod bounded_document;
 
 pub use block::{BlockReference, BlockReferenceError};
 pub use certificate::{CertificateKind, CertificateReference};
@@ -112,3 +116,5 @@ mod tests {
         assert!(AuthenticatedPeer::new("", SessionId(1), Vec::new()).is_err());
     }
 }
+
+pub mod canonical_bytes;

@@ -17,7 +17,7 @@ pub use world::{
 };
 
 const BPS: u64 = 10_000;
-pub const TESTNET_VALIDATOR_MINIMUM_STAKE_NWEI: u128 = 50_000_000_000_000;
+pub const TESTNET_VALIDATOR_MINIMUM_STAKE_NWEI: u128 = synergy_protocol_types::VALIDATOR_MINIMUM_BOND_NWEI;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValidatorRewardError {

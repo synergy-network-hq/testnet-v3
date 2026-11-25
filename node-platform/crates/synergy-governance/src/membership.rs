@@ -19,6 +19,8 @@ pub struct MembershipRetirementSpec {
     pub install_not_before_finalized_height: u64,
     pub effective_epoch: u64,
     pub retired_validator_id: String,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub automatic_admission_policy:Option<crate::AutomaticValidatorAdmissionPolicy>,
 }
 impl MembershipRetirementSpec {
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, String> {
@@ -48,6 +50,7 @@ pub struct MembershipRetirementDraft {
 impl MembershipRetirementDraft {
     pub fn validate(&self)->Result<(),String>{
         self.proposal.validate(&self.constitution)?;
+        if let Some(policy)=&self.spec.automatic_admission_policy {policy.validate()?;}
         let mutation=self.spec.mutation()?;
         let s=&self.spec;
         if self.proposal.state!=crate::ProposalState::Authorized||self.proposal.actions.len()!=1

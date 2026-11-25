@@ -7,5 +7,10 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+base64 = "0.22"
+flate2 = "1.1"
 serde.workspace = true
 synergy-address = { path = "../synergy-address" }
+
+[dev-dependencies]
+serde_json.workspace = true
