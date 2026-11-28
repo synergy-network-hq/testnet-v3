@@ -20,6 +20,7 @@ pub mod proposal;
 pub mod protocol;
 pub mod quorum;
 pub mod recovery;
+pub mod r1;
 mod sync_witness;
 pub mod timeout;
 pub mod version;
