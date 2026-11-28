@@ -290,9 +290,18 @@ def _sealed_receipt(root):
     metadata = root.stat()
     require(metadata.st_uid == os.geteuid() and not metadata.st_mode & 0o022, 'unsafe installation root ownership/mode')
     receipt = read(root/'installation.json')
-    require(receipt.get('root') == str(root) and receipt.get('format') == 'synergy-universal-linux-v1', 'installation receipt/root mismatch')
+    mac_bootstrap_root = (receipt.get('format') == 'synergy-platform-release-v1'
+                          and receipt.get('role') == 'bootstrap_root_custody'
+                          and sys.platform == 'darwin' and os.uname().machine == 'arm64')
+    require(receipt.get('root') == str(root)
+            and (receipt.get('format') == 'synergy-universal-linux-v1' or mac_bootstrap_root),
+            'installation receipt/root mismatch')
     require(digest(root/'package.json') == receipt['package_sha256'], 'installed manifest drift')
     manifest = read(root/'package.json')
+    if mac_bootstrap_root:
+        require(manifest.get('format') == 'synergy-platform-release-v1'
+                and manifest.get('platform') == 'macos' and manifest.get('architecture') == 'aarch64',
+                'initial macOS BootstrapRoot release platform differs')
     require(receipt['package_files'] == manifest['files'], 'installation inventory differs')
     if any(name.startswith(('hosted-machines/','lib/guest-tools/')) for name in manifest['files']):
         from guest_lifecycle import resource_file_pins

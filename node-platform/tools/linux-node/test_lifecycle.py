@@ -73,6 +73,49 @@ class LifecycleTests(unittest.TestCase):
         stack.enter_context(patch.object(life,'_fresh_conformance',return_value={'conformant':True}))
         stack.enter_context(patch.object(life,'_assert_no_application_processes'))
         return stack
+    def mac_bootstrap_receipt(self):
+        manifest={**self.old,'format':'synergy-platform-release-v1','platform':'macos','architecture':'aarch64'}
+        save(self.root/'package.json',manifest)
+        receipt={**self.receipt,'format':manifest['format'],'role':'bootstrap_root_custody',
+                 'package_sha256':node.digest(self.root/'package.json')}
+        save(self.root/'installation.json',receipt)
+        return receipt,manifest
+    def test_initial_mac_bootstrap_root_accepts_existing_platform_release_without_services(self):
+        from types import SimpleNamespace
+        expected=self.mac_bootstrap_receipt()
+        with patch.object(life.sys,'platform','darwin'),patch.object(life.os,'uname',return_value=SimpleNamespace(machine='arm64')):
+            self.assertEqual(life._sealed_receipt(self.root),expected)
+        self.assertEqual(self.operations,[])
+        self.assertFalse((self.root/'keys').exists())
+    def test_initial_mac_root_rejects_other_roles_hosts_and_manifest_targets(self):
+        from types import SimpleNamespace
+        receipt,manifest=self.mac_bootstrap_receipt()
+        with patch.object(life.sys,'platform','darwin'),patch.object(life.os,'uname',return_value=SimpleNamespace(machine='arm64')):
+            for role in ('validator','sentry','bootstrap_root',None):
+                save(self.root/'installation.json',{**receipt,'role':role})
+                with self.subTest(role=role),self.assertRaises(ValueError):life._sealed_receipt(self.root)
+            save(self.root/'installation.json',receipt)
+            for platform,architecture in [('windows','aarch64'),('macos','x86_64'),('macos','arm64')]:
+                save(self.root/'package.json',{**manifest,'platform':platform,'architecture':architecture})
+                save(self.root/'installation.json',{**receipt,'package_sha256':node.digest(self.root/'package.json')})
+                with self.subTest(platform=platform,architecture=architecture),self.assertRaises(ValueError):life._sealed_receipt(self.root)
+        self.mac_bootstrap_receipt()
+        for system,machine in [('linux','arm64'),('win32','arm64'),('darwin','x86_64')]:
+            with patch.object(life.sys,'platform',system),patch.object(life.os,'uname',return_value=SimpleNamespace(machine=machine)):
+                with self.subTest(system=system,machine=machine),self.assertRaises(ValueError):life._sealed_receipt(self.root)
+        self.assertEqual(self.operations,[])
+    def test_initial_mac_root_retains_exact_package_inventory_and_member_pins(self):
+        from types import SimpleNamespace
+        with patch.object(life.sys,'platform','darwin'),patch.object(life.os,'uname',return_value=SimpleNamespace(machine='arm64')):
+            receipt,manifest=self.mac_bootstrap_receipt()
+            save(self.root/'installation.json',{**receipt,'package_sha256':'00'*32})
+            with self.assertRaisesRegex(ValueError,'manifest drift'):life._sealed_receipt(self.root)
+            save(self.root/'installation.json',{**receipt,'package_files':{}})
+            with self.assertRaisesRegex(ValueError,'inventory differs'):life._sealed_receipt(self.root)
+            save(self.root/'installation.json',receipt)
+            save(self.root/'bin/synergy-node',b'PUBLIC SYNTHETIC CHANGED PACKAGE MEMBER')
+            with self.assertRaisesRegex(ValueError,'installed package drift'):life._sealed_receipt(self.root)
+        self.assertEqual(self.operations,[])
     def test_foreign_vendor_missing_fragment_rejects_all_mutation(self):
         self.register_fixture();(self.units/life.UNITS[0]).unlink()
         foreign={'LoadState':'loaded','FragmentPath':'/usr/lib/systemd/system/synergy-node.service','MainPID':'81','ActiveState':'active'}
