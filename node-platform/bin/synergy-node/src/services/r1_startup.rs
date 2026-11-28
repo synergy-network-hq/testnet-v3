@@ -134,6 +134,121 @@ impl VerifiedR1StartupInputs {
     pub(crate) fn local_node(&self) -> &synergy_genesis::r1::policy::NodeRecord {
         &self.genesis.compiled().nodes()[self.local_node_index]
     }
+    /// Join the private complete Genesis and an actual protected, selected native
+    /// Runtime-use grant to the canonical SDK worker. This constructs no socket,
+    /// publishes no registry and grants no commissioning permission. The native
+    /// controller owns the passphrase input and the later managed service phase.
+    pub(crate) fn open_native_transport(
+        &self,
+        c: &NodeConfiguration,
+        receipt_relative: &std::path::Path,
+        passphrase: &synergy_address_engine::apqe::SecretBytes,
+    ) -> Result<
+        synergy_address_engine::apqe::managed_runtime_transport::ManagedTransportWorker,
+        String,
+    > {
+        use synergy_address_engine::apqe::{
+            managed_creation::runtime_use::{
+                RuntimeAdmissionKind, VerifiedManagedRuntimeUseAuthorization,
+            },
+            managed_runtime_transport::ManagedTransportWorker,
+        };
+        c.validate().map_err(|e| e.to_string())?;
+        let selection = c
+            .r1_genesis
+            .as_ref()
+            .ok_or("missing current Genesis selection")?;
+        let runtime = c
+            .r1_runtime
+            .as_ref()
+            .ok_or("missing current runtime policy")?;
+        if runtime.local_node_identity != self.local_node().identity
+            || c.role != self.local_node().primary_role
+            || c.chain_id != self.genesis.coordinate().network.chain_id
+            || !runtime
+                .transport_use_receipts
+                .iter()
+                .any(|p| p == receipt_relative)
+        {
+            return Err(
+                "native transport receipt is not selected for this authenticated local node".into(),
+            );
+        }
+        // This pure producer requires private complete formation/qualified seed;
+        // bootstrap root approvals or request digests alone cannot enter here.
+        let registry = self
+            .genesis
+            .initial_runtime_admission_registry()
+            .map_err(|e| format!("initial runtime admission: {e:?}"))?;
+        let file = synergy_genesis::r1::received_bundle::open_protected_managed_file(
+            &selection.managed_root,
+            receipt_relative,
+            1024 * 1024,
+        )
+        .map_err(|e| format!("native transport receipt descriptor: {e:?}"))?;
+        let path = selection.managed_root.join(receipt_relative);
+        let auth = VerifiedManagedRuntimeUseAuthorization::from_controller_receipt(
+            &selection.managed_root,
+            &path,
+            file,
+            self.genesis.nic_approvals(),
+            self.genesis.genesis_approvals(),
+        )
+        .map_err(|e| format!("native transport use authorization: {e:?}"))?;
+        let row = registry
+            .nodes
+            .iter()
+            .find(|n| n.identity == self.local_node().identity)
+            .ok_or("local node missing in authenticated runtime registry")?;
+        let key = auth.public_key_record();
+        if auth.platform_root() != selection.managed_root
+            || auth.runtime_store_root() != c.storage.data_directory
+            || auth.admission_kind() != RuntimeAdmissionKind::InitialGenesis
+            || auth.network() != registry.network
+            || auth.genesis() != self.genesis.coordinate().genesis.digest
+            || auth.activated_profiles() != registry.profiles
+            || auth.owner_id() != row.identity
+            || auth.runtime_registry_commitment()
+                != registry
+                    .commitment()
+                    .map_err(|_| "runtime registry commitment unavailable")?
+            || auth.admission_record_commitment()
+                != registry
+                    .admission_commitment(row)
+                    .map_err(|_| "runtime admission commitment unavailable")?
+            || auth.current_policy_epoch() != row.policy_epoch
+            || auth.policy_commitment() != row.policy_commitment
+            || auth.role_binding_commitment() != row.role_key_set_commitment
+            || row.status != 1
+            || !row.keys.iter().any(|k| {
+                k.role == key.role
+                    && k.generation == key.key_generation
+                    && k.public_key == key.full_public_key
+            })
+        {
+            return Err(
+                "native transport permission differs from complete Genesis/current local admission"
+                    .into(),
+            );
+        }
+        auth.fence_lease()
+            .ensure_current()
+            .map_err(|e| format!("native transport current custody fence: {e:?}"))?;
+        let (record_path, record) =
+            synergy_address::r1_custody::NativeCustodyJournal::managed_runtime_transport_record(
+                &auth,
+            )
+            .map_err(|e| format!("native transport custody record: {e:?}"))?;
+        let shared = super::apqe_provider::load_current_r1_verification(c)?;
+        let engine = Arc::try_unwrap(shared)
+            .map_err(|_| "native transport engine must have one worker owner")?
+            .into_inner()
+            .map_err(|_| "native transport engine lock poisoned")?;
+        let password = std::str::from_utf8(passphrase.as_bytes())
+            .map_err(|_| "native transport passphrase encoding")?;
+        ManagedTransportWorker::open(auth, engine, &record_path, record, password)
+            .map_err(|e| format!("open native transport worker: {e:?}"))
+    }
     /// Uses the EXISTING process pool and actual full-width store/provider.
     /// Construction creates/recover no database and confers no finality status.
     pub(crate) fn read_provider(
@@ -230,6 +345,24 @@ mod tests {
         assert!(!root.exists());
         let result = VerifiedR1StartupInputs::from_verified(&config, Arc::clone(&genesis));
         assert!(matches!(result,Err(reason) if reason.contains("complete schema2 formation")));
+        assert!(!root.exists());
+        // Even an in-module wrapper cannot open a native grant/custody file
+        // without genuine complete formation; the producer rejects first.
+        let incomplete = VerifiedR1StartupInputs {
+            genesis: Arc::clone(&genesis),
+            local_node_index: 0,
+        };
+        let password = synergy_address_engine::apqe::SecretBytes::from_bytes(
+            b"public-synthetic-test-only".to_vec(),
+        );
+        assert!(matches!(
+            incomplete.open_native_transport(
+                &config,
+                std::path::Path::new("native/transport-use.json"),
+                &password
+            ),
+            Err(reason) if reason.contains("initial runtime admission")
+        ));
         assert!(!root.exists());
         let mut wrong = config.clone();
         wrong.r1_genesis.as_mut().unwrap().expected_genesis_hex = "14".repeat(48);

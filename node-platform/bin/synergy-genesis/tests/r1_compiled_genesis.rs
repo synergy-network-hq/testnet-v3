@@ -361,6 +361,25 @@ fn installed_received_bundle_checks_actual_signatures_and_confines_public_files(
         profile_catalog_sha256: selection.profile_catalog_sha256.clone(),
         expected_nic_hex: selection.expected_nic_hex.clone(),
     };
+    // Prospective authority review precedes its own NIC approvals. No future
+    // approval file, provider, signature, key creation or state write is needed.
+    let prospective = synergy_config::R1NicSelection {
+        approvals_path: "not-issued-yet.json".into(),
+        ..nic_selection.clone()
+    };
+    let load_pins = synergy_genesis::r1::received_bundle::load_received_pinned_authority;
+    let (pinned, prospective_catalog) = load_pins(&prospective, u64::MAX - 1).unwrap();
+    assert_eq!(pinned.network().nic.as_slice(), bytes(&selection.expected_nic_hex));
+    assert_eq!(prospective_catalog, common::catalog());
+    assert!(!temporary.0.join("not-issued-yet.json").exists());
+    assert!(load_pins(&prospective, 0).is_err());
+    assert!(load_pins(&prospective, 9969).is_err());
+    let mut wrong_pin = prospective.clone();
+    wrong_pin.pinned_bootstrap_input_sha256 = "00".repeat(32);
+    assert!(matches!(load_pins(&wrong_pin, u64::MAX - 1), Err(BundleError::Integrity)));
+    let mut wrong_nic = prospective.clone();
+    wrong_nic.expected_nic_hex = "01".repeat(64);
+    assert!(load_pins(&wrong_nic, u64::MAX - 1).is_err());
     std::fs::rename(
         temporary.0.join("genesis.core"),
         temporary.0.join("unused-future-genesis.core"),

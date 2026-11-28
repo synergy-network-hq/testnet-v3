@@ -133,13 +133,10 @@ impl ProtectedRoot {
         protected(&current, true)?;
         Ok(Self(current))
     }
-    fn read(&self, path: &Path, max: u64) -> Result<Vec<u8>, BundleError> {
-        use std::{
-            io::Read,
-            os::{
-                fd::{AsRawFd, FromRawFd},
-                unix::ffi::OsStrExt,
-            },
+    fn open_file(&self, path: &Path, max: u64) -> Result<std::fs::File, BundleError> {
+        use std::os::{
+            fd::{AsRawFd, FromRawFd},
+            unix::ffi::OsStrExt,
         };
         let parts = normal_components(path)?;
         let mut current = self.0.try_clone().map_err(|_| BundleError::Read)?;
@@ -165,6 +162,12 @@ impl ProtectedRoot {
         if metadata.len() == 0 || metadata.len() > max {
             return Err(BundleError::Bounds);
         }
+        Ok(current)
+    }
+    fn read(&self, path: &Path, max: u64) -> Result<Vec<u8>, BundleError> {
+        use std::io::Read;
+        let current = self.open_file(path, max)?;
+        let metadata = current.metadata().map_err(|_| BundleError::Read)?;
         let mut bytes = Vec::new();
         current
             .take(max + 1)
@@ -268,6 +271,29 @@ pub fn read_protected_managed_file(
     ProtectedRoot::open(root)?.read(relative, maximum)
 }
 
+/// Return the SAME protected descriptor for an exact selected native receipt.
+/// This authenticates neither its contents nor any operation permission. Native
+/// APQE revalidates descriptor/path/inode and its independent Root-issued grant.
+/// No symlink or blocking special-file open, file creation, or path reopen.
+pub fn open_protected_managed_file(
+    root: &Path,
+    relative: &Path,
+    maximum: u64,
+) -> Result<std::fs::File, BundleError> {
+    if maximum == 0 || maximum > 64 * 1024 * 1024 {
+        return Err(BundleError::Bounds);
+    }
+    #[cfg(unix)]
+    {
+        ProtectedRoot::open(root)?.open_file(relative, maximum)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (root, relative);
+        Err(BundleError::UnsupportedPlatform)
+    }
+}
+
 fn load_pinned_inputs(
     root: &ProtectedRoot,
     selection: &synergy_config::R1NicSelection,
@@ -336,6 +362,28 @@ fn load_pinned_inputs(
     )
     .map_err(|_| BundleError::Approval)?;
     Ok((authority, catalog))
+}
+
+/// Load independently selected complete bootstrap pins before the NIC approval
+/// ceremony. This recomputes the supplied birth against the expected NIC and
+/// checks its exact catalog; it grants no signing or runtime authority. In
+/// particular, the future NIC approvals path is neither opened nor required.
+pub fn load_received_pinned_authority(
+    selection: &synergy_config::R1NicSelection,
+    expected_chain: u64,
+) -> Result<(PinnedBootstrapAuthority, ProfileCatalog), BundleError> {
+    let expected_nic = hex::<64>(&selection.expected_nic_hex)?;
+    if expected_chain == 0 || expected_nic == [0; 64] {
+        return Err(BundleError::Context);
+    }
+    for path in [
+        &selection.pinned_bootstrap_input_path,
+        &selection.profile_catalog_path,
+    ] {
+        normal_components(path)?;
+    }
+    let root = ProtectedRoot::open(&selection.managed_root)?;
+    load_pinned_inputs(&root, selection, expected_chain, &expected_nic)
 }
 
 /// Authenticate existing public artifacts selected by a protected managed
@@ -415,4 +463,79 @@ pub fn load_received_bundle(
         return Err(BundleError::Context);
     }
     Ok(Arc::new(verified))
+}
+
+#[cfg(all(test, unix))]
+mod descriptor_tests {
+    use super::*;
+    use std::{
+        fs,
+        io::Read,
+        os::unix::{
+            ffi::OsStrExt,
+            fs::{symlink, PermissionsExt},
+        },
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+    struct Temp(PathBuf);
+    impl Temp {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let p = std::env::temp_dir().join(format!(
+                "r1-public-descriptor-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&p).unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o700)).unwrap();
+            Self(p.canonicalize().unwrap())
+        }
+    }
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    #[test]
+    fn same_descriptor_survives_path_replacement_without_reopen() {
+        let t = Temp::new();
+        fs::write(t.0.join("receipt.json"), b"original public receipt").unwrap();
+        let mut fd = open_protected_managed_file(&t.0, Path::new("receipt.json"), 64).unwrap();
+        fs::rename(t.0.join("receipt.json"), t.0.join("retired-public.json")).unwrap();
+        fs::write(t.0.join("receipt.json"), b"replaced public receipt").unwrap();
+        let mut bytes = Vec::new();
+        fd.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"original public receipt");
+        assert_eq!(
+            read_protected_managed_file(&t.0, Path::new("receipt.json"), 64).unwrap(),
+            b"replaced public receipt"
+        );
+    }
+    #[test]
+    fn bounds_confinement_symlinks_and_fifo_reject_without_creation_or_blocking() {
+        let t = Temp::new();
+        fs::write(t.0.join("public.json"), b"public fixture").unwrap();
+        assert!(open_protected_managed_file(&t.0, Path::new("public.json"), 2).is_err());
+        for path in [
+            "../public.json",
+            "./public.json",
+            "nested/../public.json",
+            "/public.json",
+            "._public.json",
+        ] {
+            assert!(open_protected_managed_file(&t.0, Path::new(path), 64).is_err());
+        }
+        symlink(t.0.join("public.json"), t.0.join("alias.json")).unwrap();
+        assert!(open_protected_managed_file(&t.0, Path::new("alias.json"), 64).is_err());
+        let fifo = t.0.join("fifo");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // Public test FIFO, no writer. O_NONBLOCK + regular-file verification
+        // must reject immediately rather than wait for an attacker-owned peer.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(open_protected_managed_file(&t.0, Path::new("fifo"), 64).is_err());
+        let absent = t.0.join("absent");
+        assert!(open_protected_managed_file(&absent, Path::new("public.json"), 64).is_err());
+        assert!(!absent.exists());
+    }
 }
