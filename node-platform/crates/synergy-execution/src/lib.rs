@@ -3,6 +3,8 @@
 //! ETDAG owns protected admission/order/reveal. Execution owns deterministic
 //! transition application and receipts. PoSy alone owns agreement and finality.
 
+pub mod r1_payload;
+
 mod candidate;
 mod candidate_store;
 mod context;

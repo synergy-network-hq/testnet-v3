@@ -14,6 +14,7 @@ sha3.workspace = true
 synergy-protocol-types = { path = "../synergy-protocol-types" }
 synergy-address = { path = "../synergy-address" }
 synergy-identity = { path = "../synergy-identity" }
+synergy-address-engine = { version = "=2.0.0", path = "../../../../21-Aegis-Engine/synergy-address-engine" }
 
 [dev-dependencies]
 aegis-pqvm = { path = "../aegis-pqvm", default-features = false, features = ["mldsa"] }

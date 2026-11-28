@@ -4,6 +4,7 @@
 //! quorum calculation, finality, or raw P2P transport.
 
 mod fee;
+pub mod r1;
 mod id;
 mod nonce;
 mod processing_wire;

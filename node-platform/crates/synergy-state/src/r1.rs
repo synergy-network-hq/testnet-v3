@@ -557,6 +557,19 @@ pub struct ComputedGenesisState {
 pub fn compile_genesis(input: &R1GenesisStateInput) -> Result<ComputedGenesisState, R1StateError> {
     synergy_address::r1_public::require_nonproduction_fixture(input.network.chain_id)
         .map_err(|_| R1StateError::CeremonyRequired)?;
+    recompute_received_genesis_state(input)
+}
+/// Pure recomputation of public received Genesis allocations and birth policies.
+/// This returns an untrusted in-memory calculation, never a native execution,
+/// issuance, persistence or activation capability. The actual Genesis verifier
+/// must independently authenticate the entire core and both root quorums.
+/// Construction/ceremony callers continue through the gated compile_genesis API.
+pub fn recompute_received_genesis_state(
+    input: &R1GenesisStateInput,
+) -> Result<ComputedGenesisState, R1StateError> {
+    if input.network.chain_id == 0 {
+        return Err(R1StateError::Context);
+    }
     if input.accounts.len() > 65_536
         || input.allocations.len() > 65_536
         || input.profile_definitions.len() > 65_536
@@ -715,6 +728,34 @@ pub fn compile_genesis(input: &R1GenesisStateInput) -> Result<ComputedGenesisSta
 #[cfg(test)]
 mod bounds_tests {
     use super::*;
+    #[test]
+    fn received_public_validation_is_separate_from_actual_ceremony_construction() {
+        // Invalid supplied actual-chain metadata must reach read-only semantic
+        // validation without constructing any real identity/state/commitment.
+        let mut input = R1GenesisStateInput {
+            network: R1NetworkRef {
+                chain_id: 9969,
+                nic: [0; 64],
+            },
+            accounts: vec![],
+            allocations: vec![],
+            restricted_records: vec![],
+            profile_definitions: vec![],
+        };
+        assert!(matches!(
+            compile_genesis(&input),
+            Err(R1StateError::CeremonyRequired)
+        ));
+        assert!(matches!(
+            recompute_received_genesis_state(&input),
+            Err(R1StateError::ResourceLimit)
+        ));
+        input.network.chain_id = 0;
+        assert!(matches!(
+            recompute_received_genesis_state(&input),
+            Err(R1StateError::Context)
+        ));
+    }
     #[test]
     fn r1_large_policy_capacity_does_not_expand_global_state_or_create_shadow_balances() {
         let id = NativeIdentityPresentation::from_raw("syns", [9; 48])
