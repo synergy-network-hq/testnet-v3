@@ -23,6 +23,7 @@ mod serialization;
 mod transaction;
 mod validator;
 pub mod bounded_document;
+pub mod r1_rpc_response;
 
 pub use block::{BlockReference, BlockReferenceError};
 pub use certificate::{CertificateKind, CertificateReference};

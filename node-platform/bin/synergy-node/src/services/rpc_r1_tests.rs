@@ -114,7 +114,20 @@ fn runtime(chain_id: u64) -> RuntimeView {
         role: "observer".into(),
         chain_id,
         lifecycle: synergy_node_core::NodeLifecycleState::Starting,
-        services: vec![],
+        services: vec![
+            synergy_node_core::ServiceObservation {
+                id: synergy_node_core::ServiceId::new("public-synthetic-rpc").unwrap(),
+                state: synergy_node_core::ServiceState::Running,
+                health: synergy_node_core::ServiceHealth::Degraded { reason: "PUBLIC_TEST_PRIVATE_REASON_SENTINEL".into() },
+                readiness: synergy_node_core::ServiceReadiness::Pending { reason: "PUBLIC_TEST_PRIVATE_REASON_SENTINEL".into() },
+            },
+            synergy_node_core::ServiceObservation {
+                id: synergy_node_core::ServiceId::new("public-synthetic-execution").unwrap(),
+                state: synergy_node_core::ServiceState::Starting,
+                health: synergy_node_core::ServiceHealth::Unhealthy { reason: "PUBLIC_TEST_PRIVATE_REASON_SENTINEL".into() },
+                readiness: synergy_node_core::ServiceReadiness::Blocked { reason: "PUBLIC_TEST_PRIVATE_REASON_SENTINEL".into() },
+            },
+        ],
     }))
 }
 fn capacity() -> R1ReadCapacity {
@@ -274,15 +287,7 @@ fn actual_private_genesis_context_drives_all_registered_typed_read_adapters() {
         // asserted public synthetic network, never a production endpoint/key.
         if std::env::var_os("SYNERGY_R1_PUBLIC_CONSUMER_FIXTURE").as_deref()
             == Some(std::ffi::OsStr::new("1"))
-            && matches!(
-                *method,
-                "synergy_getAccount"
-                    | "synergy_getProof"
-                    | "synergy_getBlockReceipts"
-                    | "synergy_getBalance"
-                    | "synergy_getAccountNonce"
-                    | "synergy_getNonce"
-            )
+
         {
             println!(
                 "R1_PUBLIC_READ_FIXTURE {}",
@@ -369,6 +374,19 @@ fn actual_private_genesis_context_drives_all_registered_typed_read_adapters() {
                     response["result"]["block"]["receipts_commitment"]["value"],
                     hex(&block.receipts_root)
                 );
+            }
+            "synergy_getHealth" | "synergy_getHealthCheck" | "synergy_getReadiness"
+            | "synergy_getNodeStatus" | "synergy_nodeInfo" => {
+                assert_eq!(response["proof_profile_status"], "NOT_APPLICABLE_RUNTIME_OBSERVATION");
+                assert_eq!(response["result"]["ready"], false);
+                assert_eq!(response["result"]["services"][0]["health"], "degraded");
+                assert_eq!(response["result"]["services"][0]["readiness"], "pending");
+                assert_eq!(response["result"]["services"][1]["health"], "unhealthy");
+                assert_eq!(response["result"]["services"][1]["readiness"], "blocked");
+                assert!(!response.to_string().contains("PUBLIC_TEST_PRIVATE_REASON_SENTINEL"));
+            }
+            "synergy_ping" => {
+                assert_eq!(response["result"], json!({"scope":"RPC_LIVENESS_ONLY","responding":true}));
             }
             "synergy_getAccount" => {
                 assert_eq!(response["result"]["identity"], identity);

@@ -3,6 +3,7 @@ pub(crate) mod apqe_provider;
 mod apqe_registry_wire;
 mod apqe_rpc;
 pub(crate) mod apqe_rpc_service;
+pub(crate) mod apqe_rpc_current_response;
 pub(super) mod apqe_transport;
 pub mod authority;
 mod membership_retirement;
