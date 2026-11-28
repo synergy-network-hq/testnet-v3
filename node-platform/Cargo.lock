@@ -4269,8 +4269,10 @@ dependencies = [
  "serde_json",
  "sha3 0.10.9",
  "synergy-address",
+ "synergy-address-engine",
  "synergy-aegis",
  "synergy-ai",
+ "synergy-protocol-types",
  "synergy-state",
  "synergy-synq",
 ]

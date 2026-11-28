@@ -191,6 +191,8 @@ impl EvmCompatibilityPolicy {
 /// Supplied by native PoSy/execution ownership, never by an RPC caller's block
 /// overrides. Missing relevant BLOCKHASH ancestors fail instead of fabricating
 /// history. The common state checkpoint already authenticates the policy.
+pub type ProtectedCreditVerifier<'a> = dyn Fn(&[u8; 20], &WorldState) -> Result<(), String> + 'a;
+
 pub struct EvmBlockContext<'a> {
     pub chain_id: u64,
     pub genesis: [u8; 32],
@@ -206,7 +208,7 @@ pub struct EvmBlockContext<'a> {
     pub recent_block_hashes: &'a BTreeMap<u64, [u8; 32]>,
     /// Native protected-account owner must authenticate finalized registration
     /// and unchanged current policy. Absence denies every protected credit.
-    pub protected_credit_verifier: Option<&'a dyn Fn(&[u8; 20], &WorldState) -> Result<(), String>>,
+    pub protected_credit_verifier: Option<&'a ProtectedCreditVerifier<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -686,7 +688,7 @@ pub fn execute_legacy_evm(
     let gas_used = result.result.tx_gas_used();
     let base_fee =
         U256::from(gas_used) * U256::from(policy.base_fee_nwei) * U256::from(1_000_000_000u64);
-    if !result.state.contains_key(&beneficiary) {
+    if let std::collections::hash_map::Entry::Vacant(entry) = result.state.entry(beneficiary) {
         let mut db = WorldDatabase {
             world,
             policy: &policy,
@@ -697,7 +699,7 @@ pub fn execute_legacy_evm(
         let info = db.basic(beneficiary)?.unwrap_or_default();
         let mut account = revm::state::Account::from(info);
         account.mark_touch();
-        result.state.insert(beneficiary, account);
+        entry.insert(account);
     }
     let treasury = result
         .state
@@ -903,6 +905,13 @@ pub fn execute_legacy_evm(
     })
 }
 
+/// Interpreter fee mechanics are separate from native authorization and fee
+/// settlement. This enum is crate-private and confers no admission authority.
+#[derive(Clone, Copy)]
+pub(crate) enum KernelMode {
+    LegacyPaid,
+    ReadOnlySimulation,
+}
 fn run_kernel<'a>(
     policy: &'a EvmCompatibilityPolicy,
     context: &'a EvmBlockContext<'a>,
@@ -926,6 +935,41 @@ fn run_kernel<'a>(
         prevrandao: Some(B256::from(context.randomness)),
         ..Default::default()
     };
+    run_database_kernel(
+        &KernelConfiguration::from(policy),
+        block,
+        db,
+        tx,
+        if simulation {
+            KernelMode::ReadOnlySimulation
+        } else {
+            KernelMode::LegacyPaid
+        },
+    )
+}
+/// One canonical AIVM EVM interpreter for each qualified state adapter. R1
+/// callers provide full-width native context outside this computation kernel;
+/// no fabricated historical Genesis or account-identity conversion is needed.
+pub(crate) struct KernelConfiguration {
+    pub chain_id: u64,
+    pub memory_limit: u64,
+    pub maximum_code_bytes: usize,
+}
+impl From<&EvmCompatibilityPolicy> for KernelConfiguration {
+    fn from(policy: &EvmCompatibilityPolicy) -> Self {
+        Self { chain_id: policy.chain_id, memory_limit: policy.memory_limit,
+            maximum_code_bytes: policy.maximum_code_bytes }
+    }
+}
+pub(crate) fn run_database_kernel<D: Database<Error = EvmExecutionError>>(
+    policy: &KernelConfiguration,
+    block: BlockEnv,
+    db: D,
+    tx: TxEnv,
+    mode: KernelMode,
+) -> Result<revm::context_interface::result::ResultAndState, EvmExecutionError> {
+    require_apqe_precompiles()?;
+    let simulation = matches!(mode, KernelMode::ReadOnlySimulation);
     let mut evm = Context::mainnet()
         .with_db(db)
         .with_block(block)

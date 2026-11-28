@@ -7,6 +7,7 @@ rust-version.workspace=true
 publish=false
 
 [dependencies]
+synergy-protocol-types={path="../synergy-protocol-types"}
 serde.workspace=true
 sha3.workspace=true
 synergy-ai={path="../synergy-ai"}
@@ -17,3 +18,6 @@ synergy-address={path="../synergy-address"}
 serde_json.workspace=true
 revm={version="=43.0.3",default-features=false,features=["std","portable","memory_limit","optional_no_base_fee","optional_eip3607","optional_fee_charge"]}
 alloy-trie={version="=0.9.9",default-features=false,features=["std"]}
+
+[dev-dependencies]
+synergy-address-engine = { version = "=2.0.0", path = "../../../../21-Aegis-Engine/synergy-address-engine" }

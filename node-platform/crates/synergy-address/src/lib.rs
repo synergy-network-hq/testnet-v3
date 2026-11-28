@@ -633,6 +633,7 @@ mod tests {
 pub mod r1_public {
     pub use synergy_address_engine::apqe::native_identity_derivation_r1::{
         canonical_received_policy_frame, received_policy_commitment, validate_received_identity,
+        BirthBody, ObjectRef,
         validate_node_birth_from_policy_frame,
     };
     pub use synergy_address_engine::apqe::network_birth_r1::ReceivedNetworkBirth;

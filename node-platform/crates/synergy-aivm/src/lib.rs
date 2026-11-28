@@ -15,3 +15,7 @@ pub use sandbox::{SandboxPolicy, SandboxViolation};
 pub use synq_vm::CanonicalAivmSynqVm;
 
 pub mod ethereum_projection;
+
+pub mod r1_addresses;
+
+pub mod r1_evm;
