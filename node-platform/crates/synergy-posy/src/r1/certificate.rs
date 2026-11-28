@@ -125,7 +125,66 @@ pub struct R1QuorumCertificate {
     pub header: R1Header,
     pub approvals: Vec<R1Approval>,
 }
+/// An immutable canonical QC snapshot created only after complete native
+/// authority, proposal/execution, signature and dual-quorum verification.
+#[derive(Clone, Debug)]
+pub struct VerifiedR1QuorumCertificate {
+    certificate: R1QuorumCertificate,
+    canonical: Vec<u8>,
+}
+impl VerifiedR1QuorumCertificate {
+    pub fn certificate(&self) -> &R1QuorumCertificate {
+        &self.certificate
+    }
+    pub fn canonical_qc_bytes(&self) -> &[u8] {
+        &self.canonical
+    }
+    pub fn subject(&self) -> Result<super::R1Parent> {
+        self.certificate.header.parent_subject()
+    }
+}
 impl R1QuorumCertificate {
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
+        let mut w = Writer::new(super::MAX_PROOF_BYTES);
+        self.encode(&mut w)?;
+        Ok(w.bytes)
+    }
+    /// Untrusted data decode, not authority. The actual peer protocol supplies
+    /// its selected message family; this body cannot be a finality proof.
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(bytes, super::MAX_PROOF_BYTES)?;
+        let qc = Self::decode(&mut r)?;
+        r.finish()?;
+        if qc.canonical_bytes()?.as_slice() != bytes {
+            return Err(R1ProofError::Encoding);
+        }
+        Ok(qc)
+    }
+    pub fn into_verified(
+        self,
+        verifier: &impl R1ConsensusVerifier,
+    ) -> Result<VerifiedR1QuorumCertificate> {
+        let canonical = self.canonical_bytes()?;
+        self.verify(verifier)?;
+        Ok(VerifiedR1QuorumCertificate {
+            certificate: self,
+            canonical,
+        })
+    }
+    /// Any collector can package original approvals. Sorting indices changes
+    /// neither signed messages nor block identity; duplicates remain errors.
+    /// The collector obtains no special issuer or finality authority.
+    pub fn assemble(
+        header: R1Header,
+        mut approvals: Vec<R1Approval>,
+        verifier: &impl R1ConsensusVerifier,
+    ) -> Result<VerifiedR1QuorumCertificate> {
+        if approvals.len() > MAX_VALIDATORS {
+            return Err(R1ProofError::Bounds);
+        }
+        approvals.sort_by_key(|a| a.member_index);
+        Self { header, approvals }.into_verified(verifier)
+    }
     pub(super) fn encode(&self, w: &mut Writer) -> Result<()> {
         self.header.encode(w)?;
         if self.approvals.is_empty() || self.approvals.len() > MAX_VALIDATORS {

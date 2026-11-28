@@ -347,6 +347,47 @@ fn key_reference_binds_full_public_key_and_generation() {
 }
 
 #[test]
+fn collector_preserves_originals_and_signer_subsets_do_not_change_block_identity() {
+    let v = Synthetic::good();
+    let a = sign(first(), &v, &[0, 1, 2]);
+    let b = sign(first(), &v, &[0, 2, 3]);
+    let mut reversed = a.approvals.clone();
+    reversed.reverse();
+    let verified = R1QuorumCertificate::assemble(a.header.clone(), reversed, &v).unwrap();
+    assert_eq!(verified.certificate(), &a);
+    assert_eq!(
+        verified.subject().unwrap(),
+        b.header.parent_subject().unwrap()
+    );
+    assert_ne!(verified.canonical_qc_bytes(), b.canonical_bytes().unwrap());
+    assert_eq!(
+        R1QuorumCertificate::decode_canonical(verified.canonical_qc_bytes()).unwrap(),
+        a
+    );
+}
+
+#[test]
+fn collector_rejects_duplicate_unknown_bad_signature_and_insufficient_quorum() {
+    let v = Synthetic::good();
+    let q = sign(first(), &v, &[0, 1, 2]);
+    for kind in 0..4 {
+        let mut votes = q.approvals.clone();
+        match kind {
+            0 => votes.push(votes[0].clone()),
+            1 => votes[2].member_index = 99,
+            2 => votes[2].signature[0] ^= 1,
+            _ => {
+                votes.pop();
+            }
+        };
+        assert!(R1QuorumCertificate::assemble(q.header.clone(), votes, &v).is_err());
+    }
+    let mut bytes = q.canonical_bytes().unwrap();
+    bytes.push(0);
+    assert!(R1QuorumCertificate::decode_canonical(&bytes).is_err());
+}
+
+#[test]
 fn frozen_authority_digest_binds_interval_schedule_keys_weights_and_full_network() {
     let v = Synthetic::good();
     let mut members = v.authenticate_authority(&first()).unwrap();

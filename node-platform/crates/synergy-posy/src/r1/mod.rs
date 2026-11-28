@@ -6,9 +6,11 @@ mod certificate;
 mod codec;
 mod finality;
 mod header;
+mod schedule;
 pub use certificate::*;
 pub use finality::*;
 pub use header::*;
+pub use schedule::*;
 #[cfg(test)]
 mod tests;
 
