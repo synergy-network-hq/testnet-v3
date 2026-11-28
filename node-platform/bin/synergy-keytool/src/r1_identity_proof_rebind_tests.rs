@@ -167,3 +167,19 @@ fn untrusted_fifo_receipt_cannot_block_before_native_preflight() {
     }
     assert_eq!(std::fs::read_dir(&temp.0).unwrap().count(), 1);
 }
+
+#[test]
+fn original_result_dispatch_never_creates_missing_context_or_a_new_grant() {
+    let temp = Temp::path();
+    for command in [READ_PROOF_COMMAND, READ_REBIND_COMMAND] {
+        let args = vec![
+            command.to_owned(),
+            temp.0.to_string_lossy().into_owned(),
+            "01".repeat(32),
+            "02".repeat(32),
+        ];
+        assert!(dispatch(&args).is_err());
+        assert!(!temp.0.exists());
+        assert!(dispatch(&args[..3]).is_err());
+    }
+}

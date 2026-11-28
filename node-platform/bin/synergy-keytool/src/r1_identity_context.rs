@@ -61,6 +61,7 @@ pub(super) enum NativeIdentityOperation {
     Generate,
     Prove,
     Rebind,
+    Observation,
 }
 impl NativeIdentityOperation {
     fn name(self) -> &'static str {
@@ -68,10 +69,11 @@ impl NativeIdentityOperation {
             Self::Generate => "r1_identity_generate",
             Self::Prove => "r1_identity_prove",
             Self::Rebind => "r1_identity_rebind",
+            Self::Observation => "read_original_public_identity_result",
         }
     }
     fn permitted(self, operations: &[String]) -> bool {
-        operations.iter().any(|s| s == self.name())
+        matches!(self, Self::Observation) || operations.iter().any(|s| s == self.name())
     }
 }
 pub(super) enum NativeContext {
@@ -144,6 +146,12 @@ pub(super) fn load_for_operation(
     _: NativeIdentityOperation,
 ) -> Result<NativeContext, String> {
     Err("Native identity context protection is not qualified for this platform".into())
+}
+
+/// Public original-result observation only. Genuine installed context is still
+/// verified; no mutation permission, private key or creation cap is returned.
+pub(super) fn load_for_observation(root: &Path) -> Result<NativeContext, String> {
+    load_for_operation(root, NativeIdentityOperation::Observation)
 }
 
 /// Public proof review for the SAME native atomic authorization writer before

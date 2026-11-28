@@ -47,7 +47,7 @@ fn run() -> Result<(), String> {
         use base64::Engine as _;
         // Only Root's committed original public receipt. No generated report,
         // approval/stage object, encrypted envelope or pre-CAS result is exposed.
-        let original=base64::engine::general_purpose::STANDARD.encode(completed.canonical_public_bytes());
+        let original=completed.canonical_public_bytes().map(|bytes|base64::engine::general_purpose::STANDARD.encode(bytes));
         println!("{}",serde_json::to_string(&original).map_err(|_|"Durable public receipt encoding failed")?);
         return Ok(())
     }
@@ -837,7 +837,9 @@ fn selected_arguments(
     }
     if matches!(
         command,
-        r1_identity_custody::proof_rebind::PROVE_COMMAND
+        r1_identity_custody::proof_rebind::READ_PROOF_COMMAND
+            | r1_identity_custody::proof_rebind::READ_REBIND_COMMAND
+            | r1_identity_custody::proof_rebind::PROVE_COMMAND
             | r1_identity_custody::proof_rebind::REBIND_COMMAND
             | "gateway-admission-capability"
             | "create-managed-r1-key"
@@ -928,7 +930,7 @@ mod native_policy_tests {
     use super::*;
     #[test]
     fn identity_proof_and_rebind_route_to_protected_receipt_before_any_provider_selection() {
-        for command in [r1_identity_custody::proof_rebind::PROVE_COMMAND,r1_identity_custody::proof_rebind::REBIND_COMMAND] {
+        for command in [r1_identity_custody::proof_rebind::PROVE_COMMAND,r1_identity_custody::proof_rebind::REBIND_COMMAND,r1_identity_custody::proof_rebind::READ_PROOF_COMMAND,r1_identity_custody::proof_rebind::READ_REBIND_COMMAND] {
             let args=vec![command.to_owned(),"PUBLIC-NONEXISTENT-ROOT".into(),"PUBLIC-NONEXISTENT-RECEIPT".into(),"01".repeat(32)];
             let (selected,engine)=selected_arguments(&args).unwrap();assert!(engine.is_none());
             assert!(r1_identity_custody::proof_rebind::dispatch(selected).is_err());

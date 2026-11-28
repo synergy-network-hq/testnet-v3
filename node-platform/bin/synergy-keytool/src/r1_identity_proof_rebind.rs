@@ -14,22 +14,40 @@ use std::{
 use synergy_address_engine::apqe::{managed_creation::identity_proof as proof, SecretBytes};
 
 pub(crate) const PROVE_COMMAND: &str = "prove-managed-r1-identity";
+pub(crate) const READ_PROOF_COMMAND: &str = "read-managed-r1-identity-proof-result";
+pub(crate) const READ_REBIND_COMMAND: &str = "read-managed-r1-identity-rebind-result";
 pub(crate) const REBIND_COMMAND: &str = "rebind-managed-r1-identity";
 /// Contains only the existing durable owner's private completion tokens.
 pub(crate) enum DurableIdentityResult {
+    Absent,
     Proof(CompletedIdentityProof),
     Rebind(CompletedIdentityRebind),
 }
 impl DurableIdentityResult {
-    pub(crate) fn canonical_public_bytes(&self) -> &[u8] {
+    pub(crate) fn canonical_public_bytes(&self) -> Option<&[u8]> {
         match self {
-            Self::Proof(r) => r.canonical_public_bytes(),
-            Self::Rebind(r) => r.canonical_public_bytes(),
+            Self::Absent => None,
+            Self::Proof(r) => Some(r.canonical_public_bytes()),
+            Self::Rebind(r) => Some(r.canonical_public_bytes()),
         }
     }
 }
 pub(crate) fn dispatch(arguments: &[String]) -> Result<Option<DurableIdentityResult>, String> {
     match arguments.first().map(String::as_str) {
+        Some(READ_PROOF_COMMAND | READ_REBIND_COMMAND) => {
+            let [command, root, nonce, request] = arguments else {
+                return Err(
+                    "Exact original result ROOT NONCE ORIGINAL_REQUEST_SHA256 required".into(),
+                );
+            };
+            read_original(
+                Path::new(root),
+                nonce,
+                request,
+                command == READ_REBIND_COMMAND,
+            )
+            .map(Some)
+        }
         Some(PROVE_COMMAND | REBIND_COMMAND) => {
             let [command, root, receipt, request] = arguments else {
                 return Err(
@@ -50,6 +68,44 @@ pub(crate) fn dispatch(arguments: &[String]) -> Result<Option<DurableIdentityRes
             }
         }
         _ => Ok(None),
+    }
+}
+
+fn read_original(
+    root: &Path,
+    nonce: &str,
+    request: &str,
+    rebind: bool,
+) -> Result<DurableIdentityResult, String> {
+    use synergy_address::r1_custody::NativeCustodyJournal;
+    let nonce = super::original_request_digest(nonce)?;
+    let request = super::original_request_digest(request)?;
+    let context = crate::r1_identity_context::load_for_observation(root)?;
+    let network = context
+        .network()
+        .ok_or("Original identity result requires authenticated network context")?;
+    if rebind {
+        NativeCustodyJournal::inspect_managed_completed_rebind_in_network(
+            root, network, &nonce, &request,
+        )
+        .map(|r| {
+            r.map(DurableIdentityResult::Rebind)
+                .unwrap_or(DurableIdentityResult::Absent)
+        })
+        .map_err(|_| {
+            "Original rebind result unavailable; reconcile existing durable operation".into()
+        })
+    } else {
+        NativeCustodyJournal::inspect_managed_completed_proof_in_network(
+            root, network, &nonce, &request,
+        )
+        .map(|r| {
+            r.map(DurableIdentityResult::Proof)
+                .unwrap_or(DurableIdentityResult::Absent)
+        })
+        .map_err(|_| {
+            "Original proof result unavailable; reconcile existing durable operation".into()
+        })
     }
 }
 
