@@ -29,6 +29,11 @@ use synergy_protocol_types::{
     NodeRole,
 };
 pub const COMPLETE_CORE_SCHEMA: u16 = 2;
+pub const FORMATION_PROFILE: &str = "SYNERGY-GENESIS-FORMATION-R1";
+pub const INITIAL_SCORE_PROFILE: &str = "POSY-INITIAL-FIVE-SCORES-R1";
+pub const ASSIGNMENT_PROFILE: &str = "APQE-FORMATION-ASSIGNMENT";
+pub const PROFILE_REVISION: u32 = 1;
+
 pub const ASSIGNMENT_SCHEMA: &[u8] = b"APQE-FORMATION-ASSIGNMENT/1;AssignmentInput64=SHA3-512(F(FORMATION.ASSIGNMENT.INPUT,[APQE-FORMATION-ASSIGNMENT,1],N,[Registry64,Preseed64,QualifiedSeedReference64,ProductionEpoch1,ProtocolProfile48,OrderedEntries]));Entry=[ValidatorRaw48,VotingWeightBstr16BE,SelectionScoreBstr16BE];entries-strict-raw48-order;fullN;noClusterID/noGenesis/noAuthoritySelfDigest;clusterbirth=syngrp,epoch1,slot0,formationCommit64=AssignmentInput64;candidate-commitment-not-qualified-seed-or-operator-authority";
 
 pub const MAX_TRANSCRIPT: usize = 4 * 1024 * 1024;
@@ -144,8 +149,13 @@ pub struct VerifiedCompleteFormation {
     authority: super::formation::VerifiedFormationAuthority,
     seed: super::formation::VerifiedFormationSeed,
     candidate: CompleteFormationCandidate,
+    computed_schedule: synergy_posy::r1::CandidateR1Schedule,
 }
 impl VerifiedCompleteFormation {
+    /// Deterministic native PoSy owner result checked only after qualified seed.
+    pub fn computed_schedule(&self) -> &synergy_posy::r1::CandidateR1Schedule {
+        &self.computed_schedule
+    }
     pub fn registry(&self) -> &super::formation::FormationRegistrySnapshot {
         self.authority.registry()
     }
@@ -291,7 +301,7 @@ impl CompleteFormationCandidate {
             production_epoch: 1,
             protocol_profile: *expected_protocol,
         };
-        self.validate_schedule_data(&context, &base.nodes)?;
+        let computed_schedule = self.validate_schedule_data(&context, &base.nodes)?;
         let assignment =
             self.assignment_input_commitment(&context, &base.nodes, &base.initial_voters)?;
         if assignment != self.cluster.assignment_input {
@@ -312,6 +322,7 @@ impl CompleteFormationCandidate {
             authority,
             seed,
             candidate: self.clone(),
+            computed_schedule,
         })
     }
     /// Candidate engineering assignment-input domain, acyclic: no cluster ID,
@@ -327,6 +338,7 @@ impl CompleteFormationCandidate {
             || context.registry_commitment != self.registry
             || context.seed_reference != self.randomness.qualified_reference
             || context.production_epoch != 1
+            || context.protocol_profile != self.authority.protocol_profile
         {
             return Err(GenesisError::Profile);
         }
@@ -377,8 +389,8 @@ impl CompleteFormationCandidate {
         let bytes = c::frame(
             "FORMATION.ASSIGNMENT.INPUT",
             ProfileRef {
-                name: "APQE-FORMATION-ASSIGNMENT",
-                revision: 1,
+                name: ASSIGNMENT_PROFILE,
+                revision: PROFILE_REVISION,
             },
             Some(synergy_address_engine::apqe::r1_framing::NetworkRef {
                 chain_id: context.network.chain_id,
@@ -566,11 +578,21 @@ impl CompleteFormationCandidate {
     }
     /// Pure deterministic candidate check using the existing PoSy owner. The
     /// caller still must obtain a private qualified seed before admitting it.
-    pub(super) fn validate_schedule_data(
+    pub fn validate_schedule_data(
         &self,
         context: &R1ScheduleContext,
         nodes: &[NodeRecord],
-    ) -> Result<(), GenesisError> {
+    ) -> Result<synergy_posy::r1::CandidateR1Schedule, GenesisError> {
+        if context.registry_commitment != self.registry
+            || context.seed_reference != self.randomness.qualified_reference
+            || context.protocol_profile != self.authority.protocol_profile
+            || context.production_epoch != 1
+            || self.authority.epoch != 1
+            || self.authority.first_height != 1
+            || self.authority.last_height != 1000
+        {
+            return Err(GenesisError::Profile);
+        }
         let candidates = self
             .proposer_inputs
             .iter()
@@ -621,7 +643,7 @@ impl CompleteFormationCandidate {
         if digest != a.commitment {
             return Err(GenesisError::Voter);
         }
-        Ok(())
+        Ok(computed)
     }
     pub fn encode_into(&self, e: &mut Encoder) -> Result<(), GenesisError> {
         e.u16(match self.population {

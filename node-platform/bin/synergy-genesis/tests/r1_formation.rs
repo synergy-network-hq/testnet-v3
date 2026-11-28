@@ -173,6 +173,45 @@ fn actual_five_member_registry_root_approval_and_cross_participant_isolation() {
         verified.approvals().purpose(),
         VerifiedApprovalPurpose::Formation { .. }
     ));
+    // Same pure received interface used by the existing native pre-Genesis
+    // Formation-use issuer. It cannot generate identities, open keys or mint seed.
+    let received = synergy_genesis::r1::formation::VerifiedFormationAuthority::verify_received(
+        synergy_genesis::r1::formation::ReceivedFormationRegistryInput {
+            nic: &nic,
+            birth: &birth,
+            catalog: &catalog,
+            population: Population::ConditionalFive,
+            registrations: registrations.clone(),
+            expected_registry: *verified.registry().commitment(),
+            expected_preseed: verified.registry().preseed_commitment().unwrap(),
+            authority: &authority,
+            approvals: &approvals,
+        },
+        &engine,
+    )
+    .unwrap();
+    assert_eq!(
+        received.registry().canonical_bytes(),
+        verified.registry().canonical_bytes()
+    );
+    assert!(matches!(
+        synergy_genesis::r1::formation::VerifiedFormationAuthority::verify_received(
+            synergy_genesis::r1::formation::ReceivedFormationRegistryInput {
+                nic: &nic,
+                birth: &birth,
+                catalog: &catalog,
+                population: Population::ConditionalFive,
+                registrations: registrations.clone(),
+                expected_registry: [0; 64],
+                expected_preseed: verified.registry().preseed_commitment().unwrap(),
+                authority: &authority,
+                approvals: &approvals
+            },
+            &engine
+        ),
+        Err(FormationError::Context)
+    ));
+
     // Complete schema2 carries the actual five-member cryptographic registry,
     // while a supplied candidate output still cannot manufacture a seed token.
     {
@@ -246,6 +285,80 @@ fn actual_five_member_registry_root_approval_and_cross_participant_isolation() {
         let assignment = candidate
             .assignment_input_commitment(&schedule_context, &nodes, &voters)
             .unwrap();
+        // Candidate scheduling is a deterministic data check, never qualified
+        // randomness or a private Genesis token. Exercise the actual PoSy owner.
+        let raw_nodes=nodes.iter().map(|n|*synergy_address_engine::apqe::native_identity_presentation_r1::NativeIdentityPresentation::parse(&n.identity).unwrap().raw48()).collect::<Vec<_>>();
+        let input = raw_nodes
+            .iter()
+            .map(|raw| synergy_posy::r1::R1ProposerCandidate {
+                identity: *raw,
+                selection_score: 1024,
+            })
+            .collect::<Vec<_>>();
+        let planned = synergy_posy::r1::derive_candidate_schedule(
+            &schedule_context,
+            &candidate.randomness.output,
+            &input,
+        )
+        .unwrap();
+        candidate.permutation = planned
+            .permutation()
+            .iter()
+            .map(|raw| raw_nodes.iter().position(|n| n == raw).unwrap() as u32)
+            .collect();
+        candidate.schedule = *planned.commitment();
+        let authority_members = candidate
+            .authority
+            .members
+            .iter()
+            .map(|m| synergy_posy::r1::R1AuthorityMember {
+                identity: raw_nodes[m.node_index as usize],
+                key_id: m.key_id,
+                key_version: m.key_generation,
+                weight: m.weight,
+                signature_bytes: 3309,
+            })
+            .collect::<Vec<_>>();
+        candidate.authority.commitment = synergy_posy::r1::R1AuthoritySubject {
+            network: &network,
+            activated_profiles: &profiles,
+            protocol_profile: protocol,
+            epoch: 1,
+            first_height: 1,
+            last_height: 1000,
+            schedule: candidate.schedule,
+            members: &authority_members,
+        }
+        .digest()
+        .unwrap();
+        let checked = candidate
+            .validate_schedule_data(&schedule_context, &nodes)
+            .unwrap();
+        let mut wrong_context = schedule_context.clone();
+        wrong_context.protocol_profile[0] ^= 1;
+        assert!(candidate
+            .validate_schedule_data(&wrong_context, &nodes)
+            .is_err());
+        assert!(candidate
+            .assignment_input_commitment(&wrong_context, &nodes, &voters)
+            .is_err());
+
+        assert_eq!(checked.commitment(), planned.commitment());
+        assert!(checked.planned_proposer(1).is_ok());
+        assert!(checked.planned_proposer(1000).is_ok());
+        assert!(checked.planned_proposer(0).is_err());
+        assert!(checked.planned_proposer(1001).is_err());
+        let mut bad_schedule = candidate.clone();
+        bad_schedule.schedule[0] ^= 1;
+        assert!(bad_schedule
+            .validate_schedule_data(&schedule_context, &nodes)
+            .is_err());
+        let mut bad_authority = candidate.clone();
+        bad_authority.authority.commitment[0] ^= 1;
+        assert!(bad_authority
+            .validate_schedule_data(&schedule_context, &nodes)
+            .is_err());
+
         candidate.proposer_inputs[0].selection_score += 1;
         assert_ne!(
             assignment,

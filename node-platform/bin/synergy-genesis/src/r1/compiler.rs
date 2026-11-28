@@ -326,7 +326,14 @@ fn recompute_core(
         restricted_records: input.restricted_records,
         profile_definitions: protocol_records(&input.catalog)?,
     };
-    let state = recompute_received_genesis_state(&state_input).map_err(|_| GenesisError::State)?;
+    // Schema2 owns the complete protocol opening, including the distinct
+    // backed fee carry/class records. Schema1 fixture bytes stay unchanged.
+    let state = if formation.is_some() {
+        recompute_received_complete_genesis_state(&state_input)
+    } else {
+        recompute_received_genesis_state(&state_input)
+    }
+    .map_err(|_| GenesisError::State)?;
     profile(&mut e, &state.profile.name, state.profile.revision)?;
     e.fixed(&state.root)?;
     profile(&mut e, RECEIPT_PROFILE_NAME, RECEIPT_PROFILE_REVISION)?;

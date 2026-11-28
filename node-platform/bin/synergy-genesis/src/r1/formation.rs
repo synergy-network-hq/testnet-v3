@@ -500,7 +500,49 @@ pub struct VerifiedFormationAuthority {
     approvals: VerifiedBootstrapApprovals,
     registry: FormationRegistrySnapshot,
 }
+/// Complete untrusted received registry material plus independently pinned
+/// bootstrap authority. This describes no generation, signing or execution.
+pub struct ReceivedFormationRegistryInput<'a> {
+    pub nic: &'a VerifiedBootstrapApprovals,
+    pub birth: &'a NetworkBirth<'a>,
+    pub catalog: &'a super::profiles::ProfileCatalog,
+    pub population: Population,
+    pub registrations: Vec<FormationRegistration>,
+    pub expected_registry: [u8; 64],
+    pub expected_preseed: [u8; 64],
+    pub authority: &'a PinnedBootstrapAuthority,
+    pub approvals: &'a [IndexedRootApproval<'a>],
+}
 impl VerifiedFormationAuthority {
+    /// Pure received verifier before final Genesis: every Node/key/controller
+    /// proof, complete NIC birth and exact indexed Formation root quorum are
+    /// verified. Actual private key/session use still requires the existing
+    /// native lifecycle's separate NIC-only permission; no seed is constructed.
+    pub fn verify_received(
+        input: ReceivedFormationRegistryInput<'_>,
+        engine: &CryptoEngine,
+    ) -> Result<Self, FormationError> {
+        if input.expected_registry == [0; 64]
+            || input.expected_preseed == [0; 64]
+            || input.authority.network() != input.nic.network()
+        {
+            return Err(FormationError::Context);
+        }
+        let snapshot = FormationRegistrySnapshot::recompute_received(
+            input.nic,
+            input.birth,
+            input.catalog,
+            input.population,
+            input.registrations,
+            engine,
+        )?;
+        if snapshot.commitment() != &input.expected_registry
+            || snapshot.preseed_commitment()? != input.expected_preseed
+        {
+            return Err(FormationError::Context);
+        }
+        snapshot.authenticate(input.authority, input.approvals, engine)
+    }
     pub fn approvals(&self) -> &VerifiedBootstrapApprovals {
         &self.approvals
     }
