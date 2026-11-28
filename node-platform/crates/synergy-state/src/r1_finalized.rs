@@ -5,10 +5,14 @@
 use crate::r1::{
     R1StateDomain, R1StateError, R1StateKey, R1StateMap, R1StateValue, MAX_STATE_ENTRIES,
 };
+use crate::world_resources::{WorldResourceBudget, WorldResourcePermit};
 use serde::{Deserialize, Serialize};
 use std::{
+    cell::Cell,
     collections::BTreeSet,
     path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, Instant},
 };
 use synergy_address::r1_public::{NativeIdentityPresentation, TransactionIdentifierPresentation};
 use synergy_protocol_types::{
@@ -217,6 +221,14 @@ impl Snapshot {
         &self,
         expected: &R1NetworkCoordinate,
     ) -> Result<(R1FinalizedAnchor, R1StateMap), R1StateError> {
+        self.validate_with(expected, |s| s.root(), || Ok(()))
+    }
+    fn validate_with(
+        &self,
+        expected: &R1NetworkCoordinate,
+        root: impl FnOnce(&R1StateMap) -> Result<[u8; 48], R1StateError>,
+        mut check: impl FnMut() -> Result<(), R1StateError>,
+    ) -> Result<(R1FinalizedAnchor, R1StateMap), R1StateError> {
         let anchor = self.head.typed(expected)?;
         let _: [u8; 48] = fixed(&self.parent)?;
         let _: [u8; 48] = fixed(&self.receipts_root)?;
@@ -231,15 +243,17 @@ impl Snapshot {
         }
         let mut state = R1StateMap::new();
         for (k, v) in &self.state {
+            check()?;
             if state.insert(k.clone(), v.clone())?.is_some() {
                 return Err(R1StateError::Duplicate);
             }
         }
-        if state.root()? != anchor.state_root {
+        if root(&state)? != anchor.state_root {
             return Err(R1StateError::Corrupt);
         }
         let mut ids = BTreeSet::new();
         for t in &self.transactions {
+            check()?;
             t.validate()?;
             if !ids.insert(&t.id) {
                 return Err(R1StateError::Duplicate);
@@ -310,7 +324,8 @@ fn read<T: serde::de::DeserializeOwned>(
     r: &AtomicStoreReader<'_>,
     path: &str,
 ) -> Result<Option<T>, R1StateError> {
-    r.read_optional_bounded(path)
+    r.with_maximum_bytes(8192)
+        .read_optional_bounded(path)
         .map_err(storage)?
         .map(|b| decode(&b))
         .transpose()
@@ -322,12 +337,51 @@ pub struct R1FinalizedStore {
     root: PathBuf,
     expected: R1NetworkCoordinate,
     anchor: Option<R1FinalizedAnchor>,
+    budget: Arc<WorldResourceBudget>,
+    deadline: Instant,
+    remaining_hashes: Cell<u64>,
+}
+struct ChargedSnapshot {
+    snapshot: Snapshot,
+    state_map: R1StateMap,
+    anchor: R1FinalizedAnchor,
+    _permit: WorldResourcePermit,
+}
+impl std::ops::Deref for ChargedSnapshot {
+    type Target = Snapshot;
+    fn deref(&self) -> &Snapshot {
+        &self.snapshot
+    }
 }
 impl R1FinalizedStore {
+    /// Isolated fixture convenience only. Runtime MUST use its shared budget.
     pub fn open(
         root: impl AsRef<Path>,
         expected: &R1NetworkCoordinate,
     ) -> Result<Self, R1StateError> {
+        synergy_address::r1_public::require_nonproduction_fixture(expected.network.chain_id)
+            .map_err(|_| R1StateError::CeremonyRequired)?;
+        Self::open_with_budget(
+            root,
+            expected,
+            WorldResourceBudget::new(64 * 1024 * 1024),
+            Instant::now() + Duration::from_secs(30),
+            1_000_000,
+        )
+    }
+    pub fn open_with_budget(
+        root: impl AsRef<Path>,
+        expected: &R1NetworkCoordinate,
+        budget: Arc<WorldResourceBudget>,
+        deadline: Instant,
+        maximum_hashes: u64,
+    ) -> Result<Self, R1StateError> {
+        if Instant::now() >= deadline || maximum_hashes == 0 {
+            return Err(R1StateError::ResourceLimit);
+        }
+        let _meta = budget
+            .reserve(128 * 1024)
+            .map_err(|_| R1StateError::ResourceLimit)?;
         expected.validate().map_err(|_| R1StateError::Context)?;
         let root = root.as_ref().to_path_buf();
         let anchor = AtomicStore::inspect_existing_read_only(
@@ -345,6 +399,9 @@ impl R1FinalizedStore {
             root,
             expected: expected.clone(),
             anchor,
+            budget,
+            deadline,
+            remaining_hashes: Cell::new(maximum_hashes),
         })
     }
     pub fn current_anchor(&self) -> Option<&R1FinalizedAnchor> {
@@ -354,32 +411,77 @@ impl R1FinalizedStore {
         &self,
         f: impl FnOnce(&AtomicStoreReader<'_>) -> Result<Option<T>, R1StateError>,
     ) -> Result<Option<T>, R1StateError> {
+        self.check_deadline()?;
+        let _meta = self
+            .budget
+            .reserve(128 * 1024)
+            .map_err(|_| R1StateError::ResourceLimit)?;
         AtomicStore::inspect_existing_read_only(&self.root, MAX_RECORD, f)
             .map_err(storage)?
             .transpose()
             .map(Option::flatten)
     }
+    fn check_deadline(&self) -> Result<(), R1StateError> {
+        if Instant::now() >= self.deadline {
+            Err(R1StateError::ResourceLimit)
+        } else {
+            Ok(())
+        }
+    }
     fn snapshot(
         &self,
         r: &AtomicStoreReader<'_>,
         height: u64,
-    ) -> Result<Option<Snapshot>, R1StateError> {
+    ) -> Result<Option<ChargedSnapshot>, R1StateError> {
         if self.anchor.as_ref().is_none_or(|a| height > a.height) {
             return Ok(None);
         }
-        let s: Option<Snapshot> = read(r, &snapshot_path(height))?;
-        if let Some(s) = &s {
-            let (a, _) = s.validate(&self.expected)?;
-            if a.height != height {
+        self.check_deadline()?;
+        let path = snapshot_path(height);
+        let Some(bytes) = r.optional_record_bytes(&path).map_err(storage)? else {
+            return Ok(None);
+        };
+        // Covers encoded bytes, serde growth/escape scratch, retained typed
+        // records, duplicate authenticated map, sort/root scratch and result
+        // projection cloning. Reserve BEFORE the bounded file read/decode.
+        let charge = bytes
+            .checked_mul(512)
+            .and_then(|n| n.checked_add(256 * 1024))
+            .ok_or(R1StateError::ResourceLimit)?;
+        let permit = self
+            .budget
+            .reserve(charge)
+            .map_err(|_| R1StateError::ResourceLimit)?;
+        let payload = r
+            .read_optional_bounded(&path)
+            .map_err(storage)?
+            .ok_or(R1StateError::Unavailable)?;
+        let s: Snapshot = decode(&payload)?;
+        drop(payload);
+        let (a, state_map) = s.validate_with(
+            &self.expected,
+            |state| {
+                let mut remaining = self.remaining_hashes.get();
+                let result = crate::r1_smt::root_with_limits(state, self.deadline, &mut remaining);
+                self.remaining_hashes.set(remaining);
+                result
+            },
+            || self.check_deadline(),
+        )?;
+        if a.height != height {
+            return Err(R1StateError::Corrupt);
+        }
+        if let Some(head) = &self.anchor {
+            if height == head.height && &a != head {
                 return Err(R1StateError::Corrupt);
             }
-            if let Some(head) = &self.anchor {
-                if height == head.height && &a != head {
-                    return Err(R1StateError::Corrupt);
-                }
-            }
         }
-        Ok(s)
+        Ok(Some(ChargedSnapshot {
+            snapshot: s,
+            state_map,
+            anchor: a,
+            _permit: permit,
+        }))
     }
     pub fn account(
         &self,
@@ -395,7 +497,8 @@ impl R1FinalizedStore {
             let Some(s) = self.snapshot(r, h)? else {
                 return Ok(None);
             };
-            let (anchor, state) = s.validate(&self.expected)?;
+            let anchor = s.anchor.clone();
+            let state = &s.state_map;
             let Some(R1StateValue::NativeBalance { amount_nwei }) = state.get(&key) else {
                 return Ok(None);
             };
@@ -403,11 +506,14 @@ impl R1FinalizedStore {
             let Some(R1StateValue::ReplayNonce { nonce }) = state.get(&replay) else {
                 return Err(R1StateError::Corrupt);
             };
-            let policy = R1StateKey::native(R1StateDomain::AccountAuthorization, &identity)?;
-            let policy_epoch = match state.get(&policy) {
-                Some(R1StateValue::AccountPolicy { policy_epoch, .. }) => Some(*policy_epoch),
-                None if id.namespace() == "synq" => None,
-                _ => return Err(R1StateError::Corrupt),
+            let policy_epoch = if id.namespace() == "synq" {
+                None
+            } else {
+                let policy = R1StateKey::native(R1StateDomain::AccountAuthorization, &identity)?;
+                match state.get(&policy) {
+                    Some(R1StateValue::AccountPolicy { policy_epoch, .. }) => Some(*policy_epoch),
+                    _ => return Err(R1StateError::Corrupt),
+                }
             };
             Ok(Some(R1AccountRead {
                 anchor,
@@ -483,7 +589,7 @@ pub fn publish_nonproduction_projection(
         block.anchor.coordinate.network.chain_id,
     )
     .map_err(|_| R1StateError::CeremonyRequired)?;
-    if transactions.len()>MAX_TRANSACTIONS || block.transactions.len()>MAX_TRANSACTIONS {
+    if transactions.len() > MAX_TRANSACTIONS || block.transactions.len() > MAX_TRANSACTIONS {
         return Err(R1StateError::ResourceLimit);
     }
     if transactions.len() != block.transactions.len() {
@@ -606,6 +712,82 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
+    #[test]
+    fn shared_read_memory_work_and_deadline_limits_release_on_every_failure() {
+        let temp = Temp::new();
+        let expected = coordinate();
+        let tiny = WorldResourceBudget::new(1);
+        assert!(matches!(
+            R1FinalizedStore::open_with_budget(
+                &temp.0,
+                &expected,
+                tiny.clone(),
+                Instant::now() + Duration::from_secs(5),
+                1000
+            ),
+            Err(R1StateError::ResourceLimit)
+        ));
+        assert_eq!(tiny.used(), 0);
+        assert!(!temp.0.exists());
+        let (block, state, tx) = fixture(0, [0; 48]);
+        publish_nonproduction_projection(&temp.0, &block, &state, &tx).unwrap();
+        let small = WorldResourceBudget::new(128 * 1024);
+        let reader = R1FinalizedStore::open_with_budget(
+            &temp.0,
+            &expected,
+            small.clone(),
+            Instant::now() + Duration::from_secs(5),
+            1_000_000,
+        )
+        .unwrap();
+        assert_eq!(reader.block(0), Err(R1StateError::ResourceLimit));
+        assert_eq!(small.used(), 0);
+        let budget = WorldResourceBudget::new(64 * 1024 * 1024);
+        let exhausted = R1FinalizedStore::open_with_budget(
+            &temp.0,
+            &expected,
+            budget.clone(),
+            Instant::now() + Duration::from_secs(5),
+            1,
+        )
+        .unwrap();
+        assert_eq!(exhausted.block(0), Err(R1StateError::ResourceLimit));
+        assert_eq!(budget.used(), 0);
+        assert!(matches!(
+            R1FinalizedStore::open_with_budget(
+                &temp.0,
+                &expected,
+                budget.clone(),
+                Instant::now(),
+                1000
+            ),
+            Err(R1StateError::ResourceLimit)
+        ));
+        let pressure = budget.reserve(budget.limit()).unwrap();
+        assert!(matches!(
+            R1FinalizedStore::open_with_budget(
+                &temp.0,
+                &expected,
+                budget.clone(),
+                Instant::now() + Duration::from_secs(5),
+                1000
+            ),
+            Err(R1StateError::ResourceLimit)
+        ));
+        assert_eq!(budget.used(), pressure.bytes());
+        drop(pressure);
+        assert_eq!(budget.used(), 0);
+        let reader = R1FinalizedStore::open_with_budget(
+            &temp.0,
+            &expected,
+            budget.clone(),
+            Instant::now() + Duration::from_secs(5),
+            1_000_000,
+        )
+        .unwrap();
+        assert_eq!(reader.block(0).unwrap(), Some(block));
+        assert_eq!(budget.used(), 0);
+    }
     struct Temp(PathBuf);
     impl Temp {
         fn new() -> Self {

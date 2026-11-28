@@ -353,11 +353,7 @@ impl AtomicStore {
             TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         let result = (|| {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)
-                .map_err(io_error)?;
+            let mut file = create_private_file(&temporary)?;
             file.write_all(bytes).map_err(io_error)?;
             file.sync_all().map_err(io_error)?;
             fs::rename(&temporary, &target).map_err(io_error)?;
@@ -1136,13 +1132,17 @@ fn canonical_height_file(name: &std::ffi::OsStr) -> Option<u64> {
 }
 
 fn write_file_durable(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(path)
-        .map_err(io_error)?;
+    let mut file = create_private_file(path)?;
     file.write_all(bytes).map_err(io_error)?;
     file.sync_all().map_err(io_error)
+}
+
+fn create_private_file(path: &Path) -> Result<File, StorageError> {
+    let mut options=OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600).custom_flags(libc::O_CLOEXEC|libc::O_NOFOLLOW);
+    options.open(path).map_err(io_error)
 }
 
 fn read_file_bounded(path: &Path, maximum: usize) -> Result<Vec<u8>, StorageError> {
@@ -1256,6 +1256,19 @@ mod tests {
         symlink(root.join("target/lock"), root.join(WRITER_LOCK)).unwrap();
         assert!(AtomicStore::inspect_existing_read_only(&root, 1024, |_| ()).is_err());
         assert_eq!(fs::read(root.join("target/lock")).unwrap(), b"preserve");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_atomic_and_transaction_files_are_private_at_creation(){
+        use std::os::unix::fs::PermissionsExt;
+        let root=root("private-file-creation");
+        struct Cleanup(PathBuf);impl Drop for Cleanup{fn drop(&mut self){let _=fs::remove_dir_all(&self.0);}}
+        let _cleanup=Cleanup(root.clone());
+        let mut store=AtomicStore::new(&root,1024).unwrap();
+        store.write_atomic("direct",b"opaque encrypted record").unwrap();
+        store.commit_atomic(&[StorageWrite{relative_path:"transaction".into(),bytes:b"opaque encrypted record".to_vec()}]).unwrap();
+        for name in ["direct","transaction",WRITER_LOCK]{assert_eq!(fs::metadata(root.join(name)).unwrap().permissions().mode()&0o777,0o600);}
     }
     #[test]
     fn fixed_manifest_limit_preserves_large_payloads_and_rejects_metadata_before_intent() {

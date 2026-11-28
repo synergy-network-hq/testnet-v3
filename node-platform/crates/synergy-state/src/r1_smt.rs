@@ -36,8 +36,16 @@ fn leaves_with(
     map: &R1StateMap,
     path_hash: impl Fn(&[u8]) -> Result<[u8; 48], R1StateError>,
 ) -> Result<Vec<Leaf>, R1StateError> {
+    leaves_checked(map, path_hash, &mut |_| Ok(()))
+}
+fn leaves_checked(
+    map: &R1StateMap,
+    path_hash: impl Fn(&[u8]) -> Result<[u8; 48], R1StateError>,
+    check: &mut impl FnMut(u64) -> Result<(), R1StateError>,
+) -> Result<Vec<Leaf>, R1StateError> {
     let mut out = Vec::with_capacity(map.len());
     for (k, v) in map.entries() {
+        check(2)?;
         let key = k.canonical_bytes()?;
         let value = v.canonical_bytes()?;
         let path = path_hash(&key)?;
@@ -45,12 +53,21 @@ fn leaves_with(
         out.push(Leaf { path, key, digest });
     }
     out.sort_by_key(|x| x.path);
+    check(0)?;
     if out.windows(2).any(|x| x[0].path == x[1].path) {
         return Err(R1StateError::PathCollision);
     }
     Ok(out)
 }
 fn subtree(rows: &[Leaf], depth: usize, empty: &[[u8; 48]; 385]) -> Result<[u8; 48], R1StateError> {
+    subtree_checked(rows, depth, empty, &mut |_| Ok(()))
+}
+fn subtree_checked(
+    rows: &[Leaf],
+    depth: usize,
+    empty: &[[u8; 48]; 385],
+    check: &mut impl FnMut(u64) -> Result<(), R1StateError>,
+) -> Result<[u8; 48], R1StateError> {
     if rows.is_empty() {
         return Ok(empty[depth]);
     }
@@ -62,14 +79,40 @@ fn subtree(rows: &[Leaf], depth: usize, empty: &[[u8; 48]; 385]) -> Result<[u8; 
         };
     }
     let split = rows.partition_point(|x| !bit(&x.path, depth));
+    check(1)?;
     node(
         depth,
-        &subtree(&rows[..split], depth + 1, empty)?,
-        &subtree(&rows[split..], depth + 1, empty)?,
+        &subtree_checked(&rows[..split], depth + 1, empty, check)?,
+        &subtree_checked(&rows[split..], depth + 1, empty, check)?,
     )
 }
 pub fn root(map: &R1StateMap) -> Result<[u8; 48], R1StateError> {
     subtree(&leaves(map)?, 0, &empties()?)
+}
+/// Local work limits do not change the authenticated root. Exhaustion is a
+/// resource/unavailability result, never a claim that the state is invalid.
+pub fn root_with_limits(
+    map: &R1StateMap,
+    deadline: std::time::Instant,
+    remaining_hashes: &mut u64,
+) -> Result<[u8; 48], R1StateError> {
+    let mut check = |n: u64| {
+        if std::time::Instant::now() >= deadline {
+            return Err(R1StateError::ResourceLimit);
+        }
+        *remaining_hashes = remaining_hashes
+            .checked_sub(n)
+            .ok_or(R1StateError::ResourceLimit)?;
+        Ok(())
+    };
+    check(385)?;
+    let empty = empties()?;
+    let rows = leaves_checked(
+        map,
+        |k| hash_encoded("QACE/STATE/PATH/02", &[k]),
+        &mut check,
+    )?;
+    subtree_checked(&rows, 0, &empty, &mut check)
 }
 pub fn prove(map: &R1StateMap, key: &crate::r1::R1StateKey) -> Result<R1PointProof, R1StateError> {
     let encoded_key = key.canonical_bytes()?;
@@ -215,12 +258,27 @@ mod tests {
     }
     #[test]
     fn independent_python_c14n02_vectors_match_full_roots() {
-        let data:serde_json::Value=serde_json::from_str(include_str!("../tests/fixtures/qace_smt384_public.json")).unwrap();
-        for case in data["cases"].as_array().unwrap(){
-            let mut map=R1StateMap::new();
-            for row in case["entries"].as_array().unwrap(){map.insert(key(row["public_raw_byte"].as_u64().unwrap() as u8),R1StateValue::NativeBalance{amount_nwei:row["amount_nwei"].as_str().unwrap().parse().unwrap()}).unwrap();}
-            let actual=map.root().unwrap().iter().map(|b|format!("{b:02x}")).collect::<String>();
-            assert_eq!(actual,case["root_hex"].as_str().unwrap());
+        let data: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/qace_smt384_public.json"))
+                .unwrap();
+        for case in data["cases"].as_array().unwrap() {
+            let mut map = R1StateMap::new();
+            for row in case["entries"].as_array().unwrap() {
+                map.insert(
+                    key(row["public_raw_byte"].as_u64().unwrap() as u8),
+                    R1StateValue::NativeBalance {
+                        amount_nwei: row["amount_nwei"].as_str().unwrap().parse().unwrap(),
+                    },
+                )
+                .unwrap();
+            }
+            let actual = map
+                .root()
+                .unwrap()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
+            assert_eq!(actual, case["root_hex"].as_str().unwrap());
         }
     }
 }

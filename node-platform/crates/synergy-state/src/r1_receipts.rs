@@ -7,6 +7,17 @@ use synergy_address::r1_public::TransactionIdentifierPresentation;
 use synergy_protocol_types::c14n02::Encoder;
 pub const MAX_RECEIPTS: usize = 4096;
 pub const MAX_OUTCOME_BYTES: usize = 4096;
+pub const RECEIPT_PROFILE_SCHEMA:&str=concat!(
+ "QACE-RECEIPT-R1/1;codec=QACE-C14N-02;H=SHA3-384(U16BE(2),ASCII128(domain),typed-fields);",
+ "ReceiptCore=(schema:U16BE(1),transaction_kind:U8(syntxn=0,synxxn=1),transaction_digest48,sequence_index:U32BE,result:U8(applied=0,reverted=1,resource_exhausted=2),gas_used:U64BE,paid_nwei:U128BE,refunded_nwei:U128BE,events_commitment48,permitted_return_commitment48,error_code:Option(ASCII128),operation_outcome:Bytes4096);",
+ "error_code=nonempty-ASCII-graphic-if-present;applied-has-no-error;no-current-block-digest-or-wallclock;",
+ "n<=4096;unique-transaction-kind-and-digest;index-equals-position;",
+ "n=0:H(QACE/RCT-EMPTY/02,U32BE(0));n>0:m=least-power-of-two>=n;",
+ "leaf(i)=H(QACE/RCT-LEAF/02,U32BE(i),ReceiptCore(i));pad(i)=H(QACE/RCT-PAD/02,U32BE(i));",
+ "node(l,left,right)=H(QACE/RCT-NODE/02,U32BE(l),left48,right48),level-starts1;root=H(QACE/RCT-ROOT/02,U32BE(n),top48);",
+ "proof=receipt_count:U32BE,sequence_index:U32BE,siblings48-bottom-up;index<n;exact-log2(m)-siblings;",
+ "inclusion-proves-neither-computation-nor-finality"
+);
 
 /// Selected receipt schema1. Deterministic gas usage is the current native
 /// resource meter. This schema never substitutes elapsed time or worker metrics.

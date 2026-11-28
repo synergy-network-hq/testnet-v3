@@ -14,8 +14,27 @@ pub const STATE_PROFILE_NAME: &str = "QACE-SMT384-R1";
 pub const STATE_PROFILE_REVISION: u32 = 1;
 pub const RECEIPT_PROFILE_NAME: &str = "QACE-RECEIPT-R1";
 pub const RECEIPT_PROFILE_REVISION: u32 = 1;
+/// Exact ASCII descriptor committed by the closed Genesis profile catalog.
+/// This names binary schemas; JSON persistence is deliberately excluded.
+pub const STATE_PROFILE_SCHEMA:&str=concat!(
+ "QACE-SMT384-R1/1;codec=QACE-C14N-02;H=SHA3-384(U16BE(2),ASCII128(domain),typed-fields);",
+ "StateKey=(domain:U16BE,owner:Owner,local_key:Bytes128);",
+ "domain=AccountAuthorization:1,NativeBalance:2,ReplayCoordinate:3,ContractBinding:4,ContractStorage:5,StsDefinition:6,AssetOwnership:7,SrpaRegistry:8,AuthorizedMessage:9,SystemSettlement:10,ProtocolConfiguration:11,ValidatorBondPosition:12;",
+ "Owner=U16BE(0):Protocol|U16BE(1):ASCII8(namespace),raw48|U16BE(2):srpa_suffix:U16BE|U16BE(3):restricted_kind:U16BE;",
+ "restricted_kind=Treasury:0,TreasuryRecovery:1,SecurityForfeiture:2,FeeRoundingEscrow:3;",
+ "account=(ASCII8(namespace),raw48);account_namespace=synw,syns,syna,synm,synu,synq;authorization_owner_excludes=synq;",
+ "financial_domains=1,2,3,12:local_key_empty;restricted_owner:local_key_empty,domain10;srpa_owner=exact69literal_registry,domain8;protocol_owner=domain9,10,11;native_owner_excludes=domain8,10,11;bond_owner=synv1;",
+ "StateValue=(schema:U16BE(1),variant:U16BE,fields);",
+    "variant=1:amount:U128BE|2:nonce:U64BE|3:policy_epoch:U64BE,policy_commitment64,complete_APQE_policy_frame:Bytes131072|4:owner:account,beneficiary:account,amount:U128BE|5:amount:U128BE,policy_commitment64|6:amount:U128BE|7:ASCII128(profile_name),revision:U32BE,canonical_bytes:Bytes131072;",
+ "domain_value=1:3,2:1,3:2,12:4,10:5-or-6;variant7_excludes_domains=1,2,3,12;restricted_owner_excludes=variant6;protocol_owner_excludes=variant5;",
+ "bounds=262144entries,67108864encoded-key-value-bytes;duplicate_full_key_reject;hash_path_collision_reject;",
+ "path=H(QACE/STATE/PATH/02,key);leaf=H(QACE/STATE/LEAF/02,key,value);empty384=H(QACE/STATE/EMPTY/02);node(d,l,r)=H(QACE/STATE/NODE/02,U16BE(d),l,r);",
+ "path=384bits-MSB-first;empty[d]=node(d,empty[d+1],empty[d+1]);root=depth0;",
+ "proof=bitmap48-MSB-first,siblings-increasing-depth,omit-exact-defaults;reject-redundant-default-siblings,wrong-count,more-than384siblings;point-proof-is-not-range-completeness;",
+ "initial-account-policy-epoch=1;initial-replay-nonce=0;local-storage-generations-and-current-block-digest-excluded"
+);
 pub const MAX_KEY_LOCAL_BYTES: usize = 128;
-pub const MAX_VALUE_BYTES: usize = 65_536;
+pub const MAX_VALUE_BYTES: usize = 131_072;
 pub const MAX_STATE_ENTRIES: usize = 262_144;
 pub const MAX_TOTAL_STATE_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_CANONICAL_BYTES: usize = MAX_VALUE_BYTES + 1024;
@@ -107,10 +126,24 @@ impl R1StateKey {
         if self.local_key.len() > MAX_KEY_LOCAL_BYTES {
             return Err(R1StateError::ResourceLimit);
         }
+        if !self.local_key.is_empty()
+            && (matches!(
+                self.domain,
+                R1StateDomain::AccountAuthorization
+                    | R1StateDomain::NativeBalance
+                    | R1StateDomain::ReplayCoordinate
+                    | R1StateDomain::ValidatorBondPosition
+            ) || matches!(self.owner, R1StateOwner::Restricted { .. }))
+        {
+            return Err(R1StateError::InvalidKey);
+        }
         match &self.owner {
             R1StateOwner::Native { identity } => {
                 let id = NativeIdentityPresentation::parse(identity)
                     .map_err(|_| R1StateError::InvalidKey)?;
+                if self.domain == R1StateDomain::AccountAuthorization && id.namespace() == "synq" {
+                    return Err(R1StateError::InvalidKey);
+                }
                 if matches!(
                     self.domain,
                     R1StateDomain::NativeBalance
@@ -677,4 +710,47 @@ pub fn compile_genesis(input: &R1GenesisStateInput) -> Result<ComputedGenesisSta
         state,
         total_issued_nwei: total,
     })
+}
+
+#[cfg(test)]
+mod bounds_tests {
+    use super::*;
+    #[test]
+    fn r1_large_policy_capacity_does_not_expand_global_state_or_create_shadow_balances() {
+        let id = NativeIdentityPresentation::from_raw("syns", [9; 48])
+            .unwrap()
+            .to_text();
+        let mut key = R1StateKey::native(R1StateDomain::NativeBalance, &id).unwrap();
+        key.local_key.push(1);
+        assert_eq!(key.validate(), Err(R1StateError::InvalidKey));
+        let contract = NativeIdentityPresentation::from_raw("synq", [8; 48])
+            .unwrap()
+            .to_text();
+        assert_eq!(
+            R1StateKey::native(R1StateDomain::AccountAuthorization, &contract),
+            Err(R1StateError::InvalidKey)
+        );
+        let key = R1StateKey {
+            domain: R1StateDomain::ProtocolConfiguration,
+            owner: R1StateOwner::Protocol,
+            local_key: b"public-test-schema".to_vec(),
+        };
+        let mut state = R1StateMap::new();
+        let value = R1StateValue::ProtocolRecord {
+            profile_name: "PUBLIC-SYNTHETIC".into(),
+            profile_revision: 1,
+            canonical_bytes: vec![0; 90_000],
+        };
+        state.insert(key.clone(), value.clone()).unwrap();
+        let root = state.root().unwrap();
+        let excessive = R1StateValue::ProtocolRecord {
+            profile_name: "PUBLIC-SYNTHETIC".into(),
+            profile_revision: 1,
+            canonical_bytes: vec![0; MAX_VALUE_BYTES + 1],
+        };
+        assert!(state.insert(key.clone(), excessive).is_err());
+        assert_eq!(state.get(&key), Some(&value));
+        assert_eq!(state.root().unwrap(), root);
+        assert_eq!(MAX_TOTAL_STATE_BYTES, 64 * 1024 * 1024);
+    }
 }
