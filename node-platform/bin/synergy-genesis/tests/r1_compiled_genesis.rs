@@ -27,10 +27,7 @@ fn fixture() -> serde_json::Value {
 fn actual_compiled_genesis_recomputes_state_and_requires_both_native_quorums() {
     let f = fixture();
     let catalog = catalog();
-    assert_eq!(
-        catalog.canonical_frame().unwrap(),
-        bytes(f["profile_catalog_frame_hex"].as_str().unwrap())
-    );
+    assert!(catalog.canonical_frame().unwrap() == bytes(f["profile_catalog_frame_hex"].as_str().unwrap()), "current complete catalog differs from public fixture; refresh exact signed synthetic fixture");
     let commitment = catalog.commitment().unwrap();
     assert_eq!(
         commitment.to_vec(),
@@ -69,7 +66,12 @@ fn actual_compiled_genesis_recomputes_state_and_requires_both_native_quorums() {
         birth,
         threshold: 2,
     };
-    let authority = PinnedBootstrapAuthority::from_preparation_pins(&pins, &birth).unwrap();
+    let expected_nic: [u8; 64] = bytes(f["nic_hex"].as_str().unwrap()).try_into().unwrap();
+    let authority =
+        PinnedBootstrapAuthority::from_received_pins(&pins, &birth, &expected_nic).unwrap();
+    let mut wrong_nic = expected_nic;
+    wrong_nic[0] ^= 1;
+    assert!(PinnedBootstrapAuthority::from_received_pins(&pins, &birth, &wrong_nic).is_err());
     assert_eq!(
         authority.network().nic.to_vec(),
         bytes(f["nic_hex"].as_str().unwrap())
@@ -153,6 +155,12 @@ fn state_input(f: &serde_json::Value) -> R1GenesisStateInput {
     let account = AccountRecord::decode_from(&mut d, n).unwrap();
     d.finish().unwrap();
     let policy = account.verify(n, &engine()).unwrap();
+    let mut actual_received_context = n;
+    actual_received_context.chain_id = 9969;
+    assert!(matches!(
+        account.validate_birth(actual_received_context),
+        Err(synergy_genesis::r1::policy::PolicyError::Identity)
+    ));
     let identity = policy.identity.clone();
     R1GenesisStateInput {
         network: R1NetworkRef {
@@ -234,4 +242,172 @@ fn actual_complete_account_policy_and_financial_conservation() {
         compile_genesis(&bad),
         Err(R1StateError::CeremonyRequired)
     ));
+}
+
+#[test]
+fn actual_provider_must_match_its_own_target_slot_without_cross_platform_fallback() {
+    use synergy_genesis::r1::{artifact_matrix::ArtifactTarget, profiles::ProfileCatalog};
+    let engine = engine();
+    let selected = catalog();
+    selected.validate_provider(&engine).unwrap();
+    let mut definitions = selected.definitions().to_vec();
+    for d in &mut definitions {
+        let pins = *d.artifact_matrix.get(ArtifactTarget::MacosArm64).unwrap();
+        d.artifact_matrix.macos.arm64 = None;
+        d.artifact_matrix.linux.x86_64_gnu = Some(pins);
+    }
+    let misplaced = ProfileCatalog::new(definitions).unwrap();
+    assert!(misplaced.validate_provider(&engine).is_err());
+    let mut definitions = selected.definitions().to_vec();
+    for d in &mut definitions {
+        d.artifact_matrix.macos.arm64.as_mut().unwrap().mldsa65[0] ^= 1;
+    }
+    let wrong = ProfileCatalog::new(definitions).unwrap();
+    assert!(wrong.validate_provider(&engine).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn installed_received_bundle_checks_actual_signatures_and_confines_public_files() {
+    use std::{
+        os::unix::fs::{symlink, PermissionsExt},
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+    use synergy_genesis::r1::received_bundle::{load_received_bundle, BundleError};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    struct PublicTemporary(PathBuf);
+    impl Drop for PublicTemporary {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let base = PathBuf::from("/private/tmp").join(format!(
+        "synergy-public-received-bundle-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&base).unwrap();
+    let temporary = PublicTemporary(base);
+    std::fs::set_permissions(&temporary.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let f = fixture();
+    let birth = serde_json::json!({"schema_version":1,"chain_id":f["chain_id"],"incarnation_nonce_hex":f["nonce_hex"],"genesis_schema":{"name":"SYNERGY-GENESIS-R1","revision":1},"initial_profile_set_commitment_hex":f["profile_set_commitment_hex"],"bootstrap_roots":f["roots"],"network_label":f["network_label"],"threshold":f["threshold"]});
+    let approvals = |purpose: &str| {
+        f["approvals"].as_array().unwrap().iter().filter(|a|a["purpose"]==purpose).map(|a|serde_json::json!({"root_index":a["root_index"],"signature_hex":a["signature_hex"]})).collect::<Vec<_>>()
+    };
+    let approved = serde_json::json!({"schema_version":1,"nic":approvals("nic"),"genesis":approvals("genesis")});
+    let pinbytes = serde_json::to_vec(&birth).unwrap();
+    let approvalbytes = serde_json::to_vec(&approved).unwrap();
+    let catalog = bytes(f["profile_catalog_frame_hex"].as_str().unwrap());
+    for (name, content) in [
+        ("birth.json", pinbytes.clone()),
+        ("approvals.json", approvalbytes.clone()),
+        ("catalog.cbor", catalog.clone()),
+        (
+            "genesis.core",
+            bytes(f["genesis_core_c14n02_hex"].as_str().unwrap()),
+        ),
+    ] {
+        let path = temporary.0.join(name);
+        std::fs::write(&path, content).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let hash = |input: &[u8]| {
+        synergy_address_engine::apqe::Primitives
+            .hash(synergy_address_engine::apqe::HashAlgorithm::Sha256, input)
+            .unwrap()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
+    let selection = synergy_config::R1GenesisSelection {
+        managed_root: temporary.0.clone(),
+        core_path: "genesis.core".into(),
+        approvals_path: "approvals.json".into(),
+        pinned_bootstrap_input_path: "birth.json".into(),
+        pinned_bootstrap_input_sha256: hash(&pinbytes),
+        profile_catalog_path: "catalog.cbor".into(),
+        profile_catalog_sha256: hash(&catalog),
+        expected_nic_hex: f["nic_hex"].as_str().unwrap().into(),
+        expected_genesis_hex: f["genesis_digest48_hex"].as_str().unwrap().into(),
+    };
+    let engine = engine();
+    let verified = load_received_bundle(&selection, u64::MAX - 1, &engine).unwrap();
+    assert_eq!(
+        verified.coordinate().genesis.digest.to_vec(),
+        bytes(&selection.expected_genesis_hex)
+    );
+    assert_eq!(
+        verified.nic_approvals().purpose(),
+        synergy_address_engine::apqe::bootstrap_approvals_r1::VerifiedApprovalPurpose::Nic
+    );
+    assert_eq!(
+        verified.genesis_approvals().genesis_digest(),
+        Some(&verified.coordinate().genesis.digest)
+    );
+    let mut bad = selection.clone();
+    bad.core_path = "../genesis.core".into();
+    assert!(matches!(
+        load_received_bundle(&bad, u64::MAX - 1, &engine),
+        Err(BundleError::Path)
+    ));
+    bad = selection.clone();
+    bad.expected_genesis_hex = "00".repeat(48);
+    assert!(matches!(
+        load_received_bundle(&bad, u64::MAX - 1, &engine),
+        Err(BundleError::Context)
+    ));
+    bad = selection.clone();
+    bad.profile_catalog_sha256 = "00".repeat(32);
+    assert!(matches!(
+        load_received_bundle(&bad, u64::MAX - 1, &engine),
+        Err(BundleError::Integrity)
+    ));
+    assert!(load_received_bundle(&selection, 9969, &engine).is_err());
+    symlink(
+        temporary.0.join("genesis.core"),
+        temporary.0.join("linked.core"),
+    )
+    .unwrap();
+    bad = selection.clone();
+    bad.core_path = "linked.core".into();
+    assert!(matches!(
+        load_received_bundle(&bad, u64::MAX - 1, &engine),
+        Err(BundleError::Path)
+    ));
+    let duplicate = String::from_utf8(approvalbytes.clone()).unwrap().replacen(
+        "{",
+        "{\"schema_version\":1,",
+        1,
+    );
+    std::fs::write(temporary.0.join("approvals.json"), duplicate).unwrap();
+    assert!(matches!(
+        load_received_bundle(&selection, u64::MAX - 1, &engine),
+        Err(BundleError::Encoding)
+    ));
+    std::fs::write(temporary.0.join("approvals.json"), &approvalbytes).unwrap();
+    std::fs::set_permissions(
+        temporary.0.join("genesis.core"),
+        std::fs::Permissions::from_mode(0o622),
+    )
+    .unwrap();
+    assert!(matches!(
+        load_received_bundle(&selection, u64::MAX - 1, &engine),
+        Err(BundleError::Protection)
+    ));
+    std::fs::set_permissions(
+        temporary.0.join("genesis.core"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    std::fs::write(
+        temporary.0.join("approvals.json"),
+        br#"{"schema_version":1,"nic":[],"genesis":[]}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        load_received_bundle(&selection, u64::MAX - 1, &engine),
+        Err(BundleError::Approval)
+    ));
+    // All public test inputs are deleted by the RAII guard, including on panic.
 }

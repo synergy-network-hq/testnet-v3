@@ -1,0 +1,378 @@
+//! One read-only installed-artifact parser for node/keytool managed consumers.
+//! The existing native release/controller owns authentication of configuration
+//! pins. A successful parse/quorum is never commissioning or creation authority.
+use super::{profiles::ProfileCatalog, VerifiedR1Genesis};
+use serde::Deserialize;
+use std::{
+    path::{Component, Path},
+    sync::Arc,
+};
+use synergy_address_engine::apqe::{
+    bootstrap_approvals_r1::{IndexedRootApproval, PinnedBootstrapAuthority, PinnedBootstrapInput},
+    crypto_engine::CryptoEngine,
+    network_birth_r1::{BootstrapKeyRecord, NetworkBirth, ProfileRef},
+    HashAlgorithm, Primitives,
+};
+use synergy_config::R1GenesisSelection;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BundleError {
+    Selection,
+    Path,
+    Protection,
+    UnsupportedPlatform,
+    Bounds,
+    Read,
+    Encoding,
+    Integrity,
+    Context,
+    Catalog,
+    Approval,
+}
+impl std::fmt::Display for BundleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "received R1 bundle rejected: {self:?}")
+    }
+}
+impl std::error::Error for BundleError {}
+fn hex<const N: usize>(s: &str) -> Result<[u8; N], BundleError> {
+    if s.len() != N * 2
+        || !s
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(BundleError::Encoding);
+    }
+    let mut out = [0; N];
+    for (i, v) in out.iter_mut().enumerate() {
+        *v = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).map_err(|_| BundleError::Encoding)?;
+    }
+    Ok(out)
+}
+fn normal_components(path: &Path) -> Result<Vec<&std::ffi::OsStr>, BundleError> {
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return Err(BundleError::Path);
+    }
+    let parts = path
+        .components()
+        .map(|p| match p {
+            Component::Normal(s) => Ok(s),
+            _ => Err(BundleError::Path),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if parts.len() > 16
+        || parts.iter().any(|p| {
+            p.to_str().is_none_or(|s| {
+                s.is_empty()
+                    || s.starts_with("._")
+                    || s.contains(['\\', ':'])
+                    || s.chars().any(char::is_control)
+            })
+        })
+    {
+        return Err(BundleError::Path);
+    }
+    // Components normalizes an embedded `.`; reject that original spelling too.
+    if path
+        .to_str()
+        .is_none_or(|s| s.split('/').any(|p| p.is_empty() || p == "." || p == ".."))
+    {
+        return Err(BundleError::Path);
+    }
+    Ok(parts)
+}
+
+/// Hold an exact root descriptor for all reads. No path resolution followed by
+/// a second pathname open, no database creation/recovery or secret/provider use.
+#[cfg(unix)]
+struct ProtectedRoot(std::fs::File);
+#[cfg(unix)]
+impl ProtectedRoot {
+    fn open(root: &Path) -> Result<Self, BundleError> {
+        use std::os::{
+            fd::{AsRawFd, FromRawFd},
+            unix::ffi::OsStrExt,
+        };
+        if !root.is_absolute() {
+            return Err(BundleError::Path);
+        }
+        let mut current = std::fs::File::open("/").map_err(|_| BundleError::Read)?;
+        let mut count = 0;
+        for component in root.components() {
+            let Component::Normal(name) = component else {
+                if component == Component::RootDir {
+                    continue;
+                } else {
+                    return Err(BundleError::Path);
+                }
+            };
+            count += 1;
+            if count > 64 {
+                return Err(BundleError::Bounds);
+            }
+            let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| BundleError::Path)?;
+            // SAFETY: borrowed descriptor and NUL-terminated single component;
+            // returned descriptor is uniquely owned and immediately RAII-closed.
+            let fd = unsafe {
+                libc::openat(
+                    current.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                return Err(BundleError::Path);
+            }
+            current = unsafe { std::fs::File::from_raw_fd(fd) };
+        }
+        if count == 0 {
+            return Err(BundleError::Path);
+        }
+        protected(&current, true)?;
+        Ok(Self(current))
+    }
+    fn read(&self, path: &Path, max: u64) -> Result<Vec<u8>, BundleError> {
+        use std::{
+            io::Read,
+            os::{
+                fd::{AsRawFd, FromRawFd},
+                unix::ffi::OsStrExt,
+            },
+        };
+        let parts = normal_components(path)?;
+        let mut current = self.0.try_clone().map_err(|_| BundleError::Read)?;
+        for (i, part) in parts.iter().enumerate() {
+            let directory = i + 1 < parts.len();
+            let name = std::ffi::CString::new(part.as_bytes()).map_err(|_| BundleError::Path)?;
+            let flags = libc::O_RDONLY
+                | libc::O_NOFOLLOW
+                | libc::O_CLOEXEC
+                | if directory {
+                    libc::O_DIRECTORY
+                } else {
+                    libc::O_NONBLOCK
+                };
+            let fd = unsafe { libc::openat(current.as_raw_fd(), name.as_ptr(), flags) };
+            if fd < 0 {
+                return Err(BundleError::Path);
+            }
+            current = unsafe { std::fs::File::from_raw_fd(fd) };
+            protected(&current, directory)?;
+        }
+        let metadata = current.metadata().map_err(|_| BundleError::Read)?;
+        if metadata.len() == 0 || metadata.len() > max {
+            return Err(BundleError::Bounds);
+        }
+        let mut bytes = Vec::new();
+        current
+            .take(max + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| BundleError::Read)?;
+        if bytes.len() as u64 != metadata.len() {
+            return Err(BundleError::Read);
+        }
+        Ok(bytes)
+    }
+}
+#[cfg(unix)]
+fn protected(file: &std::fs::File, directory: bool) -> Result<(), BundleError> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let m = file.metadata().map_err(|_| BundleError::Read)?;
+    if (directory && !m.is_dir())
+        || (!directory && !m.is_file())
+        || m.permissions().mode() & 0o022 != 0
+        || (m.uid() != 0 && m.uid() != unsafe { libc::geteuid() })
+    {
+        return Err(BundleError::Protection);
+    }
+    Ok(())
+}
+#[cfg(not(unix))]
+struct ProtectedRoot;
+#[cfg(not(unix))]
+impl ProtectedRoot {
+    fn open(_: &Path) -> Result<Self, BundleError> {
+        Err(BundleError::UnsupportedPlatform)
+    }
+    fn read(&self, _: &Path, _: u64) -> Result<Vec<u8>, BundleError> {
+        Err(BundleError::UnsupportedPlatform)
+    }
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublicProfile {
+    name: String,
+    revision: u32,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublicRoot {
+    role: String,
+    algorithm: String,
+    key_generation: u64,
+    public_key_hex: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublicBirth {
+    schema_version: u16,
+    chain_id: u64,
+    incarnation_nonce_hex: String,
+    genesis_schema: PublicProfile,
+    initial_profile_set_commitment_hex: String,
+    bootstrap_roots: Vec<PublicRoot>,
+    network_label: String,
+    threshold: u32,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublicApproval {
+    root_index: u32,
+    signature_hex: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublicApprovals {
+    schema_version: u16,
+    nic: Vec<PublicApproval>,
+    genesis: Vec<PublicApproval>,
+}
+fn digest_matches(bytes: &[u8], expected: &str) -> Result<(), BundleError> {
+    let expected = hex::<32>(expected)?;
+    let actual = Primitives
+        .hash(HashAlgorithm::Sha256, bytes)
+        .map_err(|_| BundleError::Integrity)?;
+    if actual.as_slice() != expected {
+        return Err(BundleError::Integrity);
+    }
+    Ok(())
+}
+
+/// Authenticate existing public artifacts selected by a protected managed
+/// configuration. The caller must supply that authenticated configuration, not
+/// copy this selection from the candidate download or an RPC response.
+pub fn load_received_bundle(
+    selection: &R1GenesisSelection,
+    expected_chain: u64,
+    engine: &CryptoEngine,
+) -> Result<Arc<VerifiedR1Genesis>, BundleError> {
+    if expected_chain == 0 {
+        return Err(BundleError::Context);
+    }
+    let expected_nic = hex::<64>(&selection.expected_nic_hex)?;
+    let expected_genesis = hex::<48>(&selection.expected_genesis_hex)?;
+    if expected_nic == [0; 64] || expected_genesis == [0; 48] {
+        return Err(BundleError::Context);
+    }
+    for path in [
+        &selection.core_path,
+        &selection.approvals_path,
+        &selection.pinned_bootstrap_input_path,
+        &selection.profile_catalog_path,
+    ] {
+        normal_components(path)?;
+    }
+    let root = ProtectedRoot::open(&selection.managed_root)?;
+    let pinned_bytes = root.read(&selection.pinned_bootstrap_input_path, 1024 * 1024)?;
+    digest_matches(&pinned_bytes, &selection.pinned_bootstrap_input_sha256)?;
+    let catalog_bytes = root.read(&selection.profile_catalog_path, 1024 * 1024)?;
+    digest_matches(&catalog_bytes, &selection.profile_catalog_sha256)?;
+    let catalog =
+        ProfileCatalog::from_received_frame(&catalog_bytes).map_err(|_| BundleError::Catalog)?;
+    let pins: PublicBirth =
+        serde_json::from_slice(&pinned_bytes).map_err(|_| BundleError::Encoding)?;
+    if pins.schema_version != 1
+        || pins.chain_id != expected_chain
+        || pins.genesis_schema.name != super::compiler::GENESIS_PROFILE
+        || pins.genesis_schema.revision != 1
+        || pins.bootstrap_roots.is_empty()
+        || pins.bootstrap_roots.len() > 32
+    {
+        return Err(BundleError::Context);
+    }
+    let nonce = hex::<32>(&pins.incarnation_nonce_hex)?;
+    if nonce == [0; 32] {
+        return Err(BundleError::Context);
+    }
+    let profile_set = hex::<64>(&pins.initial_profile_set_commitment_hex)?;
+    if catalog.commitment().map_err(|_| BundleError::Catalog)? != profile_set {
+        return Err(BundleError::Catalog);
+    }
+    let keys = pins
+        .bootstrap_roots
+        .iter()
+        .map(|r| hex::<2592>(&r.public_key_hex).map(|k| k.to_vec()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let records = pins
+        .bootstrap_roots
+        .iter()
+        .zip(&keys)
+        .map(|(r, key)| BootstrapKeyRecord {
+            role: &r.role,
+            algorithm: &r.algorithm,
+            key_generation: r.key_generation,
+            full_public_key: key,
+        })
+        .collect::<Vec<_>>();
+    let birth = NetworkBirth {
+        chain_id: pins.chain_id,
+        incarnation_nonce: &nonce,
+        genesis_schema: ProfileRef {
+            name: &pins.genesis_schema.name,
+            revision: pins.genesis_schema.revision,
+        },
+        initial_profile_set_commitment: &profile_set,
+        bootstrap_roots: &records,
+        network_label: &pins.network_label,
+    };
+    let authority = PinnedBootstrapAuthority::from_received_pins(
+        &PinnedBootstrapInput {
+            birth,
+            threshold: pins.threshold,
+        },
+        &birth,
+        &expected_nic,
+    )
+    .map_err(|_| BundleError::Approval)?;
+    let approvals: PublicApprovals =
+        serde_json::from_slice(&root.read(&selection.approvals_path, 1024 * 1024)?)
+            .map_err(|_| BundleError::Encoding)?;
+    if approvals.schema_version != 1 || approvals.nic.len() > 32 || approvals.genesis.len() > 32 {
+        return Err(BundleError::Bounds);
+    }
+    let nic_signatures = approvals
+        .nic
+        .iter()
+        .map(|a| hex::<4627>(&a.signature_hex).map(|s| s.to_vec()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let genesis_signatures = approvals
+        .genesis
+        .iter()
+        .map(|a| hex::<4627>(&a.signature_hex).map(|s| s.to_vec()))
+        .collect::<Result<Vec<_>, _>>()?;
+    fn indexed<'a>(
+        approvals: &[PublicApproval],
+        signatures: &'a [Vec<u8>],
+    ) -> Vec<IndexedRootApproval<'a>> {
+        approvals
+            .iter()
+            .zip(signatures)
+            .map(|(a, s)| IndexedRootApproval {
+                root_index: a.root_index,
+                signature: s.as_slice(),
+            })
+            .collect::<Vec<_>>()
+    }
+    let nic = indexed(&approvals.nic, &nic_signatures);
+    let genesis = indexed(&approvals.genesis, &genesis_signatures);
+    let core = root.read(&selection.core_path, super::compiler::MAX_CORE_BYTES as u64)?;
+    let verified = super::verify_bytes(&core, &catalog, &authority, &nic, &genesis, engine)
+        .map_err(|_| BundleError::Approval)?;
+    if verified.coordinate().network.chain_id != expected_chain
+        || verified.coordinate().network.nic != expected_nic
+        || verified.coordinate().genesis.digest != expected_genesis
+    {
+        return Err(BundleError::Context);
+    }
+    Ok(Arc::new(verified))
+}

@@ -165,3 +165,22 @@ pub(crate) fn verify_current_r1(
     )
     .map_err(|e| e.to_string())
 }
+
+/// Authenticate the exact protected installed received bundle. This read-only
+/// result does not pass the separate native commissioning/startup phase gate.
+pub(crate) fn verify_configured_current_r1(
+    configuration: &NodeConfiguration,
+) -> Result<std::sync::Arc<synergy_genesis::r1::VerifiedR1Genesis>, String> {
+    let selection = configuration
+        .r1_genesis
+        .as_ref()
+        .ok_or("explicit managed R1 Genesis selection required")?;
+    let engine = crate::services::apqe_provider::load_current_r1_verification(configuration)?;
+    let engine = engine.lock().map_err(|_| "APQE verifier lock poisoned")?;
+    synergy_genesis::r1::received_bundle::load_received_bundle(
+        selection,
+        configuration.chain_id,
+        &engine,
+    )
+    .map_err(|e| e.to_string())
+}

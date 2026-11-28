@@ -459,9 +459,11 @@ impl FormationRegistrySnapshot {
 /// Root-authenticated frozen formation population, still distinct from host/
 /// operator qualification, valid randomness, assignments or runtime admission.
 pub struct VerifiedFormationAuthority {
+    approvals: VerifiedBootstrapApprovals,
     registry: FormationRegistrySnapshot,
 }
 impl VerifiedFormationAuthority {
+    pub fn approvals(&self) -> &VerifiedBootstrapApprovals { &self.approvals }
     pub fn registry(&self) -> &FormationRegistrySnapshot {
         &self.registry
     }
@@ -506,7 +508,7 @@ impl FormationRegistrySnapshot {
                 registry_commitment,
                 input_commitment,
             } if registry_commitment == self.commitment && input_commitment == input => {
-                Ok(VerifiedFormationAuthority { registry: self })
+                Ok(VerifiedFormationAuthority { registry: self, approvals: token })
             }
             _ => Err(FormationError::Context),
         }

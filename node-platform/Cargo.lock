@@ -4387,6 +4387,7 @@ dependencies = [
 name = "synergy-genesis"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "sha3 0.10.9",
@@ -4396,11 +4397,13 @@ dependencies = [
  "synergy-block",
  "synergy-config",
  "synergy-etdag",
+ "synergy-execution",
  "synergy-governance",
  "synergy-posy",
  "synergy-protocol-types",
  "synergy-state",
  "synergy-storage",
+ "synergy-transaction",
 ]
 
 [[package]]

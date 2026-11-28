@@ -32,6 +32,7 @@ pub use kem::{AegisKem, KemEncapsulation, KemError, PqvmMlKem768};
 pub use key_lifecycle::{KeyId, KeyIdError, KeyPurpose, KeyRecord, KeyState, KeyTransitionError};
 pub use kms_bridge::{KmsBridge, KmsError, ProviderHealth};
 pub use native_provider::load_authenticated_native_engine;
+pub use native_provider::load_authenticated_r1_verification_engine;
 pub use policy::{AegisPolicy, PolicyError, SignatureAlgorithm};
 pub use pqsynq::{
     PqSynqError, PqSynqExecutionAuthorization, PqSynqVerifier, VerifiedPqSynqExecution,

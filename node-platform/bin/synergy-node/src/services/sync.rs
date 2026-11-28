@@ -3267,6 +3267,7 @@ mod congestion_tests {
             network_id: "sync-retransmission".into(),
             manifest_path: root.join("manifest.json"),
             genesis_path: None,
+            r1_genesis: None,
             public_identity_path: root.join("identity.json"),
             aegis_key_bindings_path: None,
             aegis_signing_key_path: None,

@@ -26,6 +26,10 @@ pub struct NodeConfiguration {
     /// consensus.authority_trust_key_path before using any network context.
     #[serde(default)]
     pub genesis_path: Option<PathBuf>,
+    /// Received current-profile artifact selection from the existing managed,
+    /// independently authenticated configuration owner. Never commission authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r1_genesis: Option<R1GenesisSelection>,
     pub public_identity_path: PathBuf,
     /// Optional governed Aegis identity-to-public-key bindings for P2P authentication.
     #[serde(default)]
@@ -85,4 +89,21 @@ pub struct ApqeTransportConfiguration {
     pub custody_path: PathBuf,
     /// Private bounded file, read into a zeroizing allocation; never logged.
     pub custody_unlock_path: PathBuf,
+}
+
+/// Public received-artifact carrier. File digests provide integrity only; the
+/// managed release/controller must authenticate the complete configuration and
+/// protect its root. Relative paths are confined beneath that exact managed root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct R1GenesisSelection {
+    pub managed_root: PathBuf,
+    pub core_path: PathBuf,
+    pub approvals_path: PathBuf,
+    pub pinned_bootstrap_input_path: PathBuf,
+    pub pinned_bootstrap_input_sha256: String,
+    pub profile_catalog_path: PathBuf,
+    pub profile_catalog_sha256: String,
+    pub expected_nic_hex: String,
+    pub expected_genesis_hex: String,
 }

@@ -1,6 +1,9 @@
 //! Closed implemented profile catalog. Engineering-selected complete definitions
 //! are authenticated as values, not caller-provided unknown parameter bags.
-use super::GenesisError;
+use super::{
+    artifact_matrix::{ArtifactTarget, PlatformArtifactMatrix},
+    GenesisError,
+};
 use synergy_address_engine::apqe::{
     network_birth_r1::ProfileRef,
     r1_framing::{self as c, Value},
@@ -30,9 +33,11 @@ pub enum ProfileKind {
     FormationRegistration = 19,
     FormationRegistry = 20,
     FormationInput = 21,
+    NativeTransaction = 22,
+    ExecutionPayload = 23,
 }
 impl ProfileKind {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 23] = [
         Self::Genesis,
         Self::NativeIdentity,
         Self::NodePossession,
@@ -54,6 +59,8 @@ impl ProfileKind {
         Self::FormationRegistration,
         Self::FormationRegistry,
         Self::FormationInput,
+        Self::NativeTransaction,
+        Self::ExecutionPayload,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -78,13 +85,18 @@ impl ProfileKind {
             Self::FormationRegistration => super::formation::REGISTRATION_PROFILE,
             Self::FormationRegistry => super::formation::REGISTRY_PROFILE,
             Self::FormationInput => super::formation::INPUT_PROFILE,
+            Self::NativeTransaction => synergy_transaction::r1::PROFILE_NAME,
+            Self::ExecutionPayload => synergy_execution::r1_payload::PROFILE_NAME,
         }
     }
     pub fn revision(self) -> u32 {
-        if self == Self::RuntimeTransport {
-            synergy_address_engine::apqe::current_session::PROFILE.revision
-        } else {
-            1
+        match self {
+            Self::RuntimeTransport => {
+                synergy_address_engine::apqe::current_session::PROFILE.revision
+            }
+            Self::NativeTransaction => synergy_transaction::r1::PROFILE_REVISION,
+            Self::ExecutionPayload => synergy_execution::r1_payload::PROFILE_REVISION,
+            _ => 1,
         }
     }
     /// Exact independently declared schema bytes, without their own digest.
@@ -98,13 +110,16 @@ impl ProfileKind {
  Self::FormationRegistration=>super::formation::REGISTRATION_SCHEMA,
  Self::FormationRegistry=>super::formation::REGISTRY_SCHEMA,
  Self::FormationInput=>super::formation::INPUT_SCHEMA,
+ Self::NativeTransaction=>synergy_transaction::r1::PROFILE_SCHEMA.as_bytes(),
+ Self::ExecutionPayload=>synergy_execution::r1_payload::PROFILE_SCHEMA.as_bytes(),
  Self::NodePossession=>b"F(IDENTITY.NODE.POSSESSION,[APQE-NODE-POSSESSION,1],N,[namespace,raw48,completeKeyRecord,currentPolicyCommit64,enrollment_nonce32]);pure-context=SYNERGY.NODE.POP.R1;ML-DSA-65|87;proof-for-each-distinct-complete-key",
  Self::NodeRoleBinding=>b"KeySet=SHA3-512(F(IDENTITY.NODE.ROLE-KEY-SET,[APQE-NODE-ROLE-BINDING,1],N,[sortedCompleteRoleKeys]));F(IDENTITY.NODE.ROLE-BINDING,[APQE-NODE-ROLE-BINDING,1],N,[namespace,raw48,policy64,keyset64,nonce32,epochU64]);pure-context=SYNERGY.NODE.ROLE-BINDING.R1;ordinary-threshold-controller-indices",
  Self::AccountPossession=>b"F(IDENTITY.ACCOUNT.POSSESSION,[APQE-ACCOUNT-POSSESSION,1],N,[namespace,raw48,completeKeyRecord,policyCommit64,enrollment_nonce32]);pure-context=SYNERGY.ACCOUNT.POP.R1;every-controller;epoch=1;transaction-nonce=0;synm-synu-threshold>=2",
  Self::CanonicalEncoding=>b"QACE-C14N-02:BE-fixed-U8-U16-U32-U64-U128;ASCII=U32(length)||bytes-no-NUL;Bytes=U32(length)||bytes;Vector=U32(count)||ordered-items;Option=U8(0|1)||value-if-present;HashWrapper=U16(2)||ASCII(domain)||typed-value;reject-trailing-and-noncanonical",
  Self::State=>synergy_state::r1::STATE_PROFILE_SCHEMA.as_bytes(),
  Self::Receipt=>synergy_state::r1_receipts::RECEIPT_PROFILE_SCHEMA.as_bytes(),
- Self::ProfileSet=>b"APQE-PROFILE-SET/1;Commit=SHA3-512(F(NETWORK.ACTIVATED-PROFILES,[APQE-PROFILE-SET,1],no-N,Array(Definition)));Definition=Array(KindUnsigned,NameText,RevisionUnsigned,ExactSchemaBytes,SchemaSHA3-38448,Array(65,ArtifactSHA25632),Array(87,ArtifactSHA25632),Array(1024,ArtifactSHA25632),APQEModuleRevisionText,SelectedManifestSHA256Text,ImportManifestSHA256Text);strict-enum-kind-order;all-implemented-required-variants-exact;schema-digest-excludes-itself;maxframe1048576;module-build-integrity-not-production-approval;no-derived-NIC-or-Genesis-in-definitions",
+ Self::ProfileSet=>b"APQE-PROFILE-SET/1;Commit=SHA3-512(F(NETWORK.ACTIVATED-PROFILES,[APQE-PROFILE-SET,1],no-N,Array(Definition)));Definition=Array(KindUnsigned,NameText,RevisionUnsigned,ExactSchemaBytes,SchemaSHA3-38448,ArtifactMatrix,APQEModuleRevisionText,SelectedManifestSHA256Text,ImportManifestSHA256Text);ArtifactMatrix=Array([linux,Targets2],[macos,Targets2],[windows,Targets3]);TargetSlot=Array(exactTargetASCII,Option(ArtifactPins=Array([65,SHA25632],[87,SHA25632],[1024,SHA25632])));Option=[]|[value];targets-linux=linux-x86_64-gnu,linux-arm64-gnu;targets-macos=macos-arm64,macos-x86_64;targets-windows=windows-x86_64-gnu,windows-x86_64-msvc,windows-arm64-msvc;all3groups-and7slots-always;None=unqualified-dependency-not-zeros;exact-current-provider-target-required;production-requires-at-least-one-independently-qualified-target-per-OS-group-not-every-ABI;Some-pins-alone-never-prove-qualification;strict-enum-kind-order;all-implemented-required-variants-exact;schema-digest-excludes-itself;maxframe1048576;artifact-integrity-is-not-production-approval;no-derived-NIC-or-Genesis-in-definitions",
+
  Self::RuntimeTransport=>synergy_address_engine::apqe::current_session::PROFILE_SCHEMA,
  Self::PoSyAuthority=>synergy_posy::r1::AUTHORITY_PROFILE_SCHEMA,
  Self::PoSyCodec=>synergy_posy::r1::CODEC_PROFILE_SCHEMA,
@@ -118,23 +133,14 @@ impl ProfileKind {
 pub struct ProfileDefinition {
     pub kind: ProfileKind,
     pub schema_digest: [u8; 48],
-    pub mldsa65_build_sha256: [u8; 32],
-    pub mldsa87_build_sha256: [u8; 32],
-    pub mlkem1024_build_sha256: [u8; 32],
+    pub artifact_matrix: PlatformArtifactMatrix,
 }
 impl ProfileDefinition {
-    pub fn from_selected_source(
+    pub fn from_target_matrix(
         kind: ProfileKind,
-        mldsa65_build_sha256: [u8; 32],
-        mldsa87_build_sha256: [u8; 32],
-        mlkem1024_build_sha256: [u8; 32],
+        artifact_matrix: PlatformArtifactMatrix,
     ) -> Result<Self, GenesisError> {
-        if mldsa65_build_sha256 == [0; 32]
-            || mldsa87_build_sha256 == [0; 32]
-            || mlkem1024_build_sha256 == [0; 32]
-        {
-            return Err(GenesisError::Profile);
-        };
+        artifact_matrix.canonical_value()?;
         let schema_digest = Primitives
             .hash(HashAlgorithm::Sha3384, kind.schema())
             .map_err(|_| GenesisError::Primitive)?
@@ -143,18 +149,11 @@ impl ProfileDefinition {
         Ok(Self {
             kind,
             schema_digest,
-            mldsa65_build_sha256,
-            mldsa87_build_sha256,
-            mlkem1024_build_sha256,
+            artifact_matrix,
         })
     }
     fn value(&self) -> Result<Value, GenesisError> {
-        let expected = Self::from_selected_source(
-            self.kind,
-            self.mldsa65_build_sha256,
-            self.mldsa87_build_sha256,
-            self.mlkem1024_build_sha256,
-        )?;
+        let expected = Self::from_target_matrix(self.kind, self.artifact_matrix.clone())?;
         if self != &expected {
             return Err(GenesisError::Profile);
         };
@@ -164,18 +163,7 @@ impl ProfileDefinition {
             Value::Unsigned(self.kind.revision() as u64),
             c::bytes(self.kind.schema()),
             c::bytes(&self.schema_digest),
-            Value::Array(vec![
-                Value::Unsigned(65),
-                c::bytes(&self.mldsa65_build_sha256),
-            ]),
-            Value::Array(vec![
-                Value::Unsigned(87),
-                c::bytes(&self.mldsa87_build_sha256),
-            ]),
-            Value::Array(vec![
-                Value::Unsigned(1024),
-                c::bytes(&self.mlkem1024_build_sha256),
-            ]),
+            self.artifact_matrix.canonical_value()?,
             c::text(synergy_address_engine::apqe::provider::MODULE_REVISION),
             c::text(synergy_address_engine::apqe::provider::SELECTED_MANIFEST_SHA256),
             c::text(synergy_address_engine::apqe::provider::IMPORT_MANIFEST_SHA256),
@@ -204,13 +192,17 @@ impl ProfileCatalog {
     ) -> Result<(), GenesisError> {
         use synergy_address_engine::{apqe::provider, types::Algorithm};
         for d in &self.definitions {
-            for (algorithm, pin) in [
-                (Algorithm::MlDsa65, d.mldsa65_build_sha256),
-                (Algorithm::MlDsa87, d.mldsa87_build_sha256),
-            ] {
+            for algorithm in [Algorithm::MlDsa65, Algorithm::MlDsa87] {
                 let actual = engine
                     .provider_provenance(algorithm)
                     .map_err(|_| GenesisError::Profile)?;
+                let target = ArtifactTarget::from_provider(actual.target)?;
+                let pins = d.artifact_matrix.get(target).ok_or(GenesisError::Profile)?;
+                let pin = if algorithm == Algorithm::MlDsa65 {
+                    pins.mldsa65
+                } else {
+                    pins.mldsa87
+                };
                 if actual.artifact_sha256 != pin
                     || actual.module_revision != provider::MODULE_REVISION
                     || actual.selected_manifest_sha256 != provider::SELECTED_MANIFEST_SHA256
@@ -221,6 +213,47 @@ impl ProfileCatalog {
             }
         }
         Ok(())
+    }
+    /// Parse a separately pinned complete catalog, using the shared strict APQE
+    /// decoder and this executable closed schema. A successful parse supplies
+    /// no authentication of the file or release that selected its artifact pins.
+    pub fn from_received_frame(received: &[u8]) -> Result<Self, GenesisError> {
+        let decoded = Value::decode(received, 1024 * 1024).map_err(|_| GenesisError::Encoding)?;
+        let Value::Array(frame) = decoded else {
+            return Err(GenesisError::Profile);
+        };
+        if frame.len() != 5 {
+            return Err(GenesisError::Profile);
+        }
+        let Value::Array(rows) = &frame[4] else {
+            return Err(GenesisError::Profile);
+        };
+        if rows.len() != ProfileKind::ALL.len() {
+            return Err(GenesisError::Profile);
+        }
+        let definitions = rows
+            .iter()
+            .zip(ProfileKind::ALL)
+            .map(|(row, kind)| {
+                let Value::Array(fields) = row else {
+                    return Err(GenesisError::Profile);
+                };
+                if fields.len() != 9 {
+                    return Err(GenesisError::Profile);
+                }
+                let matrix = PlatformArtifactMatrix::from_canonical_value(&fields[5])?;
+                let definition = ProfileDefinition::from_target_matrix(kind, matrix)?;
+                if definition.value()? != *row {
+                    return Err(GenesisError::Profile);
+                }
+                Ok(definition)
+            })
+            .collect::<Result<Vec<_>, GenesisError>>()?;
+        let catalog = Self::new(definitions)?;
+        if catalog.canonical_frame()? != received {
+            return Err(GenesisError::Profile);
+        }
+        Ok(catalog)
     }
     pub fn definitions(&self) -> &[ProfileDefinition] {
         &self.definitions
@@ -255,11 +288,47 @@ impl ProfileCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn matrix(n: u8) -> PlatformArtifactMatrix {
+        PlatformArtifactMatrix::darwin_public_validation_only(
+            super::super::artifact_matrix::ArtifactPins {
+                mldsa65: [n; 32],
+                mldsa87: [n; 32],
+                mlkem1024: [n; 32],
+            },
+        )
+    }
     fn defs() -> Vec<ProfileDefinition> {
         ProfileKind::ALL
             .into_iter()
-            .map(|k| ProfileDefinition::from_selected_source(k, [7; 32], [7; 32], [7; 32]).unwrap())
+            .map(|k| ProfileDefinition::from_target_matrix(k, matrix(7)).unwrap())
             .collect()
+    }
+    #[test]
+    fn received_catalog_maps_exact_schema_matrix_and_rejects_unknowns() {
+        let catalog = ProfileCatalog::new(defs()).unwrap();
+        let bytes = catalog.canonical_frame().unwrap();
+        assert_eq!(
+            ProfileCatalog::from_received_frame(&bytes).unwrap(),
+            catalog
+        );
+        let mut changed = Value::decode(&bytes, 1024 * 1024).unwrap();
+        let Value::Array(ref mut frame) = changed else {
+            panic!()
+        };
+        let Value::Array(ref mut rows) = frame[4] else {
+            panic!()
+        };
+        let Value::Array(ref mut definition) = rows[0] else {
+            panic!()
+        };
+        definition[3] = c::bytes(b"unapproved-schema");
+        assert!(
+            ProfileCatalog::from_received_frame(&changed.encode(1024 * 1024).unwrap()).is_err()
+        );
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(ProfileCatalog::from_received_frame(&trailing).is_err());
+        assert!(ProfileCatalog::from_received_frame(&vec![0; 1024 * 1024 + 1]).is_err());
     }
     #[test]
     fn closed_catalog_rejects_changed_schema_missing_duplicate_and_order() {
@@ -277,19 +346,11 @@ mod tests {
         let mut x = defs();
         x[1] = x[0].clone();
         assert!(ProfileCatalog::new(x).is_err());
-        assert!(ProfileDefinition::from_selected_source(
-            ProfileKind::Genesis,
-            [0; 32],
-            [0; 32],
-            [0; 32]
-        )
-        .is_err());
+        assert!(ProfileDefinition::from_target_matrix(ProfileKind::Genesis, matrix(0)).is_err());
         let b = ProfileCatalog::new(
             ProfileKind::ALL
                 .into_iter()
-                .map(|k| {
-                    ProfileDefinition::from_selected_source(k, [8; 32], [8; 32], [8; 32]).unwrap()
-                })
+                .map(|k| ProfileDefinition::from_target_matrix(k, matrix(8)).unwrap())
                 .collect(),
         )
         .unwrap();

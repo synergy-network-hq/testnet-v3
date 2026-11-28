@@ -16,6 +16,12 @@ pub(crate) fn load_selected(
         &selected.authenticated_report_sha256,
     )
 }
+/// Read-only R1 Genesis/public-proof verification uses the current three-provider
+/// set. This does not unlock custody or register any runtime authority.
+pub(crate) fn load_current_r1_verification(configuration: &NodeConfiguration) -> Result<Arc<Mutex<CryptoEngine>>, String> {
+    let selected = configuration.aegis_provider.as_ref().ok_or("explicit authenticated aegis_provider configuration is required for current R1 verification")?;
+    synergy_aegis::load_authenticated_r1_verification_engine(&selected.report_path, &selected.authenticated_report_sha256)
+}
 pub(crate) fn verifier(
     configuration: &NodeConfiguration,
     policy: AegisPolicy,

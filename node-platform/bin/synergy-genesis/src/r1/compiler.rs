@@ -39,6 +39,7 @@ pub struct CompiledR1Genesis {
     state: ComputedGenesisState,
     initial_voters: Vec<InitialVoter>,
     nodes: Vec<NodeRecord>,
+    catalog: ProfileCatalog,
 }
 impl CompiledR1Genesis {
     pub fn coordinate(&self) -> &R1NetworkCoordinate {
@@ -49,6 +50,9 @@ impl CompiledR1Genesis {
     }
     pub fn state(&self) -> &ComputedGenesisState {
         &self.state
+    }
+    pub fn catalog(&self) -> &ProfileCatalog {
+        &self.catalog
     }
     pub fn nodes(&self) -> &[NodeRecord] {
         &self.nodes
@@ -115,6 +119,19 @@ pub fn compile(
         input.network.chain_id,
     )
     .map_err(|_| GenesisError::Ceremony)?;
+    recompute_received_core(input, independently_expected_catalog, engine)
+}
+/// Shared pure recomputation for a strictly decoded received core. This is not
+/// issuance, persistence, a constructor capability or commissioning authority.
+/// Only the received-byte verifier calls this without the construction gate.
+pub(super) fn recompute_received_core(
+    input: GenesisCoreInput,
+    independently_expected_catalog: &ProfileCatalog,
+    engine: &CryptoEngine,
+) -> Result<CompiledR1Genesis, GenesisError> {
+    if input.network.chain_id == 0 {
+        return Err(GenesisError::Identity);
+    }
     if &input.catalog != independently_expected_catalog
         || input.genesis_time == 0
         || input.nodes.is_empty()
@@ -125,6 +142,17 @@ pub fn compile(
         || input.initial_voters.len() > input.nodes.len()
     {
         return Err(GenesisError::Bound);
+    }
+    let isolated_fixture =
+        synergy_address_engine::apqe::preparation::require_nonproduction_fixture(
+            input.network.chain_id,
+        )
+        .is_ok();
+    if !isolated_fixture
+        && ((input.network.chain_id == 9969 && input.initial_voters.len() != 5)
+            || !matches!(input.initial_voters.len(), 5 | 7))
+    {
+        return Err(GenesisError::Voter);
     }
     input.catalog.validate_provider(engine)?;
     let n = NetworkRef {
@@ -257,7 +285,7 @@ pub fn compile(
         restricted_records: input.restricted_records,
         profile_definitions: protocol_records(&input.catalog)?,
     };
-    let state = compile_genesis(&state_input).map_err(|_| GenesisError::State)?;
+    let state = recompute_received_genesis_state(&state_input).map_err(|_| GenesisError::State)?;
     profile(&mut e, &state.profile.name, state.profile.revision)?;
     e.fixed(&state.root)?;
     profile(&mut e, RECEIPT_PROFILE_NAME, RECEIPT_PROFILE_REVISION)?;
@@ -291,11 +319,46 @@ pub fn compile(
         state,
         initial_voters: input.initial_voters,
         nodes: input.nodes,
+        catalog: input.catalog,
     })
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn construction_gate_precedes_invalid_inputs_and_missing_provider() {
+        use super::super::{
+            artifact_matrix::PlatformArtifactMatrix,
+            profiles::{ProfileDefinition, ProfileKind},
+        };
+        let catalog = ProfileCatalog::new(
+            ProfileKind::ALL
+                .into_iter()
+                .map(|kind| {
+                    ProfileDefinition::from_target_matrix(kind, PlatformArtifactMatrix::default())
+                        .unwrap()
+                })
+                .collect(),
+        )
+        .unwrap();
+        let input = GenesisCoreInput {
+            network: R1NetworkRef {
+                chain_id: 9969,
+                nic: [0; 64],
+            },
+            genesis_time: 0,
+            catalog: catalog.clone(),
+            nodes: vec![],
+            accounts: vec![],
+            initial_voters: vec![],
+            allocations: vec![],
+            restricted_records: vec![],
+        };
+        assert!(matches!(
+            compile(input, &catalog, &CryptoEngine::new()),
+            Err(GenesisError::Ceremony)
+        ));
+    }
     #[test]
     fn exact_srpa_hex_literals_roundtrip_including_alphabetic_suffixes() {
         for literal in srpa_registry::LITERALS {

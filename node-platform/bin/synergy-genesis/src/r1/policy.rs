@@ -10,7 +10,6 @@ use synergy_address_engine::{
         },
         native_identity_presentation_r1::NativeIdentityPresentation,
         network_birth_r1::{BootstrapKeyRecord, ProfileRef},
-        preparation::require_nonproduction_fixture,
         provider::SignOptions,
         r1_framing::{self as c, NetworkRef, Value},
         HashAlgorithm, Primitives,
@@ -121,13 +120,13 @@ impl CompletePolicy {
     }
     pub fn frame(&self, network: NetworkRef) -> Result<Vec<u8>, PolicyError> {
         self.with_apqe(|policy| {
-            identity::candidate_policy_frame(network, policy, BUDGET)
+            identity::canonical_received_policy_frame(network, policy, BUDGET)
                 .map_err(|_| PolicyError::Policy)
         })
     }
     pub fn commitment(&self, network: NetworkRef) -> Result<[u8; 64], PolicyError> {
         self.with_apqe(|policy| {
-            identity::candidate_policy_commitment(network, policy, BUDGET)
+            identity::received_policy_commitment(network, policy, BUDGET)
                 .map_err(|_| PolicyError::Policy)
         })
     }
@@ -217,7 +216,6 @@ impl NodeRecord {
         &self,
         network: NetworkRef,
     ) -> Result<NativeIdentityPresentation, PolicyError> {
-        require_nonproduction_fixture(network.chain_id).map_err(|_| PolicyError::Ceremony)?;
         let namespace = format!("synv{}", self.class.digit());
         if self.class != role_class(self.primary_role)
             || self.birth_policy.namespace != namespace
@@ -232,8 +230,9 @@ impl NodeRecord {
             return Err(PolicyError::Policy);
         }
         let root = self.birth_root.as_apqe()?;
-        let candidate = self.birth_policy.with_apqe(|policy| {
-            identity::derive_candidate(
+        let presentation = self.birth_policy.with_apqe(|policy| {
+            identity::validate_received_identity(
+                &self.identity,
                 network,
                 &BirthBody::Node {
                     namespace: &namespace,
@@ -246,9 +245,6 @@ impl NodeRecord {
             )
             .map_err(|_| PolicyError::Identity)
         })?;
-        if candidate.presentation.to_text() != self.identity {
-            return Err(PolicyError::Identity);
-        }
         if self.role_keys.len() > 4 {
             return Err(PolicyError::Bound);
         }
@@ -285,7 +281,7 @@ impl NodeRecord {
         if encoded.windows(2).any(|w| w[0] >= w[1]) {
             return Err(PolicyError::Encoding);
         }
-        Ok(candidate.presentation)
+        Ok(presentation)
     }
     /// Canonical distinct complete key records used for indexed PoPs. Birth-root
     /// and the same exact policy-controller record are one key, never two votes.
@@ -315,7 +311,6 @@ impl NodeRecord {
         Ok(encoded.into_iter().map(|(_, key)| key).collect())
     }
     pub fn role_key_set_commitment(&self, network: NetworkRef) -> Result<[u8; 64], PolicyError> {
-        require_nonproduction_fixture(network.chain_id).map_err(|_| PolicyError::Ceremony)?;
         let values = self
             .role_keys
             .iter()

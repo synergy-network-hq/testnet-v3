@@ -2,13 +2,17 @@
 //! Historical JSON/SHA3-256 verification is separate. Production ceremony
 //! admission remains closed; this module does not authorize activation.
 pub mod account;
+pub mod artifact_matrix;
 pub mod compiler;
 mod decode;
 pub mod formation;
 pub mod policy;
 pub mod profiles;
+pub mod received_bundle;
 use synergy_address_engine::apqe::{
-    bootstrap_approvals_r1::{ApprovalPurpose, IndexedRootApproval, PinnedBootstrapAuthority},
+    bootstrap_approvals_r1::{
+        ApprovalPurpose, IndexedRootApproval, PinnedBootstrapAuthority, VerifiedBootstrapApprovals,
+    },
     crypto_engine::CryptoEngine,
     network_birth_r1::ProfileRef,
 };
@@ -28,6 +32,7 @@ pub enum GenesisError {
     State,
     Policy,
     Approval,
+    FormationUnavailable,
 }
 impl std::fmt::Display for GenesisError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -57,12 +62,20 @@ pub struct InitialValidatorKey {
     pub consensus_key: policy::KeyRecord,
 }
 pub struct VerifiedR1Genesis {
+    nic_approvals: VerifiedBootstrapApprovals,
+    genesis_approvals: VerifiedBootstrapApprovals,
     compiled: compiler::CompiledR1Genesis,
     state_profile: synergy_protocol_types::R1ProfileRef,
     receipt_profile: synergy_protocol_types::R1ProfileRef,
     block_profile: synergy_protocol_types::R1ProfileRef,
 }
 impl VerifiedR1Genesis {
+    pub fn nic_approvals(&self) -> &VerifiedBootstrapApprovals {
+        &self.nic_approvals
+    }
+    pub fn genesis_approvals(&self) -> &VerifiedBootstrapApprovals {
+        &self.genesis_approvals
+    }
     pub fn initial_validator_keys(&self) -> Vec<InitialValidatorKey> {
         self.compiled.initial_voters().iter().map(|v| {
             let node = self.compiled.nodes().iter().find(|n| n.identity == v.identity)
@@ -102,7 +115,7 @@ impl VerifiedR1Genesis {
     }
 }
 /// Independently pinned authority is never selected from the candidate. Its
-/// APQE constructor currently admits isolated public synthetic fixtures only.
+/// APQE received constructor matches complete independently pinned birth inputs.
 /// Both NIC-purpose and Genesis-purpose approval quorums are mandatory.
 pub fn verify(
     input: compiler::GenesisCoreInput,
@@ -131,7 +144,7 @@ pub fn verify_bytes(
     engine: &CryptoEngine,
 ) -> Result<VerifiedR1Genesis, GenesisError> {
     let input = decode::decode(bytes, expected_catalog)?;
-    let compiled = compiler::compile(input, expected_catalog, engine)?;
+    let compiled = compiler::recompute_received_core(input, expected_catalog, engine)?;
     if compiled.canonical_bytes() != bytes {
         return Err(GenesisError::Encoding);
     }
@@ -181,7 +194,19 @@ fn authenticate(
     if genesis.genesis_digest() != Some(&c.genesis.digest) {
         return Err(GenesisError::Approval);
     }
+    // Root signatures authenticate bytes; they cannot replace the mandatory
+    // frozen registry/preseed, qualified randomness, assignments and initial
+    // authority interval. That complete R1 formation binding is not yet in the
+    // executable core schema. Never promote a real incarnation to runtime trust
+    // merely because its bootstrap roots signed an incomplete core.
+    if synergy_address_engine::apqe::preparation::require_nonproduction_fixture(c.network.chain_id)
+        .is_err()
+    {
+        return Err(GenesisError::FormationUnavailable);
+    }
     Ok(VerifiedR1Genesis {
+        nic_approvals: nic,
+        genesis_approvals: genesis,
         block_profile: synergy_protocol_types::R1ProfileRef {
             name: synergy_posy::r1::BLOCK_PROFILE_NAME.into(),
             revision: synergy_posy::r1::PROFILE_REVISION,

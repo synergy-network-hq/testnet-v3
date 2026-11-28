@@ -41,8 +41,7 @@ pub fn decode(bytes: &[u8], catalog: &ProfileCatalog) -> Result<GenesisCoreInput
         chain_id: d.u64()?,
         nic: d.fixed()?,
     };
-    synergy_address_engine::apqe::preparation::require_nonproduction_fixture(network.chain_id)
-        .map_err(|_| GenesisError::Ceremony)?;
+    if network.chain_id == 0 { return Err(GenesisError::Identity); }
     let n = NetworkRef {
         chain_id: network.chain_id,
         nic: network.nic,
@@ -143,12 +142,12 @@ mod tests {
     use crate::r1::profiles::{ProfileDefinition, ProfileKind};
     use synergy_protocol_types::c14n02::Encoder;
     #[test]
-    fn byte_decoder_bounds_and_production_guard_precede_records() {
+    fn received_byte_decoder_bounds_and_native_context_do_not_authorize_construction() {
         let catalog = ProfileCatalog::new(
             ProfileKind::ALL
                 .into_iter()
                 .map(|k| {
-                    ProfileDefinition::from_selected_source(k, [7; 32], [7; 32], [7; 32]).unwrap()
+                    ProfileDefinition::from_target_matrix(k,crate::r1::artifact_matrix::PlatformArtifactMatrix::darwin_public_validation_only(crate::r1::artifact_matrix::ArtifactPins{mldsa65:[7;32],mldsa87:[7;32],mlkem1024:[7;32]})).unwrap()
                 })
                 .collect(),
         )
@@ -159,7 +158,7 @@ mod tests {
         e.fixed(&[7; 64]).unwrap();
         assert!(matches!(
             decode(&e.finish().unwrap(), &catalog),
-            Err(GenesisError::Ceremony)
+            Err(GenesisError::Encoding)
         ));
         let mut e = Encoder::with_domain("SYNERGY/GENESIS/01", MAX_CORE_BYTES).unwrap();
         e.u16(1).unwrap();

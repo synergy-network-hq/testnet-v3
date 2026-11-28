@@ -267,7 +267,7 @@ fn plan_for_chain(genesis: &[u8], roster: &[u8], expected: u64) -> Result<Prepar
     if g.artifact_type != "commissioning_source_not_node_loadable_genesis"
         || g.activation_allowed
         || g.initial_height != 0
-        || g.initial_epoch_candidate != 0
+        || g.initial_epoch_candidate != 1
         || g.initial_state.historical_state_import
         || !g.initial_state.transactions.is_empty()
         || !g.initial_state.receipts.is_empty()
@@ -291,14 +291,17 @@ fn plan_for_chain(genesis: &[u8], roster: &[u8], expected: u64) -> Result<Prepar
     }
     if r.members.len() != 6
         || r.requested_host_count != r.members.len()
-        || r.selected_count_for_preparation != r.members.len()
+        || r.selected_count_for_preparation != 5
         || r.reference_fleet_count != 7
         || r.conditional_alternative_count != 5
         || r.six_member_activation_approved
         || !r.separate_hosts_required
         || r.future_identity_generation != "on governed enrollment; no pre-generated future keys"
     {
-        return Err("six preparation slots are not an approved or sealed electorate".into());
+        return Err(
+            "six candidate slots retain five conditional initial targets; no admitted electorate"
+                .into(),
+        );
     }
     let mut slots = BTreeSet::new();
     let mut hosts = BTreeSet::new();
@@ -312,7 +315,7 @@ fn plan_for_chain(genesis: &[u8], roster: &[u8], expected: u64) -> Result<Prepar
             || m.namespace != "synv1"
             || m.node_class != 1
             || m.activated
-            || !m.desired_genesis_member
+            || m.desired_genesis_member != (index < 5)
             || m.bond_nwei != "50000000000000"
             || m.candidate_equal_weight_units != 1
         {
@@ -324,6 +327,7 @@ fn plan_for_chain(genesis: &[u8], roster: &[u8], expected: u64) -> Result<Prepar
     let weights = r
         .members
         .iter()
+        .filter(|m| m.desired_genesis_member)
         .map(|m| m.candidate_equal_weight_units)
         .collect::<Vec<_>>();
     let quorum = quorum_plan(&weights)?;
@@ -350,7 +354,7 @@ fn plan_for_chain(genesis: &[u8], roster: &[u8], expected: u64) -> Result<Prepar
     };
     for (id,reason,stage) in [
         ("ceremony_authorization","Separate approved ceremony authorization and qualified verifier absent; no flags/environment bypass","authenticate_roots_profiles"),
-        ("fleet_resolution","Six prepared hosts versus seven reference/five conditional requires owner resolution before sealing","freeze_registry"),
+        ("fleet_resolution","Five conditional targets selected with sixth retained candidate; actual independent-host/operator qualification and applicable small-population policy required before sealing","freeze_registry"),
         ("bootstrap_roots","Fresh independently controlled PQ roots and exact threshold/custody/approval profile unset","network_birth_nic"),
         ("executable_profiles","Exact schema/provider/build/ABI digests and formal executable codec approval unset","network_birth_nic"),
         ("formation_session","PQ-FORMATION-SESSION/1 exact authenticated NIC-only message/key/fence profile not qualified","nic_root_approvals"),
@@ -371,7 +375,7 @@ fn plan_for_chain(genesis: &[u8], roster: &[u8], expected: u64) -> Result<Prepar
             ("possession_policy","Complete birth/current authority policy, independent PoP, generations and recovery/fencing"),
             ("bond_and_beneficiary","Fresh bond-owner and reward-beneficiary bindings distinct from node identity; no historical funds/import"),
             ("session_kem","Ephemeral ML-KEM-1024 candidate session operations with authenticated transcript/KDF/AEAD; not counted as persistent keys")
-        ] { pending(format!("{}.{}",m.slot,suffix),reason,"initial_identities_formation_keys"); }
+        ] { if suffix == "formation" && !m.desired_genesis_member { continue; } pending(format!("{}.{}",m.slot,suffix),reason,"initial_identities_formation_keys"); }
     }
     for kind in [
         "general_treasury",
@@ -539,10 +543,10 @@ mod tests {
         assert_eq!(
             plan.quorum_candidate,
             QuorumPlan {
-                count: 6,
-                weight: 6,
-                minimum_signers: 5,
-                minimum_weight: 5
+                count: 5,
+                weight: 5,
+                minimum_signers: 4,
+                minimum_weight: 4
             }
         );
         assert_eq!(plan.stages.len(), 11);
@@ -635,7 +639,7 @@ mod tests {
             bad["members"][0]["host_inventory_label"].clone();
         assert!(synthetic_plan(&g, &bad).is_err());
         bad = r.clone();
-        bad["initial_equal_weight_candidate"]["minimum_signers"] = json!(4);
+        bad["initial_equal_weight_candidate"]["minimum_signers"] = json!(3);
         assert!(synthetic_plan(&g, &bad).is_err());
         let (gb, rb) = encoded(&g, &r);
         assert!(plan(&gb, &rb).is_err()); // synthetic inputs cannot become target records
@@ -754,7 +758,7 @@ mod tests {
 pub fn genesis_template(chain_id: u64) -> Value {
     json!({"chain_id":chain_id,"environment":"testnet","package_schema":"synergy.commissioning-inputs/1","status":"staged_not_runtime_genesis",
         "artifact_type":"commissioning_source_not_node_loadable_genesis","activation_allowed":false,"network_file":"config/network.json",
-        "initial_height":0,"initial_epoch_candidate":0,"genesis_time":null,"network_incarnation_commitment":null,
+        "initial_height":0,"initial_epoch_candidate":1,"genesis_time":null,"network_incarnation_commitment":null,
         "validator_roster_file":"config/roster.json","monetary_allocation_file":"config/monetary.json","protocol_configuration_file":"config/protocol.json",
         "system_registry_file":"config/system.json","address_registry_file":"config/address.json","formation_registry_file":"formation/registry.json",
         "formation_result_file":"formation/result.json","release_bindings_file":"formation/release.json",
@@ -766,11 +770,11 @@ pub fn genesis_template(chain_id: u64) -> Value {
 }
 pub fn roster_template(chain_id: u64) -> Value {
     json!({"chain_id":chain_id,"environment":"testnet","package_schema":"synergy.commissioning-inputs/1","status":"staged_not_runtime_genesis",
-        "requested_host_count":6,"reference_fleet_count":7,"conditional_alternative_count":5,"selected_count_for_preparation":6,
-        "six_member_activation_approved":false,"initial_equal_weight_candidate":{"count":6,"total_weight_units":6,"minimum_signers":5,"minimum_weight_units":5,
+        "requested_host_count":6,"reference_fleet_count":7,"conditional_alternative_count":5,"selected_count_for_preparation":5,
+        "six_member_activation_approved":false,"initial_equal_weight_candidate":{"count":5,"total_weight_units":5,"minimum_signers":4,"minimum_weight_units":4,
             "maximum_byzantine_count_strictly_below_one_third":1,"maximum_unavailable_at_equal_weights":1},
         "members":(1..=6).map(|n|json!({"slot":format!("validator-{n:02}"),"host_inventory_label":format!("Val{n}"),"host_identity_evidence":null,
-            "namespace":"synv1","node_class":1,"desired_genesis_member":true,"activated":false,"bond_nwei":"50000000000000","candidate_equal_weight_units":1,
+            "namespace":"synv1","node_class":1,"desired_genesis_member":n<=5,"activated":false,"bond_nwei":"50000000000000","candidate_equal_weight_units":1,
             "node_id":null,"node_birth_nonce_hex":null,"node_birth_root":null,"birth_authority_policy":null,"role_keys":null,"proofs_of_possession":null,
             "peer_identity":null,"vpn_private_locator":null,"package_qualification":null,"bond_owner_binding":null,"reward_beneficiary_binding":null})).collect::<Vec<_>>(),
         "future_identity_generation":"on governed enrollment; no pre-generated future keys","separate_hosts_required":true})

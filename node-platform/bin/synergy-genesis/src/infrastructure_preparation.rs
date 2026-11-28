@@ -49,6 +49,17 @@ pub enum InfrastructureRole {
     Archive,
 }
 impl InfrastructureRole {
+    fn slot_matches(self, id: &str) -> bool {
+        let (prefix, count) = match self {
+            Self::Validator => ("VAL", 6),
+            Self::Sentry => ("SEN", 3),
+            Self::RpcGateway => ("RPC", 2),
+            Self::Bootseed => ("BTS", 3),
+            Self::Indexer => ("IND", 1),
+            Self::Archive => ("ARC", 1),
+        };
+        (1..=count).any(|i| id == format!("{prefix}-{i:02}"))
+    }
     fn source_class(self) -> u8 {
         match self {
             Self::Validator | Self::Sentry | Self::Archive => 1,
@@ -112,6 +123,7 @@ pub struct HostPlan {
     pub node_class_status: ClassStatus,
     pub provisioning_mode: ProvisioningMode,
     pub candidate_initial_voter: bool,
+    pub primary_deployment_profile: &'static str,
     pub candidate_validator_overlay: bool,
     pub candidate_public_service: bool,
     pub authenticated_privileges: (),
@@ -171,13 +183,19 @@ impl InfrastructureRoster {
                 ClassStatus::BlockedClassProfile => member.node_class.is_none(),
             };
             if !public_label(&member.inventory_id)
+                || !member.role.slot_matches(&member.inventory_id)
                 || !ids.insert(&member.inventory_id)
                 || member
                     .host_label
                     .as_ref()
                     .is_some_and(|h| !public_label(h) || !hosts.insert(h.to_ascii_lowercase()))
                 || !class_valid
-                || member.initial_voter != member.role.candidate_voter()
+                || member.initial_voter
+                    != (member.role == InfrastructureRole::Validator
+                        && matches!(
+                            member.inventory_id.as_str(),
+                            "VAL-01" | "VAL-02" | "VAL-03" | "VAL-04" | "VAL-05"
+                        ))
                 || member.validator_overlay_allowed != member.role.candidate_overlay()
                 || member.public_service_allowed != member.role.public_service()
                 || (member.role != InfrastructureRole::Validator
@@ -194,6 +212,20 @@ impl InfrastructureRoster {
             (InfrastructureRole::Indexer, 1),
             (InfrastructureRole::Archive, 1),
         ]);
+        let expected_ids = [
+            ("VAL", 6),
+            ("SEN", 3),
+            ("RPC", 2),
+            ("BTS", 3),
+            ("IND", 1),
+            ("ARC", 1),
+        ]
+        .into_iter()
+        .flat_map(|(prefix, count)| (1..=count).map(move |i| format!("{prefix}-{i:02}")))
+        .collect::<BTreeSet<_>>();
+        if ids.iter().map(|x| x.to_string()).collect::<BTreeSet<_>>() != expected_ids {
+            return Err("infrastructure slots differ from selected16-host plan".into());
+        }
         if counts != expected {
             return Err("infrastructure role counts differ from prepared16-host fleet".into());
         }
@@ -204,12 +236,12 @@ impl InfrastructureRoster {
         Ok(self.members.iter().map(|m| {
             let mut dependencies = vec!["independent host evidence", "fresh identity and role policy", "qualified authenticated platform release", "separate ceremony authorization"];
             if m.node_class_status == ClassStatus::BlockedClassProfile { dependencies.push("exact class/profile selection"); }
-            if m.role == InfrastructureRole::Bootseed { dependencies.push("select one primary bootstrap or seed deployment profile; no inferred duplicate logical nodes or role-key count"); }
+            if m.role == InfrastructureRole::Bootseed { dependencies.push("qualify selected single bootstrap/seed deployment profile, public routing and release; no extra logical node or duplicate identity"); }
             if m.role.candidate_overlay() { dependencies.push("explicit qualified private overlay admission and custody; template is not membership"); }
             if m.role.candidate_voter() { dependencies.push("resolve fleet and authenticate frozen PoSy N/W; candidate is not admitted voter"); }
             HostPlan { inventory_id:m.inventory_id.clone(),role:m.role,node_class:m.node_class,
                 node_class_status:m.node_class_status, provisioning_mode:m.provisioning_mode,
-                candidate_initial_voter:m.initial_voter,candidate_validator_overlay:m.validator_overlay_allowed,
+                candidate_initial_voter:m.initial_voter,primary_deployment_profile:match m.role { InfrastructureRole::Validator=>"validator",InfrastructureRole::Sentry=>"sentry",InfrastructureRole::RpcGateway=>"rpc_gateway",InfrastructureRole::Indexer=>"indexer",InfrastructureRole::Archive=>"archive",InfrastructureRole::Bootseed=>if m.inventory_id=="BTS-03"{"seed"}else{"bootstrap"}},candidate_validator_overlay:m.validator_overlay_allowed,
                 candidate_public_service:m.public_service_allowed,authenticated_privileges:(),actual_identity:(),dependencies }
         }).collect())
     }
@@ -256,7 +288,7 @@ mod tests {
                     } else {
                         ProvisioningMode::InternalControlled
                     },
-                    initial_voter: role.candidate_voter(),
+                    initial_voter: role.candidate_voter() && i <= 5,
                     validator_overlay_allowed: role.candidate_overlay(),
                     public_service_allowed: role.public_service(),
                     node_identity: (),
@@ -286,7 +318,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.hosts.len(), 16);
-        assert_eq!(result.formation.quorum_candidate.minimum_signers, 5);
+        assert_eq!(result.formation.quorum_candidate.minimum_signers, 4);
         assert!(!result.activation_allowed && !result.runtime_compatible);
         let value = serde_json::to_value(result).unwrap();
         assert!(value["actual_outputs"].is_null());
@@ -300,7 +332,7 @@ mod tests {
         assert_eq!(plans.len(), 16);
         assert_eq!(
             plans.iter().filter(|h| h.candidate_initial_voter).count(),
-            6
+            5
         );
         assert_eq!(
             plans
@@ -389,5 +421,66 @@ mod tests {
         )
         .unwrap_err()
         .contains("CEREMONY_AUTHORIZATION_REQUIRED"));
+    }
+}
+
+#[cfg(test)]
+mod selected_target_tests {
+    use super::*;
+    #[test]
+    fn actual_staged_six_candidates_map_five_voters_and_three_single_bootseed_profiles() {
+        let base = std::path::Path::new("/Volumes/PortableSSD/testnet-9969");
+        let roster = InfrastructureRoster::parse(
+            &std::fs::read(base.join("config/infrastructure-roster.testnet-9969.json")).unwrap(),
+        )
+        .unwrap();
+        let plans = roster.host_plans().unwrap();
+        assert_eq!(plans.len(), 16);
+        assert_eq!(
+            plans.iter().filter(|p| p.candidate_initial_voter).count(),
+            5
+        );
+        assert!(
+            !plans
+                .iter()
+                .find(|p| p.inventory_id == "VAL-06")
+                .unwrap()
+                .candidate_initial_voter
+        );
+        for (id, profile) in [
+            ("BTS-01", "bootstrap"),
+            ("BTS-02", "bootstrap"),
+            ("BTS-03", "seed"),
+        ] {
+            assert_eq!(
+                plans
+                    .iter()
+                    .find(|p| p.inventory_id == id)
+                    .unwrap()
+                    .primary_deployment_profile,
+                profile
+            );
+        }
+        let mut bad = roster.clone();
+        bad.members
+            .iter_mut()
+            .find(|m| m.inventory_id == "VAL-06")
+            .unwrap()
+            .initial_voter = true;
+        assert!(bad.validate().is_err());
+        let mut bad = roster.clone();
+        bad.members
+            .iter_mut()
+            .find(|m| m.inventory_id == "VAL-01")
+            .unwrap()
+            .initial_voter = false;
+        assert!(bad.validate().is_err());
+        let mut bad = roster;
+        bad.members
+            .iter_mut()
+            .find(|m| m.inventory_id == "BTS-03")
+            .unwrap()
+            .inventory_id = "BTS-04".into();
+        assert!(bad.validate().is_err());
     }
 }

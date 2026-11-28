@@ -59,12 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ProfileKind::ALL
             .iter()
             .map(|kind| {
-                ProfileDefinition::from_selected_source(
-                    *kind,
-                    provider65_pin,
-                    provider_pin,
-                    kem_pin,
-                )
+                ProfileDefinition::from_target_matrix(*kind,synergy_genesis::r1::artifact_matrix::PlatformArtifactMatrix::darwin_public_validation_only(synergy_genesis::r1::artifact_matrix::ArtifactPins{mldsa65:provider65_pin,mldsa87:provider_pin,mlkem1024:kem_pin}))
             })
             .collect::<Result<Vec<_>, _>>()?,
     )?;
@@ -199,6 +194,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     identity: account.identity.clone(),
                 },
             });
+            output["account_policy_frame_hex"] = hex(&account.policy.frame(n)?).into();
+            output["account_policy_commitment_hex"] = hex(&account.policy.commitment(n)?).into();
+            output["account_controllers"] = serde_json::Value::Array(account.policy.controllers.iter().enumerate().map(|(index,c)|serde_json::json!({"index":index,"key_role":c.key.role,"algorithm":c.key.algorithm.display_name(),"key_generation":c.key.generation,"public_key_hex":hex(&c.key.public_key),"declared_independence_domain":c.declared_independence_domain})).collect());
             accounts.push(account);
             output["account_record_c14n02_hex"] = account_data["account_record_c14n02_hex"].clone();
         }

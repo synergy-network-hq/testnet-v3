@@ -101,6 +101,13 @@ fn genuine_public_node_possession_and_controller_authority_verify() {
     assert!(verify_node(node.clone(), changed, &engine).is_err());
     let mut changed = n;
     changed.chain_id = 9969;
+    // Received verification checks the supplied complete birth under the actual
+    // N; it must reject the synthetic identity, without an issuance gate or
+    // returning a newly derived presentation.
+    assert!(matches!(
+        node.validate_birth(changed),
+        Err(synergy_genesis::r1::policy::PolicyError::Identity)
+    ));
     assert!(verify_node(node, changed, &CryptoEngine::new()).is_err());
 }
 #[test]

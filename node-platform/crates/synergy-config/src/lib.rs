@@ -27,7 +27,7 @@ pub use loader::{decode, load, ConfigLoadError, MAX_CONFIGURATION_BYTES};
 pub use network::NetworkConfiguration;
 pub use node::{
     ApqeProviderConfiguration, ApqeTransportConfiguration, ApqeTransportProfile, NodeConfiguration,
-    CONFIG_SCHEMA_VERSION,
+    R1GenesisSelection, CONFIG_SCHEMA_VERSION,
 };
 pub use p2p::P2pConfiguration;
 pub use rpc::RpcConfiguration;
@@ -56,6 +56,7 @@ mod tests {
             network_id: "testnet".into(),
             manifest_path: PathBuf::from("/etc/synergy/network-manifest.json"),
             genesis_path: None,
+            r1_genesis: None,
             public_identity_path: PathBuf::from("/etc/synergy/public-identity.json"),
             aegis_key_bindings_path: Some(PathBuf::from("/etc/synergy/aegis-bindings.json")),
             aegis_signing_key_path: Some(PathBuf::from("/etc/synergy/aegis-identity.key")),

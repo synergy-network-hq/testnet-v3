@@ -21,12 +21,7 @@ pub fn catalog() -> ProfileCatalog {
         ProfileKind::ALL
             .into_iter()
             .map(|kind| {
-                ProfileDefinition::from_selected_source(
-                    kind,
-                    bytes(PIN65).try_into().unwrap(),
-                    bytes(PIN87).try_into().unwrap(),
-                    bytes(PINKEM).try_into().unwrap(),
-                )
+                ProfileDefinition::from_target_matrix(kind,synergy_genesis::r1::artifact_matrix::PlatformArtifactMatrix::darwin_public_validation_only(synergy_genesis::r1::artifact_matrix::ArtifactPins{mldsa65:bytes(PIN65).try_into().unwrap(),mldsa87:bytes(PIN87).try_into().unwrap(),mlkem1024:bytes(PINKEM).try_into().unwrap()}))
             })
             .collect::<Result<Vec<_>, _>>()
             .unwrap(),

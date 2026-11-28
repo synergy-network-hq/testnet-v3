@@ -3,10 +3,9 @@
 use super::policy::{CompletePolicy, IndexedProof, PolicyError};
 use synergy_address_engine::apqe::{
     crypto_engine::CryptoEngine,
-    native_identity_derivation_r1::{derive_candidate, BirthBody},
+    native_identity_derivation_r1::{validate_received_identity, BirthBody},
     native_identity_presentation_r1::NativeIdentityPresentation,
     network_birth_r1::ProfileRef,
-    preparation::require_nonproduction_fixture,
     provider::SignOptions,
     r1_framing::{self as c, NetworkRef, Value},
 };
@@ -45,7 +44,6 @@ impl AccountRecord {
         Ok(record)
     }
     pub fn validate_birth(&self, n: NetworkRef) -> Result<NativeIdentityPresentation, PolicyError> {
-        require_nonproduction_fixture(n.chain_id).map_err(|_| PolicyError::Ceremony)?;
         if self.birth_nonce == [0; 32]
             || self.enrollment_nonce == [0; 32]
             || self.policy_epoch != 1
@@ -62,8 +60,9 @@ impl AccountRecord {
         {
             return Err(PolicyError::Policy);
         }
-        let candidate = self.policy.with_apqe(|p| {
-            derive_candidate(
+        let presentation = self.policy.with_apqe(|p| {
+            validate_received_identity(
+                &self.identity,
                 n,
                 &BirthBody::Account {
                     nonce32: &self.birth_nonce,
@@ -73,10 +72,7 @@ impl AccountRecord {
             )
             .map_err(|_| PolicyError::Identity)
         })?;
-        if candidate.presentation.to_text() != self.identity {
-            return Err(PolicyError::Identity);
-        }
-        Ok(candidate.presentation)
+        Ok(presentation)
     }
     pub fn possession_frame(&self, n: NetworkRef, index: u32) -> Result<Vec<u8>, PolicyError> {
         let id = self.validate_birth(n)?;

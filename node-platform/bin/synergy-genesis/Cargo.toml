@@ -9,6 +9,8 @@ publish = false
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+libc.workspace = true
+synergy-config = { path = "../../crates/synergy-config" }
 sha3.workspace = true
 synergy-aegis = { path = "../../crates/synergy-aegis" }
 synergy-address = { path = "../../crates/synergy-address" }
@@ -18,10 +20,9 @@ synergy-governance = { path = "../../crates/synergy-governance" }
 synergy-storage = { path = "../../crates/synergy-storage" }
 
 synergy-state = { path = "../../crates/synergy-state" }
+synergy-transaction = { path = "../../crates/synergy-transaction" }
+synergy-execution = { path = "../../crates/synergy-execution" }
 synergy-block = { path = "../../crates/synergy-block" }
 synergy-protocol-types = { path = "../../crates/synergy-protocol-types" }
 
 synergy-address-engine = { version = "=2.0.0", path = "../../../../21-Aegis-Engine/synergy-address-engine" }
-
-[dev-dependencies]
-synergy-config = { path = "../../crates/synergy-config" }
