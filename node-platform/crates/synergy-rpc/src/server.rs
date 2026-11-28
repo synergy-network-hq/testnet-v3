@@ -90,6 +90,13 @@ impl<D: RpcDispatcher, A: RpcAuthenticator> RpcServer<D, A> {
             }
         };
         let id = request.id.clone();
+        if body.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'{') {
+            return encode_failure(
+                serde_json::Value::Null,
+                RpcError::invalid_request("JSON-RPC request must be an object"),
+            )
+            .into();
+        }
         if let Err(error) = request.validate() {
             let response_id = if id.is_string() || id.is_number() || id.is_null() {
                 id

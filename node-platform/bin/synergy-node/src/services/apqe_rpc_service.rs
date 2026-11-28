@@ -39,6 +39,8 @@ const WORKERS: usize = 4;
 const MAX_EPOCH_PROOFS_PER_REQUEST: usize = 4;
 #[path="apqe_rpc_batch.rs"]
 mod batch;
+#[path="apqe_rpc_current.rs"]
+mod current_carrier;
 #[path="apqe_rpc_identity.rs"]
 mod retained_identity;
 const TELEMETRY: &[u8] =
@@ -794,14 +796,52 @@ struct Request<'a> {
     method: &'a str,
     #[serde(borrow)]
     id: &'a RawValue,
+    #[serde(default, borrow)]
+    params: Option<&'a RawValue>,
 }
 
-fn validate_request(bytes: &[u8]) -> Result<Request<'_>, String> {
+/// Shared public carrier preflight for the authenticated Sentry RPC ingress.
+pub(super) fn validate_public_carrier(bytes: &[u8]) -> Result<(), String> {
+    batch::validate_document(bytes)
+}
+
+/// Current-only read preflight; caller must supply the exact driver-confirmed
+/// runtime context. Validation is neither a session nor an authority constructor.
+pub(super) fn validate_current_public_carrier(
+    bytes:&[u8], confirmed:&synergy_address_engine::apqe::current_session::CurrentSessionContext,
+)->Result<(),String>{current_carrier::validate(bytes,confirmed)}
+
+fn validate_request_envelope(bytes: &[u8]) -> Result<Request<'_>, String> {
+    if bytes.iter().find(|b|!b.is_ascii_whitespace())!=Some(&b'{') {
+        return Err("RPC request envelope must be an object".into());
+    }
     let v: Request<'_> =
         serde_json::from_slice(bytes).map_err(|_| "invalid JSON-RPC request envelope")?;
     if v.jsonrpc != "2.0" || v.method.is_empty() || v.method.len() > 128 || v.id.get() == "null" {
         return Err("RPC notifications or invalid methods are not supported".into());
     }
+    let id: serde_json::Value = serde_json::from_str(v.id.get())
+        .map_err(|_| "invalid JSON-RPC identifier")?;
+    if v.id.get().len() > 256 || !(id.is_string() || id.is_number()) {
+        return Err("RPC requires a bounded scalar identifier".into());
+    }
+    if v.params.is_some_and(|params| {
+        !matches!(params.get().as_bytes().first(), Some(b'{') | Some(b'['))
+    }) {
+        return Err("RPC params must be an object or array".into());
+    }
+    Ok(v)
+}
+
+fn validate_public_method(method:&str)->Result<(),String>{
+    if synergy_rpc::methods::method_access(method) != synergy_rpc::auth::RpcAccess::Public {
+        return Err("RPC method is outside the public interface allowlist".into());
+    }
+    Ok(())
+}
+fn validate_request(bytes: &[u8]) -> Result<Request<'_>, String> {
+    let v=validate_request_envelope(bytes)?;
+    validate_public_method(v.method)?;
     Ok(v)
 }
 

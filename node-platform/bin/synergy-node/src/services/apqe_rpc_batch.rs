@@ -35,16 +35,25 @@ fn batch_items(bytes: &[u8]) -> Result<Vec<&RawValue>, String> {
     Ok(result)
 }
 pub(super) fn validate_document(bytes: &[u8]) -> Result<(), String> {
+    validate_document_with(bytes, |_, method| validate_public_method(method))
+}
+/// Both historical and current carriers retain one shared body/batch/envelope/
+/// distinct scalar-ID policy; only their method/context policy differs.
+pub(super) fn validate_document_with(
+    bytes: &[u8],
+    mut policy: impl FnMut(&[u8], &str) -> Result<(), String>,
+) -> Result<(), String> {
     if bytes.len() > MAX_BODY {
         return Err("RPC document exceeds body bound".into());
     }
     if bytes.iter().find(|byte| !byte.is_ascii_whitespace()) != Some(&b'[') {
-        return validate_request(bytes).map(|_| ());
+        let request = validate_request_envelope(bytes)?;
+        return policy(bytes, request.method);
     }
     let requests = batch_items(bytes)?;
     let mut ids = std::collections::BTreeSet::new();
     for raw in requests {
-        let request = validate_request(raw.get().as_bytes())?;
+        let request = validate_request_envelope(raw.get().as_bytes())?;
         let id: serde_json::Value =
             serde_json::from_str(request.id.get()).map_err(|_| "invalid batch id")?;
         if request.id.get().len() > 256
@@ -53,6 +62,7 @@ pub(super) fn validate_document(bytes: &[u8]) -> Result<(), String> {
         {
             return Err("RPC batch requires distinct bounded scalar ids".into());
         }
+        policy(raw.get().as_bytes(), request.method)?;
     }
     Ok(())
 }

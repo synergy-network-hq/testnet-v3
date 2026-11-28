@@ -53,6 +53,73 @@ pub fn is_method(method: &str) -> bool {
     METHODS.contains(&method)
 }
 
+/// Stateless current-read carrier validation. `expected` must come from the
+/// independently confirmed transport/runtime owner. This checks syntax/context,
+/// not that owner's authentication, ledger availability or block-profile proof.
+pub fn preflight(
+    method: &str,
+    params: Value,
+    expected: &R1NetworkCoordinate,
+) -> Result<(), RpcError> {
+    match method {
+        "synergy_getAccount"
+        | "synergy_getProof"
+        | "synergy_getBalance"
+        | "synergy_getAccountNonce"
+        | "synergy_getNonce" => {
+            decode::<AccountArgs>(params, expected)?;
+        }
+        "synergy_getTransaction"
+        | "synergy_getTransactionByHash"
+        | "synergy_getTransactionReceipt"
+        | "synergy_getReceipt"
+        | "synergy_getTransactionStatus"
+        | "synergy_getTransactionFees" => {
+            decode::<TransactionArgs>(params, expected)?;
+        }
+        "synergy_getBlock"
+        | "synergy_getBlockReceipts"
+        | "synergy_getBlockTransactionCount"
+        | "synergy_getTransactionsInBlock" => {
+            decode::<BlockArgs>(params, expected)?;
+        }
+        "synergy_getBlockByHash" => {
+            if !matches!(
+                decode::<BlockArgs>(params, expected)?.args,
+                BlockRead::Commitment { .. }
+            ) {
+                return Err(invalid());
+            }
+        }
+        "synergy_getBlockByNumber" => {
+            if !matches!(
+                decode::<BlockArgs>(params, expected)?.args,
+                BlockRead::Height(_)
+            ) {
+                return Err(invalid());
+            }
+        }
+        "synergy_getFinalizedHead"
+        | "synergy_getLatestBlock"
+        | "synergy_getBlockNumber"
+        | "synergy_blockNumber"
+        | "synergy_getChainId"
+        | "synergy_chainId"
+        | "synergy_networkId"
+        | "synergy_genesisHash"
+        | "synergy_getHealth"
+        | "synergy_getHealthCheck"
+        | "synergy_getReadiness"
+        | "synergy_getNodeStatus"
+        | "synergy_nodeInfo"
+        | "synergy_ping" => {
+            decode::<EmptyArgs>(params, expected)?;
+        }
+        _ => return Err(RpcError::method_not_found()),
+    }
+    Ok(())
+}
+
 fn invalid() -> RpcError {
     RpcError::invalid_params("invalid R1 read request")
 }

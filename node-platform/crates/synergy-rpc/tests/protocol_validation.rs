@@ -36,6 +36,7 @@ fn syntax_and_request_shape_have_distinct_standard_errors_without_dispatch() {
         (b"{\"private_payload\":".as_slice(), -32700),
         (b"{broken}".as_slice(), -32700),
         (b"[]".as_slice(), -32600),
+        (br#"["2.0",7,"synergy_chainStatus",{}]"#.as_slice(), -32600),
         (b"{\"jsonrpc\":\"2.0\",\"id\":7}".as_slice(), -32600),
     ] {
         let response: Value = serde_json::from_slice(&server.handle_bytes("client", None, 0, body)).unwrap();
