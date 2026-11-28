@@ -528,6 +528,431 @@
       ],
       "additionalProperties": false
     },
+    "FinalityProofPageRequest": {
+      "type": "object",
+      "properties": {
+        "api_version": {
+          "const": 1
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[\\x21-\\x7e]+$(?![\\s\\S])"
+        },
+        "caller_scope": {
+          "const": "public_read"
+        },
+        "network": {
+          "$ref": "#/definitions/NetworkCoordinate"
+        },
+        "args": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "height": {
+                  "type": "string",
+                  "pattern": "^(?:0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]{1}|1844674407370955161[0-4]|18446744073709551615)$(?![\\s\\S])",
+                  "minLength": 1,
+                  "maxLength": 20
+                },
+                "block_commitment": {
+                  "type": "null"
+                },
+                "kind": {
+                  "const": "finality"
+                },
+                "offset": {
+                  "type": "string",
+                  "pattern": "^(?:0|[1-9][0-9]{0,5}|[1-3][0-9]{6}|40[0-9]{5}|41[0-8][0-9]{4}|419[0-3][0-9]{3}|4194[0-2][0-9]{2}|419430[0-2]|4194303)$(?![\\s\\S])",
+                  "minLength": 1,
+                  "maxLength": 7
+                },
+                "limit": {
+                  "type": "string",
+                  "pattern": "^(?:0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]{1}|6553[0-5]|65536)$(?![\\s\\S])",
+                  "minLength": 1,
+                  "maxLength": 5,
+                  "not": {
+                    "const": "0"
+                  }
+                },
+                "expected_total_bytes": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^(?:0|[1-9][0-9]{0,5}|[1-3][0-9]{6}|40[0-9]{5}|41[0-8][0-9]{4}|419[0-3][0-9]{3}|4194[0-2][0-9]{2}|419430[0-3]|4194304)$(?![\\s\\S])",
+                      "minLength": 1,
+                      "maxLength": 7,
+                      "not": {
+                        "const": "0"
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "expected_transport_digest": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "algorithm": {
+                          "const": "SHA3-384"
+                        },
+                        "encoding": {
+                          "const": "lowercase-hex"
+                        },
+                        "value": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{96}$(?![\\s\\S])"
+                        }
+                      },
+                      "required": [
+                        "algorithm",
+                        "encoding",
+                        "value"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "height",
+                "kind",
+                "offset",
+                "limit"
+              ],
+              "additionalProperties": false,
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "offset": {
+                        "not": {
+                          "const": "0"
+                        }
+                      }
+                    }
+                  },
+                  "then": {
+                    "required": [
+                      "block_commitment",
+                      "expected_total_bytes",
+                      "expected_transport_digest"
+                    ],
+                    "properties": {
+                      "block_commitment": {
+                        "type": "object",
+                        "properties": {
+                          "profile": {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128,
+                                "pattern": "^[\\x21-\\x7e]+$(?![\\s\\S])"
+                              },
+                              "revision": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 4294967295
+                              }
+                            },
+                            "required": [
+                              "name",
+                              "revision"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "algorithm": {
+                            "const": "SHA3-384"
+                          },
+                          "encoding": {
+                            "const": "lowercase-hex"
+                          },
+                          "value": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{96}$(?![\\s\\S])"
+                          }
+                        },
+                        "required": [
+                          "profile",
+                          "algorithm",
+                          "encoding",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "expected_total_bytes": {
+                        "type": "string",
+                        "pattern": "^(?:0|[1-9][0-9]{0,5}|[1-3][0-9]{6}|40[0-9]{5}|41[0-8][0-9]{4}|419[0-3][0-9]{3}|4194[0-2][0-9]{2}|419430[0-3]|4194304)$(?![\\s\\S])",
+                        "minLength": 1,
+                        "maxLength": 7,
+                        "not": {
+                          "const": "0"
+                        }
+                      },
+                      "expected_transport_digest": {
+                        "type": "object",
+                        "properties": {
+                          "algorithm": {
+                            "const": "SHA3-384"
+                          },
+                          "encoding": {
+                            "const": "lowercase-hex"
+                          },
+                          "value": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{96}$(?![\\s\\S])"
+                          }
+                        },
+                        "required": [
+                          "algorithm",
+                          "encoding",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "height": {
+                  "type": "null"
+                },
+                "block_commitment": {
+                  "type": "object",
+                  "properties": {
+                    "profile": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128,
+                          "pattern": "^[\\x21-\\x7e]+$(?![\\s\\S])"
+                        },
+                        "revision": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 4294967295
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "revision"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "algorithm": {
+                      "const": "SHA3-384"
+                    },
+                    "encoding": {
+                      "const": "lowercase-hex"
+                    },
+                    "value": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{96}$(?![\\s\\S])"
+                    }
+                  },
+                  "required": [
+                    "profile",
+                    "algorithm",
+                    "encoding",
+                    "value"
+                  ],
+                  "additionalProperties": false
+                },
+                "kind": {
+                  "const": "finality"
+                },
+                "offset": {
+                  "type": "string",
+                  "pattern": "^(?:0|[1-9][0-9]{0,5}|[1-3][0-9]{6}|40[0-9]{5}|41[0-8][0-9]{4}|419[0-3][0-9]{3}|4194[0-2][0-9]{2}|419430[0-2]|4194303)$(?![\\s\\S])",
+                  "minLength": 1,
+                  "maxLength": 7
+                },
+                "limit": {
+                  "type": "string",
+                  "pattern": "^(?:0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]{1}|6553[0-5]|65536)$(?![\\s\\S])",
+                  "minLength": 1,
+                  "maxLength": 5,
+                  "not": {
+                    "const": "0"
+                  }
+                },
+                "expected_total_bytes": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^(?:0|[1-9][0-9]{0,5}|[1-3][0-9]{6}|40[0-9]{5}|41[0-8][0-9]{4}|419[0-3][0-9]{3}|4194[0-2][0-9]{2}|419430[0-3]|4194304)$(?![\\s\\S])",
+                      "minLength": 1,
+                      "maxLength": 7,
+                      "not": {
+                        "const": "0"
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "expected_transport_digest": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "algorithm": {
+                          "const": "SHA3-384"
+                        },
+                        "encoding": {
+                          "const": "lowercase-hex"
+                        },
+                        "value": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{96}$(?![\\s\\S])"
+                        }
+                      },
+                      "required": [
+                        "algorithm",
+                        "encoding",
+                        "value"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "block_commitment",
+                "kind",
+                "offset",
+                "limit"
+              ],
+              "additionalProperties": false,
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "offset": {
+                        "not": {
+                          "const": "0"
+                        }
+                      }
+                    }
+                  },
+                  "then": {
+                    "required": [
+                      "block_commitment",
+                      "expected_total_bytes",
+                      "expected_transport_digest"
+                    ],
+                    "properties": {
+                      "block_commitment": {
+                        "type": "object",
+                        "properties": {
+                          "profile": {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128,
+                                "pattern": "^[\\x21-\\x7e]+$(?![\\s\\S])"
+                              },
+                              "revision": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 4294967295
+                              }
+                            },
+                            "required": [
+                              "name",
+                              "revision"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "algorithm": {
+                            "const": "SHA3-384"
+                          },
+                          "encoding": {
+                            "const": "lowercase-hex"
+                          },
+                          "value": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{96}$(?![\\s\\S])"
+                          }
+                        },
+                        "required": [
+                          "profile",
+                          "algorithm",
+                          "encoding",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "expected_total_bytes": {
+                        "type": "string",
+                        "pattern": "^(?:0|[1-9][0-9]{0,5}|[1-3][0-9]{6}|40[0-9]{5}|41[0-8][0-9]{4}|419[0-3][0-9]{3}|4194[0-2][0-9]{2}|419430[0-3]|4194304)$(?![\\s\\S])",
+                        "minLength": 1,
+                        "maxLength": 7,
+                        "not": {
+                          "const": "0"
+                        }
+                      },
+                      "expected_transport_digest": {
+                        "type": "object",
+                        "properties": {
+                          "algorithm": {
+                            "const": "SHA3-384"
+                          },
+                          "encoding": {
+                            "const": "lowercase-hex"
+                          },
+                          "value": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{96}$(?![\\s\\S])"
+                          }
+                        },
+                        "required": [
+                          "algorithm",
+                          "encoding",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "caller_scope",
+        "network",
+        "args"
+      ],
+      "additionalProperties": false
+    },
     "StoredReadAnchor": {
       "type": "object",
       "properties": {
@@ -1149,6 +1574,146 @@
         "transactions",
         "receipts_commitment",
         "public_finality_proof"
+      ],
+      "additionalProperties": false
+    },
+    "FinalityProofPageProjection": {
+      "type": "object",
+      "properties": {
+        "stored_anchor": {
+          "$ref": "#/definitions/StoredReadAnchor"
+        },
+        "kind": {
+          "const": "finality"
+        },
+        "proof_profile": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "const": "POSY-FINALITY-R1"
+            },
+            "revision": {
+              "const": 1
+            }
+          },
+          "required": [
+            "name",
+            "revision"
+          ],
+          "additionalProperties": false
+        },
+        "codec_profile": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "const": "POSY-CODEC-1"
+            },
+            "revision": {
+              "const": 1
+            }
+          },
+          "required": [
+            "name",
+            "revision"
+          ],
+          "additionalProperties": false
+        },
+        "source": {
+          "const": "ORIGINAL_STORED_BYTES_NOT_VERIFIED_BY_RPC"
+        },
+        "transport_digest": {
+          "type": "object",
+          "properties": {
+            "algorithm": {
+              "const": "SHA3-384"
+            },
+            "encoding": {
+              "const": "lowercase-hex"
+            },
+            "value": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{96}$(?![\\s\\S])"
+            }
+          },
+          "required": [
+            "algorithm",
+            "encoding",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        "total_bytes": {
+          "type": "string",
+          "pattern": "^(?:0|[1-9][0-9]{0,5}|[1-3][0-9]{6}|40[0-9]{5}|41[0-8][0-9]{4}|419[0-3][0-9]{3}|4194[0-2][0-9]{2}|419430[0-3]|4194304)$(?![\\s\\S])",
+          "minLength": 1,
+          "maxLength": 7,
+          "not": {
+            "const": "0"
+          }
+        },
+        "offset": {
+          "type": "string",
+          "pattern": "^(?:0|[1-9][0-9]{0,5}|[1-3][0-9]{6}|40[0-9]{5}|41[0-8][0-9]{4}|419[0-3][0-9]{3}|4194[0-2][0-9]{2}|419430[0-2]|4194303)$(?![\\s\\S])",
+          "minLength": 1,
+          "maxLength": 7
+        },
+        "next_offset": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^(?:0|[1-9][0-9]{0,5}|[1-3][0-9]{6}|40[0-9]{5}|41[0-8][0-9]{4}|419[0-3][0-9]{3}|4194[0-2][0-9]{2}|419430[0-2]|4194303)$(?![\\s\\S])",
+              "minLength": 1,
+              "maxLength": 7,
+              "not": {
+                "const": "0"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "page": {
+          "type": "object",
+          "properties": {
+            "encoding": {
+              "const": "base64"
+            },
+            "value": {
+              "type": "string",
+              "minLength": 4,
+              "maxLength": 87384,
+              "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?$(?![\\s\\S])",
+              "allOf": [
+                {
+                  "if": {
+                    "minLength": 87384
+                  },
+                  "then": {
+                    "pattern": "==$"
+                  }
+                }
+              ]
+            }
+          },
+          "required": [
+            "encoding",
+            "value"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "stored_anchor",
+        "kind",
+        "proof_profile",
+        "codec_profile",
+        "source",
+        "transport_digest",
+        "total_bytes",
+        "offset",
+        "next_offset",
+        "page"
       ],
       "additionalProperties": false
     },
@@ -2037,6 +2602,41 @@
         },
         "result": {
           "$ref": "#/definitions/AccountProofProjection"
+        },
+        "proof_profile_status": {
+          "const": "STORED_PROJECTION_REQUIRES_INDEPENDENT_POSY_VERIFICATION"
+        },
+        "finality_verified_by_rpc": {
+          "const": false
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "network",
+        "result",
+        "proof_profile_status",
+        "finality_verified_by_rpc"
+      ],
+      "additionalProperties": false
+    },
+    "GetFinalizedProofPageV1Response": {
+      "type": "object",
+      "properties": {
+        "api_version": {
+          "const": 1
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[\\x21-\\x7e]+$(?![\\s\\S])"
+        },
+        "network": {
+          "$ref": "#/definitions/NetworkCoordinate"
+        },
+        "result": {
+          "$ref": "#/definitions/FinalityProofPageProjection"
         },
         "proof_profile_status": {
           "const": "STORED_PROJECTION_REQUIRES_INDEPENDENT_POSY_VERIFICATION"
@@ -3293,6 +3893,9 @@
     },
     {
       "$ref": "#/definitions/EmptyRequest"
+    },
+    {
+      "$ref": "#/definitions/FinalityProofPageRequest"
     }
   ],
   "x-method-contracts": {
@@ -3311,6 +3914,7 @@
     "synergy_getBlockTransactionCount": "#/definitions/BlockRequest",
     "synergy_getTransactionsInBlock": "#/definitions/BlockRequest",
     "synergy_getBlockReceipts": "#/definitions/BlockRequest",
+    "synergy_getFinalizedProofPageV1": "#/definitions/FinalityProofPageRequest",
     "synergy_getBlockByHash": "#/definitions/BlockByHashRequest",
     "synergy_getBlockByNumber": "#/definitions/BlockByNumberRequest",
     "synergy_getFinalizedHead": "#/definitions/EmptyRequest",
@@ -3340,6 +3944,7 @@
     "synergy_getAccountNonce": "#/definitions/GetAccountNonceResponse",
     "synergy_getNonce": "#/definitions/GetNonceResponse",
     "synergy_getProof": "#/definitions/GetProofResponse",
+    "synergy_getFinalizedProofPageV1": "#/definitions/GetFinalizedProofPageV1Response",
     "synergy_getBlockReceipts": "#/definitions/GetBlockReceiptsResponse",
     "synergy_getTransaction": "#/definitions/GetTransactionResponse",
     "synergy_getTransactionByHash": "#/definitions/GetTransactionByHashResponse",
@@ -3392,6 +3997,7 @@
       "synergy_getBlockTransactionCount",
       "synergy_getChainId",
       "synergy_getFinalizedHead",
+      "synergy_getFinalizedProofPageV1",
       "synergy_getHealth",
       "synergy_getHealthCheck",
       "synergy_getLatestBlock",
@@ -3430,6 +4036,7 @@
     "Runtime node/service labels are also bounded by the source UTF-8 byte limits (128/64/128), not only JSON Schema character lengths.",
     "Compile package version is an observation, never exact release identity or installed-package/provider qualification.",
     "Runtime integer fields use canonical JSON integer lexical form; decimal quantities are strings.",
+    "Finality proof pages preserve original bytes; continuation pins full block commitment, total length and plain raw-byte SHA3-384 transport checksum. Reassemble exactly before independent PoSy verification; checksum and profile labels confer no authority.",
     "Actual typed48 store lookup, original public proof bytes and explicit proof qualification status."
   ],
   "x-no-authority": "Successful schema validation establishes syntax only; it never supplies custody, finality, native authority or activation."

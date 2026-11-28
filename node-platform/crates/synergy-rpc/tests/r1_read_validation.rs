@@ -253,3 +253,23 @@ fn consumer_schema_method_bindings_equal_the_exact_native_read_adapter_set() {
         assert!(!bindings.contains_key(private));
     }
 }
+
+#[test]
+fn original_finality_page_requires_complete_pinned_continuation_and_bounded_canonical_offsets() {
+    use synergy_rpc::r1_read::FinalityProofPageArgs;
+    let commitment=json!({"profile":{"name":"POSY-BLOCK-R1","revision":1},"algorithm":"SHA3-384","encoding":"lowercase-hex","value":"44".repeat(48)});
+    let checksum=json!({"algorithm":"SHA3-384","encoding":"lowercase-hex","value":"55".repeat(48)});
+    let base=json!({"kind":"finality","block_commitment":commitment,"offset":"1","limit":"65536","expected_total_bytes":"4194304","expected_transport_digest":checksum});
+    assert!(r1_read::decode::<FinalityProofPageArgs>(request(base.clone()),&expected()).is_ok());
+    for (key,bad) in [("kind",json!("world_state")),("offset",json!("01")),("offset",json!("4194304")),
+        ("offset",json!("1\n")),("limit",json!("0")),("limit",json!("65537")),("limit",json!(1)),
+        ("expected_total_bytes",json!(null)),("expected_total_bytes",json!("4194305")),("expected_transport_digest",json!(null)),
+        ("expected_transport_digest",json!(["SHA3-384","lowercase-hex","55".repeat(48)]))] {
+        let mut changed=base.clone();changed[key]=bad;
+        assert!(r1_read::decode::<FinalityProofPageArgs>(request(changed),&expected()).is_err(),"{key}");
+    }
+    let mut by_height=base.clone();by_height.as_object_mut().unwrap().remove("block_commitment");by_height["height"]=json!("1");
+    assert!(r1_read::decode::<FinalityProofPageArgs>(request(by_height),&expected()).is_err());
+    let mut other=request(base);other["network"]["network_incarnation_commitment"]["value"]=json!("00".repeat(64));
+    assert_eq!(r1_read::decode::<FinalityProofPageArgs>(other,&expected()).unwrap_err().code,-32010);
+}

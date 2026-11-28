@@ -19,6 +19,7 @@ use crate::RpcError;
 pub const METHODS: &[&str] = &[
     "synergy_getAccount",
     "synergy_getProof",
+    "synergy_getFinalizedProofPageV1",
     "synergy_getBlock",
     "synergy_getBlockReceipts",
     "synergy_getTransaction",
@@ -68,6 +69,7 @@ pub fn preflight(
     expected: &R1NetworkCoordinate,
 ) -> Result<(), RpcError> {
     match method {
+        "synergy_getFinalizedProofPageV1" => { decode::<FinalityProofPageArgs>(params, expected)?; }
         "synergy_getAccount"
         | "synergy_getProof"
         | "synergy_getBalance"
@@ -303,6 +305,7 @@ pub fn decode<A: ReadArguments>(
             return Err(invalid());
         }
     }
+    if params.pointer("/args/expected_transport_digest").is_some_and(|v|!v.is_null() && !v.is_object()) { return Err(invalid()); }
     let envelope: Envelope<A> = serde_json::from_value(params).map_err(|_| invalid())?;
     if envelope.api_version != 1
         || envelope.caller_scope != "public_read"
@@ -406,5 +409,46 @@ impl ReadArguments for BlockArgs {
             }),
             _ => Err(invalid()),
         }
+    }
+}
+
+/// Local byte transport limits, not consensus validity or finality claims.
+pub const MAX_ORIGINAL_FINALITY_PROOF_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_FINALITY_PROOF_PAGE_BYTES: usize = 64 * 1024;
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FinalityProofPageArgs {
+    pub kind: String,
+    pub height: Option<String>,
+    pub block_commitment: Option<ProfileCommitmentWire>,
+    pub offset: String,
+    pub limit: String,
+    pub expected_total_bytes: Option<String>,
+    pub expected_transport_digest: Option<DigestWire>,
+}
+#[derive(Debug)]
+pub struct FinalityProofPageRead {
+    pub block: BlockRead,
+    pub offset: usize,
+    pub limit: usize,
+    pub expected_total_bytes: Option<usize>,
+    pub expected_transport_digest: Option<[u8;48]>,
+}
+impl ReadArguments for FinalityProofPageArgs {
+    type Parsed = FinalityProofPageRead;
+    fn parse(self) -> Result<Self::Parsed,RpcError> {
+        if self.kind != "finality" { return Err(invalid()); }
+        let block=BlockArgs { height:self.height, block_commitment:self.block_commitment }.parse()?;
+        let offset=usize::try_from(decimal(&self.offset)?).map_err(|_|invalid())?;
+        let limit=usize::try_from(decimal(&self.limit)?).map_err(|_|invalid())?;
+        let total=self.expected_total_bytes.as_deref().map(decimal).transpose()?
+            .map(usize::try_from).transpose().map_err(|_|invalid())?;
+        let digest=self.expected_transport_digest.map(|d|d.bytes("SHA3-384")).transpose()?;
+        if offset>=MAX_ORIGINAL_FINALITY_PROOF_BYTES || !(1..=MAX_FINALITY_PROOF_PAGE_BYTES).contains(&limit)
+            || total.is_some_and(|n|n==0 || n>MAX_ORIGINAL_FINALITY_PROOF_BYTES || offset>=n)
+            || (offset>0 && (!matches!(block,BlockRead::Commitment{..}) || total.is_none() || digest.is_none())) {
+            return Err(invalid());
+        }
+        Ok(FinalityProofPageRead { block,offset,limit,expected_total_bytes:total,expected_transport_digest:digest })
     }
 }

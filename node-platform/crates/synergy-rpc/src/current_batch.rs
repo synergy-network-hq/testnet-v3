@@ -133,6 +133,8 @@ pub fn validate_document(bytes: &[u8], expected: &R1NetworkCoordinate) -> Result
 /// These are capacity limits, never validity/finality or protocol supply rules.
 pub fn response_ceiling(method: &str) -> Option<usize> {
     Some(match method {
+        // Page output is small, but real store lookup owns the entire bounded original proof.
+        "synergy_getFinalizedProofPageV1" => 8 * 1024 * 1024,
         "synergy_getBlockReceipts" => 16 * 1024 * 1024,
         "synergy_getBlock"
         | "synergy_getBlockByHash"

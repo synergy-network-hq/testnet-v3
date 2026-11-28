@@ -18,7 +18,7 @@ use synergy_rpc::{
         CanonicalReadProvider, FinalizedAccountView, FinalizedBlockView, FinalizedTransactionView,
         ReadContract,
     },
-    r1_read::{self, AccountArgs, BlockArgs, BlockRead, EmptyArgs, TransactionArgs},
+    r1_read::{self, AccountArgs, BlockArgs, BlockRead, EmptyArgs, FinalityProofPageArgs, TransactionArgs},
     RpcError,
 };
 use synergy_state::r1_finalized::{
@@ -257,6 +257,12 @@ impl CanonicalReadProvider for CanonicalR1QueryStore {
                 }
             }
         }
+        if method=="synergy_getFinalizedProofPageV1" {
+            let query=r1_read::decode::<FinalityProofPageArgs>(params.clone(),expected)?;
+            if let BlockRead::Commitment {profile,..}=query.args.block {
+                if &profile!=self.genesis.block_profile() { return Err(RpcError::invalid_params("block profile mismatch")); }
+            }
+        }
         Ok(())
     }
     fn reserve_current_read_aggregate(&self, encoded_bytes: usize) -> Result<synergy_rpc::provider::RpcResponseCapacity, RpcError> {
@@ -277,6 +283,49 @@ impl CanonicalReadProvider for CanonicalR1QueryStore {
     fn r1_read(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         let expected = self.genesis.coordinate();
         match method {
+            "synergy_getFinalizedProofPageV1" => {
+                let query=r1_read::decode::<FinalityProofPageArgs>(params,expected)?;
+                if let BlockRead::Commitment {profile,..}=&query.args.block {
+                    if profile!=self.genesis.block_profile() { return Err(RpcError::invalid_params("block profile mismatch")); }
+                }
+                let store=self.store()?;
+                let read=match query.args.block {
+                    BlockRead::Height(height)=>store.block(height),
+                    BlockRead::Commitment{profile,digest}=>{
+                        if &profile!=self.genesis.block_profile() { return Err(RpcError::invalid_params("block profile mismatch")); }
+                        store.block_by_digest(digest)
+                    }
+                }.map_err(fault)?.ok_or_else(||fault("original finality proof unavailable"))?;
+                if &read.block_profile!=self.genesis.block_profile() { return Err(fault("stored block profile mismatch")); }
+                let original=&read.public_finality_proof;
+                if original.is_empty() || original.len()>r1_read::MAX_ORIGINAL_FINALITY_PROOF_BYTES {
+                    return Err(fault("original finality proof unavailable"));
+                }
+                // Plain original-byte checksum is a transport mix-up check only,
+                // never a block identity, authenticated proof or finality token.
+                use synergy_address::r1_public::{Primitives,HashAlgorithm};
+                let digest:[u8;48]=Primitives.hash(HashAlgorithm::Sha3384,original).map_err(fault)?
+                    .try_into().map_err(|_|fault("transport digest width"))?;
+                if query.args.expected_total_bytes.is_some_and(|n|n!=original.len())
+                    || query.args.expected_transport_digest.is_some_and(|d|d!=digest)
+                    || query.args.offset>=original.len() {
+                    return Err(RpcError::invalid_params("original proof transport binding mismatch"));
+                }
+                use synergy_genesis::r1::profiles::ProfileKind;
+                let selected=|kind|self.genesis.compiled().catalog().definitions().iter()
+                    .find(|definition|definition.kind==kind)
+                    .map(|definition|json!({"name":definition.kind.name(),"revision":definition.kind.revision()}))
+                    .ok_or_else(||fault("authenticated proof profile unavailable"));
+                let end=original.len().min(query.args.offset.checked_add(query.args.limit).ok_or_else(||fault("page overflow"))?);
+                Ok(self.response(query.request_id,json!({"stored_anchor":self.anchor(&read.anchor)?,
+                    "kind":"finality","proof_profile":selected(ProfileKind::PoSyFinality)?,
+                    "codec_profile":selected(ProfileKind::PoSyCodec)?,
+                    "source":"ORIGINAL_STORED_BYTES_NOT_VERIFIED_BY_RPC",
+                    "transport_digest":{"algorithm":"SHA3-384","encoding":"lowercase-hex","value":hex(&digest)},
+                    "total_bytes":original.len().to_string(),"offset":query.args.offset.to_string(),
+                    "next_offset":if end<original.len(){Some(end.to_string())}else{None},
+                    "page":{"encoding":"base64","value":BASE64.encode(&original[query.args.offset..end])}})))
+            }
             "synergy_getProof" => {
                 let query = r1_read::decode::<AccountArgs>(params, expected)?;
                 let read = self

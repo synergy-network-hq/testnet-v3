@@ -272,6 +272,7 @@ fn actual_private_genesis_context_drives_all_registered_typed_read_adapters() {
     let server = native_server(&provider);
     for method in r1_read::METHODS {
         let args = match *method {
+            "synergy_getFinalizedProofPageV1"=>json!({"kind":"finality","height":"0","offset":"0","limit":"65536"}),
             "synergy_getAccount"
             | "synergy_getProof"
             | "synergy_getBalance"
@@ -310,12 +311,20 @@ fn actual_private_genesis_context_drives_all_registered_typed_read_adapters() {
             == Some(std::ffi::OsStr::new("1"))
 
         {
+            let mut consumer_profiles=json!({"block_profile":profile(genesis.block_profile()),"state_profile":profile(genesis.state_profile())});
+            if *method=="synergy_getFinalizedProofPageV1" {
+                use synergy_genesis::r1::profiles::ProfileKind;
+                for (key,kind) in [("finality_profile",ProfileKind::PoSyFinality),("codec_profile",ProfileKind::PoSyCodec)] {
+                    let definition=genesis.compiled().catalog().definitions().iter().find(|d|d.kind==kind).unwrap();
+                    consumer_profiles[key]=json!({"name":definition.kind.name(),"revision":definition.kind.revision()});
+                }
+            }
             println!(
                 "R1_PUBLIC_READ_FIXTURE {}",
                 json!({
                     "purpose":"PUBLIC_SYNTHETIC_CONSUMER_QUALIFICATION_ONLY","production_import_permitted":false,
                     "request":serde_json::from_slice::<Value>(&body).unwrap(),"response":outer,
-                    "expected_profiles":{"block_profile":profile(genesis.block_profile()),"state_profile":profile(genesis.state_profile())},
+                    "expected_profiles":consumer_profiles,
                 })
             );
         }
@@ -328,6 +337,13 @@ fn actual_private_genesis_context_drives_all_registered_typed_read_adapters() {
         assert_ne!(response["result"], Value::Null, "{method}");
         assert_eq!(budget.used(), 0, "snapshot permit leaked by {method}");
         match *method {
+            "synergy_getFinalizedProofPageV1"=>{
+                assert_eq!(BASE64.decode(response["result"]["page"]["value"].as_str().unwrap()).unwrap(),block.public_finality_proof);
+                assert_eq!(response["result"]["next_offset"],Value::Null);
+                assert_eq!(response["result"]["proof_profile"]["name"],"POSY-FINALITY-R1");
+                assert_eq!(response["result"]["codec_profile"]["name"],"POSY-CODEC-1");
+                assert_eq!(response["result"]["source"],"ORIGINAL_STORED_BYTES_NOT_VERIFIED_BY_RPC");
+            }
             "synergy_getProof" => {
                 assert_eq!(response["result"]["identity"], identity);
                 let leaves = response["result"]["leaves"].as_array().unwrap();
@@ -454,6 +470,47 @@ fn actual_private_genesis_context_drives_all_registered_typed_read_adapters() {
             _ => {}
         }
     }
+    // Reassemble every original byte through the actual registered RpcServer;
+    // a checksum detects page mix-up but supplies no PoSy verification authority.
+    let mut assembled=Vec::new(); let mut offset=0usize;
+    let mut digest=Value::Null; let total=block.public_finality_proof.len().to_string();
+    loop {
+        let args=if offset==0 {json!({"kind":"finality","height":"0","offset":"0","limit":"7"})}
+            else {json!({"kind":"finality","block_commitment":commitment(genesis.block_profile(),&block.anchor.block_digest),
+                "offset":offset.to_string(),"limit":"7","expected_total_bytes":total,"expected_transport_digest":digest})};
+        let body=serde_json::to_vec(&json!({"jsonrpc":"2.0","id":"page","method":"synergy_getFinalizedProofPageV1","params":params(&genesis,args.clone())})).unwrap();
+        let output=server.handle_bytes_reserved("public-page-client",None,0,&body);
+        let (wire,guard)=output.into_parts();
+        let page:Value=serde_json::from_slice(&wire).unwrap();
+        assert!(page.get("error").is_none(),"{page}");
+        assert_eq!(page["result"]["finality_verified_by_rpc"],false);
+        let result=&page["result"]["result"];
+        assembled.extend(BASE64.decode(result["page"]["value"].as_str().unwrap()).unwrap());
+        digest=result["transport_digest"].clone();
+        let next=result["next_offset"].as_str().map(|s|s.parse::<usize>().unwrap());
+        drop(wire); drop(guard); assert_eq!(budget.used(),0);
+        if let Some(next)=next {offset=next;} else {break;}
+    }
+    assert_eq!(assembled,block.public_finality_proof);
+    let bound=json!({"kind":"finality","block_commitment":commitment(genesis.block_profile(),&block.anchor.block_digest),
+        "offset":"7","limit":"7","expected_total_bytes":total,"expected_transport_digest":digest});
+    for (field,bad) in [("expected_total_bytes",json!("999")),("expected_transport_digest",json!({"algorithm":"SHA3-384","encoding":"lowercase-hex","value":"00".repeat(48)})),
+        ("offset",json!(total)),("limit",json!("65537")),("kind",json!("world_state"))] {
+        let mut args=bound.clone();args[field]=bad;
+        assert_eq!(provider.r1_read("synergy_getFinalizedProofPageV1",params(&genesis,args)).unwrap_err().code,-32602);
+    }
+    let mut wrong=params(&genesis,bound.clone()); wrong["network"]["network_incarnation_commitment"]["value"]=json!("00".repeat(64));
+    assert_eq!(provider.r1_read("synergy_getFinalizedProofPageV1",wrong).unwrap_err().code,-32010);
+    assert!(provider.r1_read("synergy_getFinalizedProofPageV1",params(&genesis,json!({"kind":"finality","height":"1","offset":"0","limit":"7"}))).is_err());
+    let absent_temp=Temp::new();let mut absent_block=block.clone();absent_block.public_finality_proof.clear();
+    synergy_state::r1_finalized::publish_nonproduction_projection_with_receipts(&absent_temp.0,&absent_block,state,&[tx.clone()],&[receipt.clone()]).unwrap();
+    let absent_provider=Arc::new(CanonicalR1QueryStore::open(absent_temp.0.clone(),Arc::clone(&genesis),runtime(u64::MAX-1),WorldResourceBudget::new(256*1024*1024),capacity()).unwrap());
+    let absent_server=native_server(&absent_provider);
+    let body=serde_json::to_vec(&json!({"jsonrpc":"2.0","id":"missing-proof","method":"synergy_getFinalizedProofPageV1", "params":params(&genesis,json!({"kind":"finality","height":"0","offset":"0","limit":"7"}))})).unwrap();
+    let (wire,guard)=absent_server.handle_bytes_reserved("public-absent-proof-client",None,0,&body).into_parts();
+    let unavailable:Value=serde_json::from_slice(&wire).unwrap();assert_eq!(unavailable["error"]["code"],-32000);
+    assert!(unavailable.get("result").is_none());drop(wire);drop(guard);
+    assert_eq!(absent_provider.world_budget.used(),0);
     let permit = provider.reserve_response_capacity().unwrap().unwrap();
     assert!(budget.used() >= 24 * 1024 * 1024);
     drop(permit);
