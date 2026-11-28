@@ -3,7 +3,10 @@
 //! The public preparation constructor is isolated to nonproduction coordinates;
 //! actual managed authorization must enter through the existing native lifecycle.
 use serde::{Deserialize, Serialize};
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 use synergy_address_engine::{
     apqe::{custody_binding_r1::CustodyBinding, r1_framing::NetworkRef},
     encrypt::{bound_envelope_commitment, EncryptedEnvelope},
@@ -54,6 +57,32 @@ pub struct CustodyCreationIntent {
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct PublicCustodyKey {
+    role: String,
+    algorithm: String,
+    key_generation: u64,
+    full_public_key: Vec<u8>,
+}
+impl PublicCustodyKey {
+    fn from_key(k: synergy_address_engine::apqe::network_birth_r1::BootstrapKeyRecord<'_>) -> Self {
+        Self {
+            role: k.role.into(),
+            algorithm: k.algorithm.into(),
+            key_generation: k.key_generation,
+            full_public_key: k.full_public_key.to_vec(),
+        }
+    }
+    fn borrowed(&self) -> synergy_address_engine::apqe::network_birth_r1::BootstrapKeyRecord<'_> {
+        synergy_address_engine::apqe::network_birth_r1::BootstrapKeyRecord {
+            role: &self.role,
+            algorithm: &self.algorithm,
+            key_generation: self.key_generation,
+            full_public_key: &self.full_public_key,
+        }
+    }
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Record {
     schema: u16,
     chain_id: Option<u64>,
@@ -70,6 +99,7 @@ struct Record {
     full_binding_aad: Option<Vec<u8>>,
     envelope_commitment: Option<Vec<u8>>,
     envelope: Option<EncryptedEnvelope>,
+    public_key: Option<PublicCustodyKey>,
 }
 impl Record {
     fn intent(&self) -> Result<CustodyCreationIntent, CustodyJournalError> {
@@ -110,11 +140,29 @@ impl Record {
                 if self.full_binding_aad.is_some()
                     || self.envelope_commitment.is_some()
                     || self.envelope.is_some()
+                    || self.public_key.is_some()
                 {
                     return Err(CustodyJournalError::Corrupt);
                 }
             }
             CustodyStage::SealedPending => {
+                let key = self
+                    .public_key
+                    .as_ref()
+                    .ok_or(CustodyJournalError::Corrupt)?;
+                let size = match key.algorithm.as_str() {
+                    "ML-DSA-65" => 1952,
+                    "ML-DSA-87" => 2592,
+                    "ML-KEM-1024" => 1568,
+                    _ => return Err(CustodyJournalError::Corrupt),
+                };
+                if key.role != self.role
+                    || key.algorithm != self.algorithm
+                    || key.key_generation != self.key_generation
+                    || key.full_public_key.len() != size
+                {
+                    return Err(CustodyJournalError::Corrupt);
+                }
                 if self
                     .full_binding_aad
                     .as_ref()
@@ -132,6 +180,7 @@ impl Record {
                 if self.full_binding_aad.is_some()
                     || self.envelope_commitment.is_some()
                     || self.envelope.is_some()
+                    || self.public_key.is_some()
                 {
                     return Err(CustodyJournalError::Corrupt);
                 }
@@ -196,6 +245,15 @@ pub struct SealedPendingCustody {
     bytes: Vec<u8>,
 }
 impl SealedPendingCustody {
+    pub fn public_key_record(
+        &self,
+    ) -> synergy_address_engine::apqe::network_birth_r1::BootstrapKeyRecord<'_> {
+        self.record
+            .public_key
+            .as_ref()
+            .expect("validated sealed record")
+            .borrowed()
+    }
     pub fn key_generation(&self) -> u64 {
         self.record.key_generation
     }
@@ -218,9 +276,161 @@ pub enum CustodyReservationResult {
 }
 pub struct NativeCustodyJournal {
     store: AtomicStore,
+    root: PathBuf,
     network: Option<NetworkRef>,
+    admission: Admission,
+}
+#[derive(Clone, Copy)]
+enum Admission {
+    PublicFixture,
+    NativeManaged,
 }
 impl NativeCustodyJournal {
+    /// Reconcile public sealed state without consuming another grant or RNG.
+    /// The encrypted envelope stays private in the opaque returned value.
+    pub fn inspect_managed_pending(
+        platform_root: &Path,
+        slot: &str,
+        original_request: &[u8; 32],
+    ) -> Result<Option<SealedPendingCustody>, CustodyJournalError> {
+        if !text(slot) || slot.len() > 120 || !platform_root.is_absolute() {
+            return Err(CustodyJournalError::InvalidIntent);
+        }
+        let root = platform_root.join("keys/apqe/r1/journal");
+        match fs::symlink_metadata(&root) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(CustodyJournalError::Storage),
+            Ok(_) => {}
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(CustodyJournalError::PlatformUnqualified);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            if root.canonicalize().ok().as_deref() != Some(root.as_path()) {
+                return Err(CustodyJournalError::Storage);
+            }
+            for path in root
+                .ancestors()
+                .take_while(|p| p.starts_with(platform_root))
+            {
+                let m = fs::symlink_metadata(path).map_err(|_| CustodyJournalError::Storage)?;
+                if m.file_type().is_symlink()
+                    || !m.is_dir()
+                    || m.uid() != 0
+                    || m.permissions().mode() & 0o022 != 0
+                {
+                    return Err(CustodyJournalError::Storage);
+                }
+            }
+            AtomicStore::inspect_existing_read_only(
+                &root,
+                MAX_RECORD,
+                |reader| -> Result<Option<SealedPendingCustody>, CustodyJournalError> {
+                    let expected = encode(&(
+                        1u16,
+                        "NATIVE-MANAGED-CUSTODY-JOURNAL",
+                        None::<(u64, Vec<u8>)>,
+                    ))?;
+                    if reader
+                        .with_maximum_bytes(4096)
+                        .read_optional_bounded("context.json")
+                        .map_err(|_| CustodyJournalError::Storage)?
+                        .as_deref()
+                        != Some(expected.as_slice())
+                    {
+                        return Err(CustodyJournalError::Conflict);
+                    }
+                    let Some(bytes) = reader
+                        .read_optional_bounded(slot_path(slot))
+                        .map_err(|_| CustodyJournalError::Storage)?
+                    else {
+                        return Ok(None);
+                    };
+                    let record = decode(&bytes)?;
+                    record.validate(None)?;
+                    if record.slot_ref != slot
+                        || record.native_request_digest.as_slice() != original_request
+                    {
+                        return Err(CustodyJournalError::Conflict);
+                    }
+                    match record.stage {
+                        CustodyStage::SealedPending => {
+                            Ok(Some(SealedPendingCustody { record, bytes }))
+                        }
+                        CustodyStage::Generating => Err(CustodyJournalError::AmbiguousGeneration),
+                        _ => Err(CustodyJournalError::InvalidStage),
+                    }
+                },
+            )
+            .map_err(|_| CustodyJournalError::Storage)?
+            .transpose()
+            .map(Option::flatten)
+        }
+    }
+    /// Uses the exact independently verified native root, never a caller path.
+    /// The capability owner has already checked/consumed the protected receipt;
+    /// key generation still cannot begin until `begin_generation` commits.
+    pub fn from_managed_creation(
+        auth: &synergy_address_engine::apqe::managed_creation::VerifiedManagedCreationAuthorization,
+    ) -> Result<Self, CustodyJournalError> {
+        #[cfg(not(unix))]
+        {
+            let _ = auth;
+            return Err(CustodyJournalError::PlatformUnqualified);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+            let mut root = auth.platform_root().to_path_buf();
+            for leaf in ["keys", "apqe", "r1", "journal"] {
+                root.push(leaf);
+                match fs::symlink_metadata(&root) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        fs::DirBuilder::new()
+                            .mode(0o700)
+                            .create(&root)
+                            .map_err(|_| CustodyJournalError::Storage)?;
+                    }
+                    Err(_) => return Err(CustodyJournalError::Storage),
+                    Ok(_) => {}
+                }
+                let m = fs::symlink_metadata(&root).map_err(|_| CustodyJournalError::Storage)?;
+                if m.file_type().is_symlink()
+                    || !m.is_dir()
+                    || m.uid() != 0
+                    || m.permissions().mode() & 0o022 != 0
+                {
+                    return Err(CustodyJournalError::Storage);
+                }
+            }
+            Self::open_private(&root, auth.network(), Admission::NativeManaged)
+        }
+    }
+    pub fn reserve_managed(
+        &mut self,
+        auth: &synergy_address_engine::apqe::managed_creation::VerifiedManagedCreationAuthorization,
+    ) -> Result<CustodyReservationResult, CustodyJournalError> {
+        if self.network != auth.network() || !matches!(self.admission, Admission::NativeManaged) {
+            return Err(CustodyJournalError::Conflict);
+        }
+        let intent = CustodyCreationIntent {
+            slot_ref: auth.slot_ref().into(),
+            role: auth.role().into(),
+            algorithm: auth.algorithm().into(),
+            key_generation: auth.key_generation(),
+            operation_nonce: auth.operation_nonce(),
+            native_request_digest: auth.native_request_digest(),
+            creation_scope_commitment: auth.creation_scope_commitment(),
+        };
+        let old = intent
+            .key_generation
+            .checked_sub(1)
+            .ok_or(CustodyJournalError::InvalidIntent)?;
+        self.reserve_checked(&intent, old)
+    }
     /// Tests use a caller-owned private temporary root. This does not commission
     /// a platform or authorize the actual generation phase.
     pub fn for_nonproduction(
@@ -232,18 +442,19 @@ impl NativeCustodyJournal {
         if network.nic == [0; 64] {
             return Err(CustodyJournalError::InvalidIntent);
         }
-        Self::open_fixture(root, Some(network))
+        Self::open_private(root, Some(network), Admission::PublicFixture)
     }
     /// Explicit pre-NIC public-fixture scope. No invented zero-NIC network or
     /// dependency on a root-set commitment before the first root is protected.
     pub fn for_public_bootstrap_fixture(
         root: impl AsRef<Path>,
     ) -> Result<Self, CustodyJournalError> {
-        Self::open_fixture(root, None)
+        Self::open_private(root, None, Admission::PublicFixture)
     }
-    fn open_fixture(
+    fn open_private(
         root: impl AsRef<Path>,
         network: Option<NetworkRef>,
+        admission: Admission,
     ) -> Result<Self, CustodyJournalError> {
         #[cfg(not(unix))]
         {
@@ -283,7 +494,10 @@ impl NativeCustodyJournal {
                 AtomicStore::new(root, MAX_RECORD).map_err(|_| CustodyJournalError::Storage)?;
             let context = encode(&(
                 1u16,
-                "PUBLIC-SYNTHETIC-CUSTODY-JOURNAL",
+                match admission {
+                    Admission::PublicFixture => "PUBLIC-SYNTHETIC-CUSTODY-JOURNAL",
+                    Admission::NativeManaged => "NATIVE-MANAGED-CUSTODY-JOURNAL",
+                },
                 network.map(|n| (n.chain_id, n.nic.to_vec())),
             ))?;
             store
@@ -292,7 +506,12 @@ impl NativeCustodyJournal {
                     bytes: context,
                 }])
                 .map_err(|_| CustodyJournalError::Conflict)?;
-            Ok(Self { store, network })
+            Ok(Self {
+                store,
+                root: root.to_path_buf(),
+                network,
+                admission,
+            })
         }
     }
     fn current(&self, slot: &str) -> Result<Option<(Record, Vec<u8>)>, CustodyJournalError> {
@@ -310,6 +529,16 @@ impl NativeCustodyJournal {
             .transpose()
     }
     pub fn reserve(
+        &mut self,
+        intent: &CustodyCreationIntent,
+        expected_key_generation: u64,
+    ) -> Result<CustodyReservationResult, CustodyJournalError> {
+        if !matches!(self.admission, Admission::PublicFixture) {
+            return Err(CustodyJournalError::CeremonyRequired);
+        }
+        self.reserve_checked(intent, expected_key_generation)
+    }
+    fn reserve_checked(
         &mut self,
         intent: &CustodyCreationIntent,
         expected_key_generation: u64,
@@ -366,6 +595,7 @@ impl NativeCustodyJournal {
             full_binding_aad: None,
             envelope_commitment: None,
             envelope: None,
+            public_key: None,
         };
         let bytes = encode(&r)?;
         let mut tx =
@@ -436,12 +666,77 @@ impl NativeCustodyJournal {
         )?;
         Ok(CustodyGenerationLease { record, bytes })
     }
+    pub fn managed_generation_record(
+        &self,
+        lease: &CustodyGenerationLease,
+    ) -> Result<(PathBuf, fs::File), CustodyJournalError> {
+        if !matches!(self.admission, Admission::NativeManaged)
+            || lease.record.stage != CustodyStage::Generating
+        {
+            return Err(CustodyJournalError::InvalidStage);
+        }
+        let Some((_, bytes)) = self.current(&lease.record.slot_ref)? else {
+            return Err(CustodyJournalError::Conflict);
+        };
+        if bytes != lease.bytes {
+            return Err(CustodyJournalError::Conflict);
+        }
+        let path = self.root.join(slot_path(&lease.record.slot_ref));
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            return Err(CustodyJournalError::PlatformUnqualified);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+                .open(&path)
+                .map_err(|_| CustodyJournalError::Storage)?;
+            Ok((path, file))
+        }
+    }
+    /// Only APQE's private admitted/roundtripped result can enter managed custody.
+    pub fn seal_managed_generated(
+        &mut self,
+        lease: &CustodyGenerationLease,
+        material: synergy_address_engine::apqe::managed_creation::ManagedSealedKey,
+    ) -> Result<SealedPendingCustody, CustodyJournalError> {
+        if !matches!(self.admission, Admission::NativeManaged)
+            || lease.record.stage != CustodyStage::Generating
+        {
+            return Err(CustodyJournalError::InvalidStage);
+        }
+        let key = material.public_key_record();
+        if key.role != lease.record.role
+            || key.algorithm != lease.record.algorithm
+            || key.key_generation != lease.record.key_generation
+            || material.native_request_digest().as_slice() != lease.record.native_request_digest
+            || material.operation_nonce().as_slice() != lease.record.operation_nonce
+            || material.creation_scope_commitment().as_slice()
+                != lease.record.creation_scope_commitment
+        {
+            return Err(CustodyJournalError::InvalidSeal);
+        }
+        let mut record = lease.record.clone();
+        record.public_key = Some(PublicCustodyKey::from_key(key));
+        record.full_binding_aad = Some(material.full_binding_aad().to_vec());
+        record.envelope_commitment = Some(material.envelope_commitment().to_vec());
+        record.envelope = Some(material.encrypted_envelope().clone());
+        let (record, bytes) = self.advance(&lease.bytes, record, CustodyStage::SealedPending)?;
+        Ok(SealedPendingCustody { record, bytes })
+    }
     pub fn seal_generated(
         &mut self,
         lease: &CustodyGenerationLease,
         envelope: &EncryptedEnvelope,
         binding: &CustodyBinding<'_>,
     ) -> Result<SealedPendingCustody, CustodyJournalError> {
+        if !matches!(self.admission, Admission::PublicFixture) {
+            return Err(CustodyJournalError::InvalidSeal);
+        }
         if lease.record.stage != CustodyStage::Generating
             || binding.key.role != lease.record.role
             || binding.key.algorithm != lease.record.algorithm
@@ -475,6 +770,7 @@ impl NativeCustodyJournal {
         record.full_binding_aad = Some(aad);
         record.envelope_commitment = Some(commit.to_vec());
         record.envelope = Some(envelope.clone());
+        record.public_key = Some(PublicCustodyKey::from_key(binding.key));
         let (record, bytes) = self.advance(&lease.bytes, record, CustodyStage::SealedPending)?;
         Ok(SealedPendingCustody { record, bytes })
     }
@@ -488,6 +784,7 @@ impl NativeCustodyJournal {
         record.full_binding_aad = None;
         record.envelope_commitment = None;
         record.envelope = None;
+        record.public_key = None;
         self.advance(&lease.bytes, record, CustodyStage::Retired)?;
         Ok(())
     }
