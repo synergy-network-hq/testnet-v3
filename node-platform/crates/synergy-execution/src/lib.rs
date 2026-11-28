@@ -5,6 +5,7 @@
 
 pub mod r1_payload;
 pub mod r1_header_commitments;
+pub mod r1_block;
 pub mod r1_fees;
 pub mod r1_native;
 pub mod r1_enrollment;
