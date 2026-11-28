@@ -788,17 +788,7 @@ fn network_profile(
         .map_err(|_| "cannot serialize pinned public network profile".into())
 }
 
-#[derive(Deserialize)]
-struct Request<'a> {
-    #[serde(borrow)]
-    jsonrpc: &'a str,
-    #[serde(borrow)]
-    method: &'a str,
-    #[serde(borrow)]
-    id: &'a RawValue,
-    #[serde(default, borrow)]
-    params: Option<&'a RawValue>,
-}
+type Request<'a> = synergy_rpc::current_batch::BorrowedRpcEnvelope<'a>;
 
 /// Shared public carrier preflight for the authenticated Sentry RPC ingress.
 pub(super) fn validate_public_carrier(bytes: &[u8]) -> Result<(), String> {
@@ -812,25 +802,7 @@ pub(super) fn validate_current_public_carrier(
 )->Result<(),String>{current_carrier::validate(bytes,confirmed)}
 
 fn validate_request_envelope(bytes: &[u8]) -> Result<Request<'_>, String> {
-    if bytes.iter().find(|b|!b.is_ascii_whitespace())!=Some(&b'{') {
-        return Err("RPC request envelope must be an object".into());
-    }
-    let v: Request<'_> =
-        serde_json::from_slice(bytes).map_err(|_| "invalid JSON-RPC request envelope")?;
-    if v.jsonrpc != "2.0" || v.method.is_empty() || v.method.len() > 128 || v.id.get() == "null" {
-        return Err("RPC notifications or invalid methods are not supported".into());
-    }
-    let id: serde_json::Value = serde_json::from_str(v.id.get())
-        .map_err(|_| "invalid JSON-RPC identifier")?;
-    if v.id.get().len() > 256 || !(id.is_string() || id.is_number()) {
-        return Err("RPC requires a bounded scalar identifier".into());
-    }
-    if v.params.is_some_and(|params| {
-        !matches!(params.get().as_bytes().first(), Some(b'{') | Some(b'['))
-    }) {
-        return Err("RPC params must be an object or array".into());
-    }
-    Ok(v)
+    synergy_rpc::current_batch::validate_envelope(bytes).map_err(|e|e.message)
 }
 
 fn validate_public_method(method:&str)->Result<(),String>{

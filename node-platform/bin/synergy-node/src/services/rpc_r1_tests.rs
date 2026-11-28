@@ -135,11 +135,42 @@ fn capacity() -> R1ReadCapacity {
         request_timeout: Duration::from_secs(20),
         maximum_hashes: 10_000_000,
         maximum_response_bytes: 1024 * 1024,
+        public_quota_bytes: 192 * 1024 * 1024,
+        protected_world_headroom_bytes: 64 * 1024 * 1024,
     }
 }
 fn params(genesis: &VerifiedR1Genesis, args: Value) -> Value {
     json!({"api_version":1,"request_id":"public-synthetic-read-only","caller_scope":"public_read",
         "network":coordinate(genesis.coordinate()),"args":args})
+}
+
+fn native_server(provider: &Arc<CanonicalR1QueryStore>) -> synergy_rpc::server::RpcServer<super::super::RuntimeDispatcher, ManagedReadAuthenticator> {
+    synergy_rpc::server::RpcServer::new(
+        Arc::new(super::super::RuntimeDispatcher {
+            runtime: Arc::clone(&provider.runtime),
+            query_store: provider.clone(),
+            admission: None,
+            preparation: None,
+            network_identity: None,
+            telemetry_samples: Mutex::new(super::super::TelemetrySamples::default()),
+            proof_throttle: Mutex::new(super::super::proofs::ProofThrottle::default()),
+        }),
+        Arc::new(ManagedReadAuthenticator::new(provider.read_contract())),
+        synergy_rpc::middleware::RpcLimits {
+            max_body_bytes: 65536,
+            max_concurrent_requests: 8,
+            request_timeout_ms: 5000,
+        },
+        synergy_rpc::rate_limit::RpcRateLimiter::new(
+            synergy_rpc::rate_limit::RateLimit {
+                requests: 64,
+                window_ms: 1000,
+            },
+            4,
+        )
+        .unwrap(),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -223,32 +254,8 @@ fn actual_private_genesis_context_drives_all_registered_typed_read_adapters() {
         )
         .unwrap(),
     );
-    let server = synergy_rpc::server::RpcServer::new(
-        Arc::new(super::super::RuntimeDispatcher {
-            runtime: Arc::clone(&provider.runtime),
-            query_store: provider.clone(),
-            admission: None,
-            preparation: None,
-            network_identity: None,
-            telemetry_samples: Mutex::new(super::super::TelemetrySamples::default()),
-            proof_throttle: Mutex::new(super::super::proofs::ProofThrottle::default()),
-        }),
-        Arc::new(ManagedReadAuthenticator::new(provider.read_contract())),
-        synergy_rpc::middleware::RpcLimits {
-            max_body_bytes: 65536,
-            max_concurrent_requests: 8,
-            request_timeout_ms: 5000,
-        },
-        synergy_rpc::rate_limit::RpcRateLimiter::new(
-            synergy_rpc::rate_limit::RateLimit {
-                requests: 64,
-                window_ms: 1000,
-            },
-            4,
-        )
-        .unwrap(),
-    )
-    .unwrap();
+    let budget = provider.world_budget.clone();
+    let server = native_server(&provider);
     for method in r1_read::METHODS {
         let args = match *method {
             "synergy_getAccount"
@@ -279,7 +286,7 @@ fn actual_private_genesis_context_drives_all_registered_typed_read_adapters() {
             .handle_bytes_reserved("public-synthetic-client", None, 0, &body)
             .into_parts();
         assert!(permit.is_some());
-        assert!(budget.used() >= 24 * 1024 * 1024);
+        assert!(budget.used() >= synergy_rpc::current_batch::response_ceiling(method).unwrap() * 3);
         let outer: Value = serde_json::from_slice(&wire).unwrap();
         assert!(outer.get("error").is_none(), "{method}: {outer}");
         assert_eq!(outer["id"], "public-synthetic-read-only");
@@ -468,7 +475,7 @@ fn actual_private_genesis_context_drives_all_registered_typed_read_adapters() {
         compact.0.clone(),
         Arc::clone(&genesis),
         runtime(u64::MAX - 1),
-        Arc::clone(&budget),
+        WorldResourceBudget::new(256 * 1024 * 1024),
         capacity(),
     )
     .unwrap();
@@ -526,6 +533,11 @@ fn actual_verified_context_checks_before_store_io_and_cannot_fake_missing_state(
     let temp = Temp::new();
     let genesis = verified_genesis();
     let budget = WorldResourceBudget::new(64 * 1024 * 1024);
+    for limits in [R1ReadCapacity{public_quota_bytes:0,..capacity()},
+        R1ReadCapacity{protected_world_headroom_bytes:0,..capacity()}] {
+        assert!(CanonicalR1QueryStore::open(temp.0.clone(),genesis.clone(),runtime(u64::MAX-1),budget.clone(),limits).is_err());
+        assert_eq!(budget.used(),0);assert!(!temp.0.exists());
+    }
     assert!(CanonicalR1QueryStore::open(
         temp.0.clone(),
         Arc::clone(&genesis),
@@ -539,7 +551,7 @@ fn actual_verified_context_checks_before_store_io_and_cannot_fake_missing_state(
         Arc::clone(&genesis),
         runtime(u64::MAX - 1),
         budget,
-        capacity(),
+        R1ReadCapacity { public_quota_bytes:48*1024*1024, protected_world_headroom_bytes:16*1024*1024, ..capacity() },
     )
     .unwrap();
     assert!(!temp.0.exists());
@@ -599,4 +611,103 @@ fn actual_verified_context_checks_before_store_io_and_cannot_fake_missing_state(
         !temp.0.exists(),
         "read-only missing store cannot create a chain"
     );
+}
+
+#[test]
+fn actual_shared_native_pool_prepares_current_batches_and_retains_all_delivery_guards() {
+    let genesis = verified_genesis();
+    let temp = Temp::new();
+    let parent_budget = WorldResourceBudget::new(256 * 1024 * 1024);
+    let provider = Arc::new(CanonicalR1QueryStore::open(temp.0.clone(),genesis.clone(),
+        runtime(u64::MAX-1),parent_budget.clone(),capacity()).unwrap());
+    let budget=provider.world_budget.clone();
+    assert_eq!(parent_budget.used(),capacity().public_quota_bytes);
+    let mandatory=parent_budget.reserve(capacity().protected_world_headroom_bytes).unwrap();
+    let server = native_server(&provider);
+    let calls = (0..32).map(|index| {
+        let id=format!("public-synthetic-batch-{index}");
+        let mut parameters=params(&genesis,json!({}));parameters["request_id"]=json!(id);
+        json!({"jsonrpc":"2.0","id":id,"method":if index%2==0{"synergy_ping"}else{"synergy_chainId"},"params":parameters})
+    }).collect::<Vec<_>>();
+    let body=serde_json::to_vec(&calls).unwrap();
+    let output=server.handle_current_read_document_reserved("public-synthetic-batch-client",None,0,&body,
+        genesis.coordinate(),synergy_protocol_types::r1_rpc_response::MAX_TOTAL_BYTES).unwrap();
+    let (bytes,guard)=output.into_parts();
+    let responses:Value=serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(responses.as_array().unwrap().len(),32);
+    for(index,response)in responses.as_array().unwrap().iter().enumerate(){
+        assert_eq!(response["id"],calls[index]["id"]);
+        assert_eq!(response["result"]["network"],coordinate(genesis.coordinate()));
+        assert_eq!(response["result"]["finality_verified_by_rpc"],false);
+        assert!(response.get("error").is_none());
+    }
+    assert_eq!(guard.as_ref().unwrap().maximum_encoded_bytes(),32*4096+33);
+    assert!(budget.used()>1024*1024,"actual input/whole/method leases must remain charged");
+    assert!(!temp.0.exists(),"metadata batch cannot create chain storage");
+    drop(bytes);assert!(budget.used()>0);drop(guard);assert_eq!(budget.used(),0);
+    // Actual native HTTP prepare/queue/write owner uses this same current batch
+    // entry, expected private context and pool, without starting any service.
+    let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut client=std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let(stream,_)=listener.accept().unwrap();stream.set_nonblocking(true).unwrap();
+    let service=super::super::RpcService {
+        listen_address:listener.local_addr().unwrap(),limits:synergy_rpc::middleware::RpcLimits {
+            max_body_bytes:65536,max_concurrent_requests:8,request_timeout_ms:5000 },
+        runtime:provider.runtime.clone(),query_store:provider.clone(),
+        websocket_hub:Arc::new(super::super::WsServer::new(16,16,1024*1024).unwrap()),
+        admission:None,preparation:None,network_identity:None,websocket_connections:vec![],pending_http:vec![],
+        next_websocket_id:0,listener:None,reserved_listener:None,server:Some(native_server(&provider)),
+    };
+    let mut http=format!("POST /rpc HTTP/1.1\r\nContent-Length: {}\r\n\r\n",body.len()).into_bytes();
+    http.extend_from_slice(&body);
+    let mut pending=super::super::PendingHttp { stream,client_id:"public-synthetic-http-batch".into(),
+        deadline:Instant::now()+Duration::from_secs(5),bytes:http,response:None,response_capacity:None,
+        offset:0,upgrade:None,#[cfg(feature="qualification-timing")]diagnostic_request:None };
+    let prepared=service.prepare_http_response_with_budget(&mut pending,256*1024).unwrap().unwrap();
+    assert!(prepared.starts_with(b"HTTP/1.1 200"));assert!(pending.response_capacity.is_some());
+    assert!(budget.used()>0);pending.response=Some(prepared);
+    assert!(service.poll_http_connection(&mut pending,65536,256*1024).unwrap());
+    assert!(budget.used()>0,"actual final write retains guard until queue removal");
+    drop(pending);assert_eq!(budget.used(),0);
+    let mut delivered=Vec::new();std::io::Read::read_to_end(&mut client,&mut delivered).unwrap();
+    let split=delivered.windows(4).position(|b|b==b"\r\n\r\n").unwrap()+4;
+    let delivered:Value=serde_json::from_slice(&delivered[split..]).unwrap();
+    assert_eq!(delivered.as_array().unwrap().len(),32);
+    for(index,item)in delivered.as_array().unwrap().iter().enumerate(){assert_eq!(item["id"],calls[index]["id"]);}
+    drop(service);
+    assert_eq!(parent_budget.used(),parent_budget.limit());
+    drop(mandatory);assert_eq!(parent_budget.available(),capacity().protected_world_headroom_bytes);
+
+    let selected=provider.reserve_response_capacity_for("synergy_getBlockReceipts").unwrap().unwrap();
+    assert_eq!(selected.maximum_encoded_bytes(),capacity().maximum_response_bytes,
+        "source scratch floor must not silently lift the configured encoded limit");
+    drop(selected);assert_eq!(budget.used(),0);
+    let mut bad_profile=params(&genesis,json!({"block_commitment":commitment(&R1ProfileRef{name:"UNAPPROVED-BLOCK-PROFILE".into(),revision:1},&[0x5a;48])}));
+    bad_profile["request_id"]=json!("public-synthetic-bad-profile");
+    let mixed=serde_json::to_vec(&json!([calls[0],{"jsonrpc":"2.0","id":"bad-profile","method":"synergy_getBlockByHash","params":bad_profile}])).unwrap();
+    let rejected=native_server(&provider);
+    assert_eq!(rejected.handle_current_read_document_reserved("public-synthetic-profile-refusal",None,0,&mixed,
+        genesis.coordinate(),64*1024*1024).err().unwrap().code,-32602);
+    assert_eq!(rejected.metrics().unwrap().total_requests,0);
+    let mut forged=genesis.coordinate().clone();forged.network.nic[0]^=1;
+    let mut forged_request=calls[0].clone();forged_request["params"]["network"]=coordinate(&forged);
+    assert_eq!(rejected.handle_current_read_document_reserved("public-synthetic-context-refusal",None,0,
+        &serde_json::to_vec(&forged_request).unwrap(),&forged,64*1024*1024).err().unwrap().code,-32010);
+    assert_eq!(rejected.metrics().unwrap().total_requests,0);assert_eq!(budget.used(),0);
+    let too_large=native_server(&provider).handle_current_read_document_reserved("public-synthetic-refusal",None,0,&body,
+        genesis.coordinate(),1024);
+    assert!(too_large.is_err());assert_eq!(budget.used(),0);
+    assert!(!temp.0.exists());
+    let small_budget=WorldResourceBudget::new(4*1024*1024);
+    let constrained=Arc::new(CanonicalR1QueryStore::open(temp.0.clone(),genesis.clone(),runtime(u64::MAX-1),
+        small_budget.clone(),R1ReadCapacity{public_quota_bytes:2*1024*1024,protected_world_headroom_bytes:1024*1024,..capacity()}).unwrap());
+    let large_call=serde_json::to_vec(&json!({"jsonrpc":"2.0","id":"public-only","method":"synergy_getBlockReceipts",
+        "params":params(&genesis,json!({"height":"0"}))})).unwrap();
+    assert!(native_server(&constrained).handle_current_read_document_reserved("public-synthetic-refusal",None,0,
+        &large_call,genesis.coordinate(),64*1024*1024).is_err());
+    assert_eq!(constrained.world_budget.used(),0);
+    assert_eq!(small_budget.used(),2*1024*1024);drop(constrained);assert_eq!(small_budget.used(),0);
+    assert!(!temp.0.exists());
+    drop(rejected);drop(server);drop(provider);drop(budget);assert_eq!(parent_budget.used(),0);
 }

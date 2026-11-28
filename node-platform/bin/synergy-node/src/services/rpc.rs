@@ -1058,6 +1058,15 @@ impl RpcDispatcher for RuntimeDispatcher {
     fn reserve_response_capacity_for(&self,method:&str)->Result<Option<synergy_rpc::provider::RpcResponseCapacity>,RpcError>{
         self.query_store.reserve_response_capacity_for(method)
     }
+    fn reserve_current_read_input(&self,bytes:usize)->Result<synergy_rpc::provider::RpcResponseCapacity,RpcError>{
+        self.query_store.reserve_current_read_input(bytes)
+    }
+    fn preflight_current_read(&self,method:&str,params:&Value)->Result<(),RpcError>{
+        self.query_store.preflight_current_read(method,params)
+    }
+    fn reserve_current_read_aggregate(&self,bytes:usize)->Result<synergy_rpc::provider::RpcResponseCapacity,RpcError>{
+        self.query_store.reserve_current_read_aggregate(bytes)
+    }
     fn dispatch(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         if self.query_store.read_contract() == synergy_rpc::provider::ReadContract::NativeR1V1
             && synergy_rpc::r1_read::is_method(method)
@@ -1625,7 +1634,7 @@ impl RpcService {
                     pending.response = Some(http_response(413, b"request exceeds RPC bound"));
                     break;
                 }
-                if let Some(response) = self.prepare_http_response(pending)? {
+                if let Some(response) = self.prepare_http_response_with_budget(pending, response_budget)? {
                     pending.response = Some(response);
                     break;
                 }
@@ -1683,7 +1692,12 @@ impl RpcService {
         Ok(completed)
     }
 
+    #[cfg(test)]
     fn prepare_http_response(&self, pending: &mut PendingHttp) -> Result<Option<Vec<u8>>, String> {
+        self.prepare_http_response_with_budget(pending, MAX_AGGREGATE_HTTP_RESPONSE_BYTES)
+    }
+
+    fn prepare_http_response_with_budget(&self, pending: &mut PendingHttp, response_budget: usize) -> Result<Option<Vec<u8>>, String> {
         let Some(header_end) = pending
             .bytes
             .windows(4)
@@ -1751,16 +1765,33 @@ impl RpcService {
             .as_millis()
             .try_into()
             .map_err(|_| "RPC clock overflow")?;
-        let response = self
+        let server = self
             .server
             .as_ref()
-            .ok_or("RPC server stopped")?
-            .handle_bytes_reserved(
+            .ok_or("RPC server stopped")?;
+        let body = &pending.bytes[header_end + 4..];
+        let output = if self.query_store.read_contract() == synergy_rpc::provider::ReadContract::NativeR1V1
+            && body.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'[')
+        {
+            let expected = self.query_store.current_read_coordinate()
+                .ok_or("current RPC provider has no verified coordinate")?;
+            match server.handle_current_read_document_reserved(&pending.client_id,None,now_ms,body,expected,
+                response_budget.saturating_sub(1024).min(synergy_protocol_types::r1_rpc_response::MAX_TOTAL_BYTES)) {
+                Ok(output) => output,
+                // This is a whole-carrier refusal before any successful data is
+                // delivered. It never converts resource failure into invalidity
+                // of a ledger operation or returns a truncated JSON success.
+                Err(_) => return Ok(Some(http_response(503,b"Current read batch unavailable; retry with backoff"))),
+            }
+        } else {
+            server.handle_bytes_reserved(
                 &pending.client_id,
                 None,
                 now_ms,
-                &pending.bytes[header_end + 4..],
-            ).into_parts();
+                body,
+            )
+        };
+        let response = output.into_parts();
         #[cfg(feature = "qualification-timing")]
         if let Some(id) = pending.diagnostic_request {
             use super::qualification_timing::{self as timing, HttpStage, Phase};

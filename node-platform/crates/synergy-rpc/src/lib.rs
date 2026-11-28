@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod auth;
+pub mod current_batch;
 pub mod health;
 pub mod methods;
 pub mod middleware;
@@ -124,5 +125,16 @@ pub trait RpcDispatcher: Send + Sync {
     }
     fn reserve_response_capacity_for(&self, _method: &str) -> Result<Option<provider::RpcResponseCapacity>, RpcError> {
         self.reserve_response_capacity()
+    }
+    /// Native current-read owners supply the actual shared allocation pool.
+    /// Historical dispatchers cannot opt into current batching accidentally.
+    fn reserve_current_read_input(&self, _encoded_bytes: usize) -> Result<provider::RpcResponseCapacity, RpcError> {
+        Err(RpcError::unavailable("current read input capacity unavailable"))
+    }
+    fn preflight_current_read(&self, _method: &str, _params: &Value) -> Result<(), RpcError> {
+        Err(RpcError::unavailable("current read native preflight unavailable"))
+    }
+    fn reserve_current_read_aggregate(&self, _encoded_bytes: usize) -> Result<provider::RpcResponseCapacity, RpcError> {
+        Err(RpcError::unavailable("current read aggregate capacity unavailable"))
     }
 }

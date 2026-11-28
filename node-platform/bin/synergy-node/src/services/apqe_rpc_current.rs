@@ -42,19 +42,8 @@ pub(super) fn validate(bytes: &[u8], confirmed: &CurrentSessionContext) -> Resul
             commitment: confirmed.activated_profiles,
         },
     };
-    batch::validate_document_with(bytes, |raw, method| {
-        let request: synergy_rpc::RpcRequest =
-            serde_json::from_slice(raw).map_err(|_| "invalid current RPC read envelope")?;
-        if request.method != method {
-            return Err("current RPC envelope method mismatch".into());
-        }
-        request
-            .validate()
-            .map_err(|_| "invalid current RPC read envelope")?;
-        synergy_rpc::r1_read::preflight(method, request.params, &expected).map_err(|_| {
-            "current RPC read method, arguments or network context rejected".to_string()
-        })
-    })
+    synergy_rpc::current_batch::validate_document(bytes, &expected)
+        .map_err(|_| "current RPC read method, arguments or network context rejected".to_string())
 }
 
 #[cfg(test)]

@@ -76,10 +76,24 @@ pub trait CanonicalReadProvider: Send + Sync {
     fn reserve_response_capacity_for(&self, _method: &str) -> Result<Option<RpcResponseCapacity>, RpcError> {
         self.reserve_response_capacity()
     }
+    fn reserve_current_read_input(&self, _encoded_bytes: usize) -> Result<RpcResponseCapacity, RpcError> {
+        Err(RpcError::unavailable("current read input capacity unavailable"))
+    }
+    fn preflight_current_read(&self, _method: &str, _params: &Value) -> Result<(), RpcError> {
+        Err(RpcError::unavailable("current read native preflight unavailable"))
+    }
+    fn reserve_current_read_aggregate(&self, _encoded_bytes: usize) -> Result<RpcResponseCapacity, RpcError> {
+        Err(RpcError::unavailable("current read aggregate capacity unavailable"))
+    }
     /// Selects the read contract only. This is not an authentication token;
     /// production R1 owners require the private verified Genesis constructor.
     fn read_contract(&self) -> ReadContract {
         ReadContract::HistoricalV1
+    }
+    /// Public context data, not an authority constructor. Current native owners
+    /// expose the coordinate held by their private verified Genesis provider.
+    fn current_read_coordinate(&self) -> Option<&synergy_protocol_types::R1NetworkCoordinate> {
+        None
     }
 
     /// Full-width R1 requests never fall through to historical32 read methods.

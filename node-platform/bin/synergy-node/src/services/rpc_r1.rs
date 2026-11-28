@@ -60,6 +60,8 @@ pub(crate) struct R1ReadCapacity {
     pub request_timeout: Duration,
     pub maximum_hashes: u64,
     pub maximum_response_bytes: usize,
+    pub public_quota_bytes: usize,
+    pub protected_world_headroom_bytes: usize,
 }
 
 pub(crate) struct CanonicalR1QueryStore {
@@ -70,6 +72,16 @@ pub(crate) struct CanonicalR1QueryStore {
     capacity: R1ReadCapacity,
 }
 impl CanonicalR1QueryStore {
+    fn scoped_response_capacity(&self, ceiling: usize) -> Result<synergy_rpc::provider::RpcResponseCapacity, RpcError> {
+        // Preserve the native configured encoded limit. The source-derived
+        // projection ceiling pays for scratch even when a smaller local limit
+        // will ultimately refuse the complete result; never return a prefix.
+        let peak = ceiling.checked_mul(3).and_then(|n| n.checked_add(1024))
+            .ok_or_else(|| fault("response capacity overflow"))?;
+        let permit = self.world_budget.reserve(peak).map_err(fault)?;
+        synergy_rpc::provider::RpcResponseCapacity::new(
+            self.capacity.maximum_response_bytes.min(ceiling), Box::new(permit))
+    }
     fn response_capacity(
         &self,
         floor: usize,
@@ -101,6 +113,8 @@ impl CanonicalR1QueryStore {
         if capacity.request_timeout.is_zero()
             || capacity.maximum_hashes == 0
             || capacity.maximum_response_bytes < 256
+            || capacity.public_quota_bytes == 0
+            || capacity.protected_world_headroom_bytes == 0
             || capacity.maximum_response_bytes
                 > super::MAX_AGGREGATE_HTTP_RESPONSE_BYTES.saturating_sub(1024)
             || Instant::now()
@@ -112,6 +126,14 @@ impl CanonicalR1QueryStore {
         if runtime.read().map_err(fault)?.chain_id != genesis.coordinate().network.chain_id {
             return Err(fault("runtime chain mismatch"));
         }
+        // One explicit native public-service quota backed by the real process
+        // pool. All reads, store scratch and retained output leases share it;
+        // query bursts cannot consume the policy's protected remainder. This is
+        // the existing prepaid-child mechanism, never a new independent pool.
+        let world_budget = world_budget
+            .reserve_with_headroom(capacity.public_quota_bytes, capacity.protected_world_headroom_bytes)
+            .map_err(fault)?
+            .into_budget();
         // No store creation/recovery here. A node still acquiring its state can
         // report actual runtime readiness; state reads independently refuse a
         // missing store through the read-only constructor below.
@@ -203,16 +225,49 @@ impl CanonicalReadProvider for CanonicalR1QueryStore {
         &self,
         method: &str,
     ) -> Result<Option<synergy_rpc::provider::RpcResponseCapacity>, RpcError> {
-        // Complete receipt originals add up to1021*(4096+512) bytes before
-        // base64/JSON/HTTP buffers; retain the larger shared guard until write.
-        if method == "synergy_getBlockReceipts" {
-            self.response_capacity(16 * 1024 * 1024)
-        } else {
-            self.reserve_response_capacity()
+        match synergy_rpc::current_batch::response_ceiling(method) {
+            Some(ceiling) => self.scoped_response_capacity(ceiling).map(Some),
+            None => self.reserve_response_capacity(),
         }
+    }
+    fn reserve_current_read_input(&self, encoded_bytes: usize) -> Result<synergy_rpc::provider::RpcResponseCapacity, RpcError> {
+        if encoded_bytes > synergy_rpc::current_batch::MAX_DOCUMENT_BYTES {
+            return Err(fault("current read input exceeds profile"));
+        }
+        // Sparse BTree nodes, decoded strings/values, strict parsing and the
+        // temporary typed-validation clone are paid before JSON interpretation.
+        let peak = encoded_bytes.checked_mul(512).and_then(|n| n.checked_add(64 * 1024))
+            .ok_or_else(|| fault("current input capacity overflow"))?;
+        let permit = self.world_budget.reserve(peak).map_err(fault)?;
+        synergy_rpc::provider::RpcResponseCapacity::new(encoded_bytes.max(256), Box::new(permit))
+    }
+    fn preflight_current_read(&self, method: &str, params: &Value) -> Result<(), RpcError> {
+        let expected = self.genesis.coordinate();
+        r1_read::preflight(method, params.clone(), expected)?;
+        if matches!(method,"synergy_getBlock"|"synergy_getBlockByHash"|"synergy_getBlockByNumber"
+            |"synergy_getBlockReceipts"|"synergy_getBlockTransactionCount"|"synergy_getTransactionsInBlock") {
+            if let BlockRead::Commitment { profile, .. } = r1_read::decode::<BlockArgs>(params.clone(), expected)?.args {
+                if &profile != self.genesis.block_profile() {
+                    return Err(RpcError::invalid_params("block profile mismatch"));
+                }
+            }
+        }
+        Ok(())
+    }
+    fn reserve_current_read_aggregate(&self, encoded_bytes: usize) -> Result<synergy_rpc::provider::RpcResponseCapacity, RpcError> {
+        if !(512..=synergy_protocol_types::r1_rpc_response::MAX_TOTAL_BYTES).contains(&encoded_bytes) {
+            return Err(fault("current aggregate exceeds profile"));
+        }
+        let peak = encoded_bytes.checked_mul(2).and_then(|n| n.checked_add(64 * 1024))
+            .ok_or_else(|| fault("current aggregate capacity overflow"))?;
+        let permit = self.world_budget.reserve(peak).map_err(fault)?;
+        synergy_rpc::provider::RpcResponseCapacity::new(encoded_bytes, Box::new(permit))
     }
     fn read_contract(&self) -> ReadContract {
         ReadContract::NativeR1V1
+    }
+    fn current_read_coordinate(&self) -> Option<&synergy_protocol_types::R1NetworkCoordinate> {
+        Some(self.genesis.coordinate())
     }
     fn r1_read(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         let expected = self.genesis.coordinate();

@@ -1,38 +1,9 @@
 //! Bounded public batches use the existing authenticated single-call owner.
 use super::*;
-const MAX_RPC_BATCH: usize = 32;
-
-/// Public batching is a bounded sequence of the existing independently
-/// authenticated calls. It is never an atomic transaction or a replay loop.
-fn batch_items(bytes: &[u8]) -> Result<Vec<&RawValue>, String> {
-    struct Bounded;
-    impl<'de> serde::de::Visitor<'de> for Bounded {
-        type Value = Vec<&'de RawValue>;
-        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("a bounded JSON-RPC batch")
-        }
-        fn visit_seq<A: serde::de::SeqAccess<'de>>(
-            self,
-            mut seq: A,
-        ) -> Result<Self::Value, A::Error> {
-            let mut items = Vec::with_capacity(MAX_RPC_BATCH);
-            while let Some(item) = seq.next_element::<&'de RawValue>()? {
-                if items.len() == MAX_RPC_BATCH {
-                    return Err(serde::de::Error::custom("RPC batch count exceeds32"));
-                }
-                items.push(item);
-            }
-            if items.is_empty() {
-                return Err(serde::de::Error::custom("empty RPC batch"));
-            }
-            Ok(items)
-        }
-    }
-    let mut decoder = serde_json::Deserializer::from_slice(bytes);
-    let result = serde::Deserializer::deserialize_seq(&mut decoder, Bounded)
-        .map_err(|_| "invalid or oversized RPC batch")?;
-    decoder.end().map_err(|_| "trailing RPC batch input")?;
-    Ok(result)
+/// Historical and current carriers share the actual borrowed parser owner.
+pub(super) fn batch_items(bytes: &[u8]) -> Result<Vec<&RawValue>, String> {
+    synergy_rpc::current_batch::raw_batch_items(bytes)
+        .map_err(|_| "invalid or oversized RPC batch".into())
 }
 pub(super) fn validate_document(bytes: &[u8]) -> Result<(), String> {
     validate_document_with(bytes, |_, method| validate_public_method(method))
