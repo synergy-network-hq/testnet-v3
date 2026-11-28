@@ -18,6 +18,7 @@ mod network_transport;
 mod node_identity;
 mod prepare_authority;
 mod provider;
+mod r1_identity_custody;
 mod release;
 mod rotation;
 mod validator_custody;
@@ -42,6 +43,16 @@ fn run() -> Result<(), String> {
     let supplied = std::env::args().skip(1).collect::<Vec<_>>();
     let (arguments, engine) = selected_arguments(&supplied)?;
     match arguments {
+        [command,root,slot,request_sha256] if command=="inspect-managed-r1-key" => {
+            let result=r1_identity_custody::inspect(Path::new(root),slot,request_sha256)?;
+            println!("{}",serde_json::to_string(&result).map_err(|e|e.to_string())?);
+            return Ok(())
+        }
+        [command,root,receipt,request_sha256] if command=="create-managed-r1-key" => {
+            let result=r1_identity_custody::create(Path::new(root),Path::new(receipt),request_sha256)?;
+            println!("{}",serde_json::to_string(&result).map_err(|e|e.to_string())?);
+            return Ok(())
+        }
         [command,request,output] if command=="prepare-wallet-payer-registration" => {
             wallet_payer_registration::prepare(Path::new(request),Path::new(output),engine.ok_or("authenticated native APQE required")?)?;
         }
@@ -808,6 +819,8 @@ fn selected_arguments(
     if matches!(
         command,
         "gateway-admission-capability"
+            | "create-managed-r1-key"
+            | "inspect-managed-r1-key"
             | "inspect"
             | "prepare-fresh-authority"
             | "prepare-fresh-genesis"

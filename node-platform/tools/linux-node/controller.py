@@ -29,12 +29,15 @@ MAX_GENESIS_STAGE_REQUEST = 12*1024*1024
 GENESIS_FILES = {'genesis.json':4*1024*1024,'authority.json':1024*1024,'authority-root.pub':8192}
 ENGINE_MODULES = frozenset(('controller.py','synergy_linux.py','lifecycle.py','conformance.py',
                             'apqe_layout.py','vpn.py','canary_rpc_relay.py','root_guard.py','guest_lifecycle.py','vpn_authorization.py','treasury_send.py'))
+ENGINE_MODULES = ENGINE_MODULES | {'r1_identity.py'}
 READS = frozenset(('gateway_vpn_preflight','upgrade_native_preflight','gateway_install_preflight','gateway_install_status','gateway_target_preflight','gateway_target_status','gateway_target_export','gateway_target_configuration','gateway_target_reconcile','gateway_target_commission_preflight','gateway_admission_preflight','gateway_admission_status','gateway_admission_export','gateway_admission_reconcile','treasury_send_preflight','treasury_send_status','treasury_preflight','treasury_status','treasury_export','commissioning_observation','network_transport_status','network_transport_export','guest_resources','guest_preflight','guest_status','guest_boot_diagnostics','target','inventory','health','install_preflight','upgrade_preflight',
                   'recovery_preflight','uninstall_preflight','vpn_status','vpn_unused_preflight','vpn_stop_status','boot_policy_status','vpn_resume_status','vpn_diagnostics','diagnostics','identity_preflight','identity_status',
                   'formation_preflight','formation_status','formation_export','genesis_stage_preflight','genesis_binding_preflight','authorization_status','network_formation_status','network_formation_export'))
 MUTATIONS = frozenset(('gateway_install','gateway_target_generate','gateway_target_commission','gateway_admission_prepare','gateway_admission_sign','treasury_send_prepare','treasury_send_submit','treasury_prepare','network_transport_prepare','network_transport_sign','guest_create','guest_stop','guest_resume','guest_remove','install','commission','register','vpn_enroll','vpn_bind','vpn_retire','vpn_cancel_unused','vpn_stop','vpn_resume','boot_policy','start','stop','restart','upgrade','uninstall','identity_generate',
                        'formation_prepare','genesis_stage','genesis_bind','network_formation_prepare','network_formation_sign'))
 FORMATION_CONTEXT = 'tmp/formation-context.json'
+MUTATIONS = MUTATIONS | {'r1_identity_generate'}
+READS = READS | {'r1_identity_status'}
 FORMATION_CUSTODY = 'tmp/pre-genesis-validator'
 FORMATION_INTENT = 'tmp/formation-prepare-request.json'
 GENESIS_BIND_INTENT = 'tmp/genesis-bind-request.json'
@@ -152,6 +155,16 @@ def parse_request(raw):
     require(isinstance(operation,str) and operation in READS | MUTATIONS
             and isinstance(parameters,dict), 'Unsupported operation', 'invalid_request')
     require(operation=='genesis_stage' or operation in ('network_formation_prepare','network_transport_prepare','treasury_send_prepare','gateway_admission_prepare','gateway_admission_preflight','gateway_target_commission','gateway_target_commission_preflight') and len(raw)<=2*1024*1024 or len(raw)<=MAX_REQUEST,'Request exceeds operation limit','invalid_request')
+    if operation=='r1_identity_generate':
+        from r1_identity import validate
+        try: validate(parameters)
+        except (ValueError,KeyError,TypeError): raise Refused('invalid_request','Exact current R1 creation request required') from None
+        return value
+    if operation=='r1_identity_status':
+        from r1_identity import validate_status
+        try: validate_status(parameters)
+        except (ValueError,KeyError,TypeError): raise Refused('invalid_request','Exact original R1 request observation required') from None
+        return value
     if operation=='commissioning_observation' and parameters:
         require(set(parameters)=={'online_addresses'} and isinstance(parameters['online_addresses'],list)
                 and len(parameters['online_addresses'])<=5
@@ -1974,6 +1987,12 @@ class Controller:
         if op=='identity_preflight': return self.identity_preflight()[0]
         if op=='identity_status': return self.identity_status()
         if op=='identity_generate': return self.identity_generate(request)
+        if op=='r1_identity_generate':
+            from r1_identity import run
+            return run(self,request)
+        if op=='r1_identity_status':
+            from r1_identity import status
+            return status(self,request)
         if op.startswith('treasury_send_'):
             from treasury_send import run
             return run(self,request)
@@ -2096,6 +2115,9 @@ def control_inventory(root):
         for parent in path.parents:
             if parent==c.control:break
             directories.add(parent.relative_to(root).as_posix())
+    from r1_identity import controller_inventory as r1_controller_inventory
+    r1_files,r1_directories=r1_controller_inventory(c)
+    approved.update(r1_files);directories.update(r1_directories)
     actual={p.relative_to(root).as_posix() for p in c.control.rglob('*')}
     require(actual==(approved|directories)-{'tmp/controller'},'Unexpected controller member')
     return approved,directories
