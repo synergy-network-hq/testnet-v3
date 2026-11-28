@@ -14,6 +14,10 @@ mod state;
 mod transition;
 pub mod world_history;
 pub mod world_resources;
+pub mod r1;
+pub mod r1_smt;
+pub mod r1_finalized;
+pub mod r1_receipts;
 
 pub use account::AccountState;
 pub use finalized_receipts::{FinalizedPublicReceipt, FinalizedReceiptBatch, FinalizedReceiptEntry, FinalizedReceiptStatus};

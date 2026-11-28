@@ -1,0 +1,43 @@
+{
+  "scope": "PUBLIC_SYNTHETIC_FIXTURE_ONLY_NO_NETWORK_AUTHORITY",
+  "profile": "QACE-SMT384-R1/1",
+  "canonical_wrapper": 2,
+  "bit_order": "most-significant-bit first",
+  "cases": [
+    {
+      "entries": [],
+      "root_hex": "1427a5d3e2dbaf5b5a9882f5626de0439810ef14a3ecdd2f01aec62abcc1a445d8db74b5ae0818f95f67fa756bdde77d"
+    },
+    {
+      "entries": [
+        {
+          "public_raw_byte": 1,
+          "amount_nwei": "0"
+        }
+      ],
+      "root_hex": "b56fbd1beba8cb7ea0a730ed241b45660b3f280a03a3fe2f385df4747bbef3c16356c32168f07407918db5c23447b74f"
+    },
+    {
+      "entries": [
+        {
+          "public_raw_byte": 1,
+          "amount_nwei": "340282366920938463463374607431768211455"
+        }
+      ],
+      "root_hex": "1d514ac8a437e8d2ae9bb1eb48126aaaa456d9965b2d1cb39d69daedc81eaec14886e579af859dfcc4b1628d5ba5c0fe"
+    },
+    {
+      "entries": [
+        {
+          "public_raw_byte": 1,
+          "amount_nwei": "340282366920938463463374607431768211455"
+        },
+        {
+          "public_raw_byte": 2,
+          "amount_nwei": "0"
+        }
+      ],
+      "root_hex": "570c6c0d9c20387e67470e824193332f1ebe8cdd0f57b18f2c021bd1ce3f1bbd2265ea86fe5b363252a959bf27b93b5c"
+    }
+  ]
+}

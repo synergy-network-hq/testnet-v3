@@ -132,6 +132,78 @@ impl AtomicStoreReader<'_> {
 }
 
 impl AtomicStore {
+    /// Inspect an already initialized store without creating roots/lock files or
+    /// replaying WAL. A producer owns recovery; an RPC reader reports unavailable
+    /// while recovery is pending instead of mutating canonical state during a read.
+    pub fn inspect_existing_read_only<T>(
+        root: impl Into<PathBuf>,
+        max_record_bytes: usize,
+        inspect: impl FnOnce(&AtomicStoreReader<'_>) -> T,
+    ) -> Result<Option<T>, StorageError> {
+        if max_record_bytes == 0 {
+            return Err(StorageError::InvalidPath);
+        }
+        let root = root.into();
+        match fs::symlink_metadata(&root) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(io_error(e)),
+            Ok(m) if m.file_type().is_symlink() || !m.is_dir() => {
+                return Err(StorageError::InvalidPath)
+            }
+            Ok(_) => {}
+        }
+        // The current cross-process locking owner is Unix flock. Do not silently
+        // treat its historically unsupported platforms as consistent readers.
+        #[cfg(not(unix))]
+        {
+            let _ = inspect;
+            return Err(StorageError::Io(
+                "read-only store locking is not qualified on this platform".into(),
+            ));
+        }
+        #[cfg(unix)]
+        {
+            let lock_path = root.join(WRITER_LOCK);
+            let file = match OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+                .open(&lock_path)
+            {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(io_error(e)),
+                Ok(file) => file,
+            };
+            if !file.metadata().map_err(io_error)?.is_file() {
+                return Err(StorageError::InvalidPath);
+            }
+            let _lock = StoreLock::exclusive(file)?;
+            let transactions = root.join(TRANSACTION_DIRECTORY);
+            match fs::symlink_metadata(&transactions) {
+                Ok(m) if m.file_type().is_symlink() || !m.is_dir() => {
+                    return Err(StorageError::CorruptTransaction)
+                }
+                Ok(_) => {
+                    for (count, entry) in fs::read_dir(&transactions).map_err(io_error)?.enumerate() {
+                        let entry = entry.map_err(io_error)?;
+                        if count > 1024 || !entry.file_name().to_string_lossy().starts_with("._") {
+                            return Err(StorageError::CorruptTransaction);
+                        }
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(io_error(e)),
+            }
+            let store = Self {
+                root,
+                max_record_bytes,
+                maximum_manifest_bytes: max_record_bytes.saturating_mul(2),
+            };
+            Ok(Some(inspect(&AtomicStoreReader {
+                store: &store,
+                maximum_bytes: max_record_bytes,
+            })))
+        }
+    }
     pub fn new(root: impl Into<PathBuf>, max_record_bytes: usize) -> Result<Self, StorageError> {
         Self::new_with_manifest_limit(root, max_record_bytes, max_record_bytes.saturating_mul(2))
     }
@@ -1109,6 +1181,82 @@ mod tests {
         ))
     }
 
+    #[test]
+    fn existing_read_only_never_creates_or_recovers_a_store() {
+        let root = root("read-only");
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+        assert!(
+            AtomicStore::inspect_existing_read_only(&root, 1024, |_| panic!(
+                "missing root must not open"
+            ))
+            .unwrap()
+            .is_none()
+        );
+        assert!(!root.exists());
+        let store = AtomicStore::new(&root, 1024).unwrap();
+        store.write_atomic("record", b"original").unwrap();
+        let before = fs::metadata(root.join("record"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let bytes =
+            AtomicStore::inspect_existing_read_only(&root, 1024, |r| r.read_optional_bounded("record"))
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        assert_eq!(bytes, b"original");
+        assert_eq!(
+            fs::metadata(root.join("record"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            before
+        );
+        let pending = root.join(TRANSACTION_DIRECTORY).join("pending");
+        fs::create_dir_all(&pending).unwrap();
+        fs::write(pending.join("intent"), b"not replayed by reader").unwrap();
+        assert_eq!(
+            AtomicStore::inspect_existing_read_only(&root, 1024, |_| ()).unwrap_err(),
+            StorageError::CorruptTransaction
+        );
+        assert_eq!(
+            fs::read(pending.join("intent")).unwrap(),
+            b"not replayed by reader"
+        );
+        assert_eq!(fs::read(root.join("record")).unwrap(), b"original");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_read_only_rejects_symlink_root_and_lock() {
+        use std::os::unix::fs::symlink;
+        let root = root("read-only-symlink");
+        fs::create_dir_all(&root).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+        fs::create_dir(root.join("target")).unwrap();
+        symlink(root.join("target"), root.join("link")).unwrap();
+        assert_eq!(
+            AtomicStore::inspect_existing_read_only(root.join("link"), 1024, |_| ()).unwrap_err(),
+            StorageError::InvalidPath
+        );
+        fs::write(root.join("target/lock"), b"preserve").unwrap();
+        symlink(root.join("target/lock"), root.join(WRITER_LOCK)).unwrap();
+        assert!(AtomicStore::inspect_existing_read_only(&root, 1024, |_| ()).is_err());
+        assert_eq!(fs::read(root.join("target/lock")).unwrap(), b"preserve");
+    }
     #[test]
     fn fixed_manifest_limit_preserves_large_payloads_and_rejects_metadata_before_intent() {
         let root = root("fixed-manifest-limit");

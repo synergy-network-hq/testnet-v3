@@ -1,0 +1,24 @@
+{
+  "profile": [
+    "QACE-RECEIPT-R1",
+    1
+  ],
+  "cases": [
+    {
+      "count": 0,
+      "root_hex": "7071cd44d8d0e3ec8506b99f3475a1fd6da49d594ad9fc428667798bb09a8711a0f3f8b37961d0dbaab147ebe1c3a409"
+    },
+    {
+      "count": 1,
+      "root_hex": "8b9ec4476bdd758eee683ca4ebabb2ddce1ea5b80d2e0c630ec67e7363d7c83f78d2201fdf2ab06ad0367cefee6f1255"
+    },
+    {
+      "count": 3,
+      "root_hex": "773cb9dd324e834d77d29e04aac82246aaa3c7bf82a955d7ffc1c36346ee7cb6bcfd3505e28c8598642fc9337bc582ab"
+    },
+    {
+      "count": 9,
+      "root_hex": "722882313fb327b6cadbed2fd5955c8753fba023f105563dbd0b5f3a2bb0ef8e85bfdb6a5ad5bf0c461bb5422cd8a1b2"
+    }
+  ]
+}
