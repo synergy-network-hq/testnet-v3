@@ -73,6 +73,28 @@ pub struct R1BlockRead {
     pub receipt_profile: R1ProfileRef,
 }
 
+/// Public original state evidence; membership alone conveys no execution or
+/// finality authority. All three leaves share the same immutable anchor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct R1AccountProofRead {
+    pub anchor: R1FinalizedAnchor,
+    pub identity: String,
+    pub leaves: Vec<R1StateLeafProof>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct R1StateLeafProof {
+    pub key: R1StateKey,
+    pub value: Option<R1StateValue>,
+    pub proof: crate::r1_smt::R1PointProof,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct R1BlockReceiptsRead {
+    pub block: R1BlockRead,
+    /// Complete original ordered canonical cores. Recompute the selected
+    /// receipt commitment; no missing fields are inferred from projections.
+    pub canonical_receipt_cores: Vec<Vec<u8>>,
+}
+
 // This strict local storage codec is not a consensus codec or an RPC envelope.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -215,6 +237,8 @@ struct Snapshot {
     proof: Vec<u8>,
     state: Vec<(R1StateKey, R1StateValue)>,
     transactions: Vec<Transaction>,
+    #[serde(default)]
+    canonical_receipt_cores: Option<Vec<Vec<u8>>>,
 }
 impl Snapshot {
     fn validate(
@@ -257,6 +281,35 @@ impl Snapshot {
             t.validate()?;
             if !ids.insert(&t.id) {
                 return Err(R1StateError::Duplicate);
+            }
+        }
+        if let Some(encoded) = &self.canonical_receipt_cores {
+            if encoded.len() != self.transactions.len() {
+                return Err(R1StateError::Corrupt);
+            }
+            let mut cores = Vec::new();
+            for (i, (bytes, t)) in encoded.iter().zip(&self.transactions).enumerate() {
+                check()?;
+                let c = crate::r1_receipts::R1ReceiptCore::decode_canonical(bytes)?;
+                if c.sequence_index as usize != i
+                    || c.transaction.to_text() != t.id
+                    || c.result != t.status
+                    || c.gas_used != t.gas_used
+                    || c.paid_nwei != t.fee_paid_nwei
+                    || c.events_commitment.as_slice() != t.events_commitment
+                    || c.error_code != t.error_code
+                {
+                    return Err(R1StateError::Corrupt);
+                }
+                cores.push(c);
+            }
+            // Conservative tree work reservation (includes leaf/padding, nodes,
+            // root and empty case). These checks share actual request limits.
+            for _ in 0..(2 * cores.len().max(1).next_power_of_two() + 1) {
+                check()?;
+            }
+            if crate::r1_receipts::receipts_root(&cores)?.as_slice() != self.receipts_root {
+                return Err(R1StateError::Corrupt);
             }
         }
         Ok((anchor, state))
@@ -466,7 +519,16 @@ impl R1FinalizedStore {
                 self.remaining_hashes.set(remaining);
                 result
             },
-            || self.check_deadline(),
+            || {
+                self.check_deadline()?;
+                self.remaining_hashes.set(
+                    self.remaining_hashes
+                        .get()
+                        .checked_sub(1)
+                        .ok_or(R1StateError::ResourceLimit)?,
+                );
+                Ok(())
+            },
         )?;
         if a.height != height {
             return Err(R1StateError::Corrupt);
@@ -534,6 +596,68 @@ impl R1FinalizedStore {
                 .transpose()
         })
     }
+    pub fn account_with_proof(
+        &self,
+        id: &NativeIdentityPresentation,
+        height: Option<u64>,
+    ) -> Result<Option<R1AccountProofRead>, R1StateError> {
+        let Some(h) = height.or_else(|| self.anchor.as_ref().map(|a| a.height)) else {
+            return Ok(None);
+        };
+        let identity = id.to_text();
+        let domains = [
+            R1StateDomain::NativeBalance,
+            R1StateDomain::ReplayCoordinate,
+            R1StateDomain::AccountAuthorization,
+        ];
+        self.inspect(|r| {
+            let Some(s) = self.snapshot(r, h)? else {
+                return Ok(None);
+            };
+            let mut leaves = Vec::new();
+            for domain in domains {
+                let key = R1StateKey::native(domain, &identity);
+                // Contracts have no account policy. Prove only the exact
+                // financial domains valid for this owner; never fabricate one.
+                if id.namespace() == "synq" && domain == R1StateDomain::AccountAuthorization {
+                    continue;
+                }
+                let key = key?;
+                let mut remaining = self.remaining_hashes.get();
+                let proof = crate::r1_smt::prove_with_limits(
+                    &s.state_map,
+                    &key,
+                    self.deadline,
+                    &mut remaining,
+                );
+                self.remaining_hashes.set(remaining);
+                leaves.push(R1StateLeafProof {
+                    value: s.state_map.get(&key).cloned(),
+                    key,
+                    proof: proof?,
+                });
+            }
+            Ok(Some(R1AccountProofRead {
+                anchor: s.anchor.clone(),
+                identity,
+                leaves,
+            }))
+        })
+    }
+    pub fn block_receipts(&self, height: u64) -> Result<Option<R1BlockReceiptsRead>, R1StateError> {
+        self.inspect(|r| {
+            let Some(s) = self.snapshot(r, height)? else {
+                return Ok(None);
+            };
+            let Some(cores) = &s.canonical_receipt_cores else {
+                return Err(R1StateError::Unavailable);
+            };
+            Ok(Some(R1BlockReceiptsRead {
+                block: s.block(s.anchor.clone())?,
+                canonical_receipt_cores: cores.clone(),
+            }))
+        })
+    }
     pub fn block_by_digest(&self, digest: [u8; 48]) -> Result<Option<R1BlockRead>, R1StateError> {
         self.inspect(|r| {
             let Some(i): Option<Index> = read(r, &digest_path(&digest))? else {
@@ -585,6 +709,37 @@ pub fn publish_nonproduction_projection(
     state: &R1StateMap,
     transactions: &[R1TransactionRead],
 ) -> Result<bool, R1StateError> {
+    publish_nonproduction_inner(root.as_ref(), block, state, transactions, None)
+}
+/// Complete fixture publication exercises original receipt preservation and
+/// commitment validation. It remains closed for actual production coordinates.
+pub fn publish_nonproduction_projection_with_receipts(
+    root: impl AsRef<Path>,
+    block: &R1BlockRead,
+    state: &R1StateMap,
+    transactions: &[R1TransactionRead],
+    receipts: &[crate::r1_receipts::R1ReceiptCore],
+) -> Result<bool, R1StateError> {
+    synergy_address::r1_public::require_nonproduction_fixture(
+        block.anchor.coordinate.network.chain_id,
+    )
+    .map_err(|_| R1StateError::CeremonyRequired)?;
+    if receipts.len() > MAX_TRANSACTIONS {
+        return Err(R1StateError::ResourceLimit);
+    }
+    let cores = receipts
+        .iter()
+        .map(|r| r.canonical_bytes())
+        .collect::<Result<Vec<_>, _>>()?;
+    publish_nonproduction_inner(root.as_ref(), block, state, transactions, Some(cores))
+}
+fn publish_nonproduction_inner(
+    root: &Path,
+    block: &R1BlockRead,
+    state: &R1StateMap,
+    transactions: &[R1TransactionRead],
+    canonical_receipt_cores: Option<Vec<Vec<u8>>>,
+) -> Result<bool, R1StateError> {
     synergy_address::r1_public::require_nonproduction_fixture(
         block.anchor.coordinate.network.chain_id,
     )
@@ -622,6 +777,7 @@ pub fn publish_nonproduction_projection(
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect(),
         transactions: txs,
+        canonical_receipt_cores,
     };
     s.validate(&block.anchor.coordinate)?;
     let payload = encode(&s)?;
@@ -629,7 +785,7 @@ pub fn publish_nonproduction_projection(
     // Read old generation and verify monotonic parent continuity before constructing
     // any writer. CAS below checks the identical bytes under its commit lock.
     let old = AtomicStore::inspect_existing_read_only(
-        root.as_ref(),
+        root,
         MAX_RECORD,
         |r| -> Result<_, R1StateError> {
             let old = r.read_optional_bounded(HEAD).map_err(storage)?;
@@ -700,7 +856,7 @@ pub fn publish_nonproduction_projection(
         });
         transaction.put(path, bytes).map_err(storage)?
     }
-    let mut store = AtomicStore::new(root.as_ref(), MAX_RECORD).map_err(storage)?;
+    let mut store = AtomicStore::new(root, MAX_RECORD).map_err(storage)?;
     transaction
         .commit_guarded(&mut store, &guards)
         .map_err(storage)?;
@@ -874,6 +1030,75 @@ mod tests {
             receipt_profile: profile("SYNTHETIC-RECEIPT"),
         };
         (block, state, vec![tx])
+    }
+    #[test]
+    fn original_receipts_and_all_account_leaves_are_independently_verifiable() {
+        let temp = Temp::new();
+        let (mut block, state, tx) = fixture(0, [0; 48]);
+        let c = crate::r1_receipts::R1ReceiptCore {
+            transaction: TransactionIdentifierPresentation::parse(&tx[0].transaction_id).unwrap(),
+            sequence_index: 0,
+            result: tx[0].status,
+            gas_used: tx[0].gas_used,
+            paid_nwei: tx[0].fee_paid_nwei,
+            refunded_nwei: 123,
+            events_commitment: tx[0].events_commitment,
+            permitted_return_commitment: [77; 48],
+            error_code: None,
+            operation_outcome: vec![9, 8, 7],
+        };
+        block.receipts_root = crate::r1_receipts::receipts_root(&[c.clone()]).unwrap();
+        let mut corrupt = c.clone();
+        corrupt.refunded_nwei += 1;
+        assert!(publish_nonproduction_projection_with_receipts(
+            &temp.0,
+            &block,
+            &state,
+            &tx,
+            &[corrupt]
+        )
+        .is_err());
+        assert!(!temp.0.exists());
+        publish_nonproduction_projection_with_receipts(&temp.0, &block, &state, &tx, &[c.clone()])
+            .unwrap();
+        let store = R1FinalizedStore::open(&temp.0, &coordinate()).unwrap();
+        let result = store.block_receipts(0).unwrap().unwrap();
+        assert_eq!(
+            result.canonical_receipt_cores,
+            vec![c.canonical_bytes().unwrap()]
+        );
+        let decoded = result
+            .canonical_receipt_cores
+            .iter()
+            .map(|b| crate::r1_receipts::R1ReceiptCore::decode_canonical(b).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            crate::r1_receipts::receipts_root(&decoded).unwrap(),
+            result.block.receipts_root
+        );
+        assert_eq!(decoded[0].refunded_nwei, 123);
+        for ns in ["synq", "syns"] {
+            let id = NativeIdentityPresentation::from_raw(ns, [42; 48]).unwrap();
+            let p = store.account_with_proof(&id, None).unwrap().unwrap();
+            assert_eq!(p.leaves.len(), if ns == "synq" { 2 } else { 3 });
+            for leaf in p.leaves {
+                crate::r1_smt::verify(
+                    &p.anchor.state_root,
+                    &leaf.key,
+                    leaf.value.as_ref(),
+                    &leaf.proof,
+                )
+                .unwrap();
+            }
+        }
+        let old = Temp::new();
+        publish_nonproduction_projection(&old.0, &block, &state, &tx).unwrap();
+        assert_eq!(
+            R1FinalizedStore::open(&old.0, &coordinate())
+                .unwrap()
+                .block_receipts(0),
+            Err(R1StateError::Unavailable)
+        );
     }
     #[test]
     fn atomic_projection_reads_historical_state_and_exact_indexes() {

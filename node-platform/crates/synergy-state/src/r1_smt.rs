@@ -115,9 +115,34 @@ pub fn root_with_limits(
     subtree_checked(&rows, 0, &empty, &mut check)
 }
 pub fn prove(map: &R1StateMap, key: &crate::r1::R1StateKey) -> Result<R1PointProof, R1StateError> {
+    prove_checked(map, key, &mut |_| Ok(()))
+}
+/// Proof generation shares the caller's actual request work/deadline budget.
+pub fn prove_with_limits(
+    map: &R1StateMap,
+    key: &crate::r1::R1StateKey,
+    deadline: std::time::Instant,
+    remaining_hashes: &mut u64,
+) -> Result<R1PointProof, R1StateError> {
+    prove_checked(map, key, &mut |n| {
+        if std::time::Instant::now() >= deadline {
+            return Err(R1StateError::ResourceLimit);
+        }
+        *remaining_hashes = remaining_hashes
+            .checked_sub(n)
+            .ok_or(R1StateError::ResourceLimit)?;
+        Ok(())
+    })
+}
+fn prove_checked(
+    map: &R1StateMap,
+    key: &crate::r1::R1StateKey,
+    check: &mut impl FnMut(u64) -> Result<(), R1StateError>,
+) -> Result<R1PointProof, R1StateError> {
+    check(386)?;
     let encoded_key = key.canonical_bytes()?;
     let path = hash_encoded("QACE/STATE/PATH/02", &[&encoded_key])?;
-    let all = leaves(map)?;
+    let all = leaves_checked(map, |k| hash_encoded("QACE/STATE/PATH/02", &[k]), check)?;
     let empty = empties()?;
     let mut rows = all.as_slice();
     let mut proof = R1PointProof {
@@ -125,13 +150,14 @@ pub fn prove(map: &R1StateMap, key: &crate::r1::R1StateKey) -> Result<R1PointPro
         siblings: Vec::new(),
     };
     for d in 0..384 {
+        check(0)?;
         let split = rows.partition_point(|x| !bit(&x.path, d));
         let (own, other) = if bit(&path, d) {
             (&rows[split..], &rows[..split])
         } else {
             (&rows[..split], &rows[split..])
         };
-        let sibling = subtree(other, d + 1, &empty)?;
+        let sibling = subtree_checked(other, d + 1, &empty, check)?;
         if sibling != empty[d + 1] {
             proof.bitmap[d / 8] |= 0x80 >> (d % 8);
             proof.siblings.push(sibling);
@@ -209,6 +235,27 @@ mod tests {
                 .to_text(),
         )
         .unwrap()
+    }
+    #[test]
+    fn proof_work_limits_match_reference_and_exhaust_without_bypass() {
+        let mut map = R1StateMap::new();
+        map.insert(key(1), R1StateValue::NativeBalance { amount_nwei: 7 })
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut hashes = 10000;
+        assert_eq!(
+            prove_with_limits(&map, &key(1), deadline, &mut hashes).unwrap(),
+            prove(&map, &key(1)).unwrap()
+        );
+        assert!(hashes < 10000);
+        assert_eq!(
+            prove_with_limits(&map, &key(1), deadline, &mut 1),
+            Err(R1StateError::ResourceLimit)
+        );
+        assert_eq!(
+            prove_with_limits(&map, &key(1), std::time::Instant::now(), &mut 10000),
+            Err(R1StateError::ResourceLimit)
+        );
     }
     #[test]
     fn membership_absence_update_delete_and_order_are_exact() {

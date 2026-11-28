@@ -4,7 +4,7 @@ use crate::r1::{hash_encoded, R1StateError};
 use crate::r1_finalized::R1TransactionStatus;
 use std::collections::BTreeSet;
 use synergy_address::r1_public::TransactionIdentifierPresentation;
-use synergy_protocol_types::c14n02::Encoder;
+use synergy_protocol_types::c14n02::{Decoder, Encoder};
 pub const MAX_RECEIPTS: usize = 4096;
 pub const MAX_OUTCOME_BYTES: usize = 4096;
 pub const RECEIPT_PROFILE_SCHEMA:&str=concat!(
@@ -35,6 +35,44 @@ pub struct R1ReceiptCore {
     pub operation_outcome: Vec<u8>,
 }
 impl R1ReceiptCore {
+    /// Original canonical core, never reconstructed from a compact RPC result.
+    pub fn decode_canonical(encoded: &[u8]) -> Result<Self, R1StateError> {
+        let mut d = Decoder::new(encoded, MAX_OUTCOME_BYTES + 512)?;
+        if d.u16()? != 1 {
+            return Err(R1StateError::InvalidValue);
+        }
+        let namespace = match d.u8()? {
+            0 => "syntxn",
+            1 => "synxxn",
+            _ => return Err(R1StateError::InvalidValue),
+        };
+        let transaction = TransactionIdentifierPresentation::from_digest(namespace, d.fixed()?)
+            .map_err(|_| R1StateError::InvalidValue)?;
+        let sequence_index = d.u32()?;
+        let result = match d.u8()? {
+            0 => R1TransactionStatus::Applied,
+            1 => R1TransactionStatus::Reverted,
+            2 => R1TransactionStatus::ResourceExhausted,
+            _ => return Err(R1StateError::InvalidValue),
+        };
+        let core = Self {
+            transaction,
+            sequence_index,
+            result,
+            gas_used: d.u64()?,
+            paid_nwei: d.u128()?,
+            refunded_nwei: d.u128()?,
+            events_commitment: d.fixed()?,
+            permitted_return_commitment: d.fixed()?,
+            error_code: d.option(|d| Ok(d.ascii(128)?.to_owned()))?,
+            operation_outcome: d.bytes(MAX_OUTCOME_BYTES)?.to_vec(),
+        };
+        d.finish()?;
+        if core.canonical_bytes()? != encoded {
+            return Err(R1StateError::InvalidValue);
+        }
+        Ok(core)
+    }
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, R1StateError> {
         if self.operation_outcome.len() > MAX_OUTCOME_BYTES
             || self.error_code.as_ref().is_some_and(|s| {
@@ -203,6 +241,26 @@ pub fn verify_receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn received_cores_preserve_every_original_field_and_reject_noncanonical_data() {
+        let mut c = core(0);
+        c.transaction = TransactionIdentifierPresentation::from_digest("synxxn", [7; 48]).unwrap();
+        c.result = R1TransactionStatus::Reverted;
+        c.error_code = Some("REVERT".into());
+        c.refunded_nwei = 123;
+        c.operation_outcome = vec![5, 6, 7];
+        let bytes = c.canonical_bytes().unwrap();
+        assert_eq!(R1ReceiptCore::decode_canonical(&bytes).unwrap(), c);
+        for end in [0, 1, 2, 3, bytes.len() - 1] {
+            assert!(R1ReceiptCore::decode_canonical(&bytes[..end]).is_err());
+        }
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(R1ReceiptCore::decode_canonical(&trailing).is_err());
+        let mut bad = bytes;
+        bad[2] = 2;
+        assert!(R1ReceiptCore::decode_canonical(&bad).is_err());
+    }
     #[test]
     fn independent_python_vectors_bind_empty_single_and_padded_trees() {
         let vectors: serde_json::Value =
