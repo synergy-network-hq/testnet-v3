@@ -14,6 +14,43 @@ use synergy_protocol_types::{
 
 use crate::RpcError;
 
+/// Candidate native read adapters. Public transport exposure is separately
+/// gated and never implied by inclusion here or by a provider profile label.
+pub const METHODS: &[&str] = &[
+    "synergy_getAccount",
+    "synergy_getBlock",
+    "synergy_getTransaction",
+    "synergy_getBalance",
+    "synergy_getAccountNonce",
+    "synergy_getBlockNumber",
+    "synergy_getFinalizedHead",
+    "synergy_getTransactionReceipt",
+    "synergy_getTransactionStatus",
+    "synergy_getChainId",
+    "synergy_genesisHash",
+    "synergy_getNonce",
+    "synergy_getTransactionByHash",
+    "synergy_getReceipt",
+    "synergy_getTransactionFees",
+    "synergy_getBlockByHash",
+    "synergy_getBlockByNumber",
+    "synergy_getBlockTransactionCount",
+    "synergy_getTransactionsInBlock",
+    "synergy_getLatestBlock",
+    "synergy_blockNumber",
+    "synergy_chainId",
+    "synergy_networkId",
+    "synergy_getHealth",
+    "synergy_getHealthCheck",
+    "synergy_getReadiness",
+    "synergy_getNodeStatus",
+    "synergy_nodeInfo",
+    "synergy_ping",
+];
+pub fn is_method(method: &str) -> bool {
+    METHODS.contains(&method)
+}
+
 fn invalid() -> RpcError {
     RpcError::invalid_params("invalid R1 read request")
 }
@@ -160,6 +197,31 @@ pub fn decode<A: ReadArguments>(
     params: Value,
     expected: &R1NetworkCoordinate,
 ) -> Result<MatchedReadRequest<A::Parsed>, RpcError> {
+    // Serde structs can also deserialize positional arrays. This selected wire
+    // contract permits only named JSON objects, including every nested tag.
+    for pointer in [
+        "",
+        "/network",
+        "/network/network_incarnation_commitment",
+        "/network/genesis_commitment",
+        "/network/genesis_commitment/profile",
+        "/network/activated_profiles",
+        "/network/activated_profiles/profile",
+        "/network/identity_profile",
+        "/args",
+    ] {
+        if !params.pointer(pointer).is_some_and(Value::is_object) {
+            return Err(invalid());
+        }
+    }
+    if let Some(commitment) = params
+        .pointer("/args/block_commitment")
+        .filter(|v| !v.is_null())
+    {
+        if !commitment.is_object() || !commitment.get("profile").is_some_and(Value::is_object) {
+            return Err(invalid());
+        }
+    }
     let envelope: Envelope<A> = serde_json::from_value(params).map_err(|_| invalid())?;
     if envelope.api_version != 1
         || envelope.caller_scope != "public_read"
@@ -181,6 +243,16 @@ pub fn decode<A: ReadArguments>(
         coordinate,
         args,
     })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmptyArgs {}
+impl ReadArguments for EmptyArgs {
+    type Parsed = ();
+    fn parse(self) -> Result<(), RpcError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize)]

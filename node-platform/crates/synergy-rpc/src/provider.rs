@@ -68,6 +68,21 @@ pub struct FinalizedBlockCommitment {
 /// boundaries before returning data. Missing records are represented by
 /// `None`; corrupt or unverifiable records fail closed.
 pub trait CanonicalReadProvider: Send + Sync {
+    /// Optional shared-process response reservation. Socket owners retain it
+    /// through serialization and the final write, not only through store lookup.
+    fn reserve_response_capacity(&self) -> Result<Option<RpcResponseCapacity>, RpcError> {
+        Ok(None)
+    }
+    /// Selects the read contract only. This is not an authentication token;
+    /// production R1 owners require the private verified Genesis constructor.
+    fn read_contract(&self) -> ReadContract {
+        ReadContract::HistoricalV1
+    }
+
+    /// Full-width R1 requests never fall through to historical32 read methods.
+    fn r1_read(&self, _method: &str, _params: Value) -> Result<Value, RpcError> {
+        Err(RpcError::unavailable("authenticated R1 read provider unavailable"))
+    }
     /// Ethereum views must be served from the same authenticated finalized
     /// native World. The default grants no compatibility capability.
     fn ethereum_query(&self, _method: &str, _params: &Value) -> Result<Value, RpcError> {
@@ -132,4 +147,25 @@ pub trait CanonicalReadProvider: Send + Sync {
     ) -> Result<Option<FinalizedTransactionView>, RpcError>;
 
     fn account(&self, query: &AccountQuery) -> Result<Option<FinalizedAccountView>, RpcError>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadContract {
+    HistoricalV1,
+    NativeR1V1,
+}
+
+/// An owning allocation guard, not an authentication or activation token.
+pub struct RpcResponseCapacity {
+    maximum_encoded_bytes: usize,
+    _guard: Box<dyn Send>,
+}
+impl RpcResponseCapacity {
+    pub fn new(maximum_encoded_bytes: usize, guard: Box<dyn Send>) -> Result<Self, RpcError> {
+        if maximum_encoded_bytes < 256 {
+            return Err(RpcError::unavailable("invalid response capacity"));
+        }
+        Ok(Self { maximum_encoded_bytes, _guard: guard })
+    }
+    pub fn maximum_encoded_bytes(&self) -> usize { self.maximum_encoded_bytes }
 }

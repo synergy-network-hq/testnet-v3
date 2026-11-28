@@ -631,6 +631,10 @@ mod tests {
 
 /// Shared APQE public candidate types; no new derivation or runtime authority.
 pub mod r1_public {
+    pub use synergy_address_engine::apqe::policy_transition_r1::{
+        verify_received_ordinary_authorization, IndexedOrdinaryProof,
+        VerifiedOrdinaryAuthorization, ORDINARY_TRANSACTION_CONTEXT,
+    };
     pub use synergy_address_engine::apqe::native_identity_derivation_r1::validate_received_policy_frame;
     pub use synergy_address_engine::apqe::native_identity_derivation_r1::validate_account_birth_from_policy_frame;
     pub use synergy_address_engine::apqe::{HashAlgorithm, Primitives};

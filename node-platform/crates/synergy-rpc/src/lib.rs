@@ -119,4 +119,7 @@ impl RpcResponse {
 
 pub trait RpcDispatcher: Send + Sync {
     fn dispatch(&self, method: &str, params: Value) -> Result<Value, RpcError>;
+    fn reserve_response_capacity(&self) -> Result<Option<provider::RpcResponseCapacity>, RpcError> {
+        Ok(None)
+    }
 }

@@ -203,3 +203,53 @@ fn context_is_checked_before_argument_interpretation_and_never_uses_wildcards() 
         -32010
     );
 }
+
+#[test]
+fn positional_arrays_cannot_bypass_the_named_object_wire_contract() {
+    for (pointer, array) in [
+        ("/args", json!(["1", null])),
+        ("/network/identity_profile", json!(["APQE-NATIVE-ID", 1])),
+        (
+            "/network/genesis_commitment/profile",
+            json!(["SYNERGY-GENESIS-R1", 1]),
+        ),
+        (
+            "/network/network_incarnation_commitment",
+            json!(["SHA3-512", "lowercase-hex", "11".repeat(64)]),
+        ),
+    ] {
+        let mut req = request(json!({"height":"1"}));
+        *req.pointer_mut(pointer).unwrap() = array;
+        assert_eq!(
+            r1_read::decode::<BlockArgs>(req, &expected())
+                .unwrap_err()
+                .code,
+            -32602
+        );
+    }
+    assert!(r1_read::decode::<r1_read::EmptyArgs>(request(json!({})), &expected()).is_ok());
+    assert!(
+        r1_read::decode::<r1_read::EmptyArgs>(request(json!({"unknown":1})), &expected()).is_err()
+    );
+}
+
+#[test]
+fn consumer_schema_method_bindings_equal_the_exact_native_read_adapter_set() {
+    let schema: Value =
+        serde_json::from_str(include_str!("../schemas/native_read_r1.schema.json")).unwrap();
+    let bindings = schema["x-method-contracts"].as_object().unwrap();
+    assert_eq!(bindings.len(), r1_read::METHODS.len());
+    for method in r1_read::METHODS {
+        assert!(bindings.contains_key(*method));
+        assert!(r1_read::is_method(method));
+    }
+    for private in [
+        "synergy_signTransaction",
+        "synergy_createWalletFromKeypair",
+        "synergy_getAccountAuthNonce",
+        "synergy_rotateKeys",
+    ] {
+        assert!(!r1_read::is_method(private));
+        assert!(!bindings.contains_key(private));
+    }
+}

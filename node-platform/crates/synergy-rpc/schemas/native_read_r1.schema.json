@@ -1,0 +1,581 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:synergy:rpc:native-read-r1:candidate:1",
+  "title": "Selected R1 native read parameters; unactivated engineering candidate",
+  "definitions": {
+    "Uint64Decimal": {
+      "type": "string",
+      "pattern": "^(?:0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]{1}|1844674407370955161[0-4]|18446744073709551615)$(?![\\s\\S])",
+      "maxLength": 20,
+      "x-maximum-integer": "18446744073709551615"
+    },
+    "NetworkCoordinate": {
+      "type": "object",
+      "properties": {
+        "chain_id": {
+          "type": "string",
+          "pattern": "^(?:0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]{1}|1844674407370955161[0-4]|18446744073709551615)$(?![\\s\\S])",
+          "maxLength": 20,
+          "x-maximum-integer": "18446744073709551615",
+          "allOf": [
+            {
+              "not": {
+                "const": "0"
+              }
+            }
+          ]
+        },
+        "network_incarnation_commitment": {
+          "type": "object",
+          "properties": {
+            "algorithm": {
+              "const": "SHA3-512"
+            },
+            "encoding": {
+              "const": "lowercase-hex"
+            },
+            "value": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{128}$(?![\\s\\S])"
+            }
+          },
+          "required": [
+            "algorithm",
+            "encoding",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        "genesis_commitment": {
+          "type": "object",
+          "properties": {
+            "profile": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "const": "SYNERGY-GENESIS-R1"
+                },
+                "revision": {
+                  "const": 1
+                }
+              },
+              "required": [
+                "name",
+                "revision"
+              ],
+              "additionalProperties": false
+            },
+            "algorithm": {
+              "const": "SHA3-384"
+            },
+            "encoding": {
+              "const": "lowercase-hex"
+            },
+            "value": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{96}$(?![\\s\\S])"
+            }
+          },
+          "required": [
+            "profile",
+            "algorithm",
+            "encoding",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        "activated_profiles": {
+          "type": "object",
+          "properties": {
+            "profile": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[\\x21-\\x7e]+$(?![\\s\\S])"
+                },
+                "revision": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4294967295
+                }
+              },
+              "required": [
+                "name",
+                "revision"
+              ],
+              "additionalProperties": false
+            },
+            "algorithm": {
+              "const": "SHA3-512"
+            },
+            "encoding": {
+              "const": "lowercase-hex"
+            },
+            "value": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{128}$(?![\\s\\S])"
+            }
+          },
+          "required": [
+            "profile",
+            "algorithm",
+            "encoding",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        "identity_profile": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "const": "APQE-NATIVE-ID"
+            },
+            "revision": {
+              "const": 1
+            }
+          },
+          "required": [
+            "name",
+            "revision"
+          ],
+          "additionalProperties": false
+        },
+        "presentation_version": {
+          "const": 2
+        }
+      },
+      "required": [
+        "chain_id",
+        "network_incarnation_commitment",
+        "genesis_commitment",
+        "activated_profiles",
+        "identity_profile",
+        "presentation_version"
+      ],
+      "additionalProperties": false
+    },
+    "AccountRequest": {
+      "type": "object",
+      "properties": {
+        "api_version": {
+          "const": 1
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[\\x21-\\x7e]+$(?![\\s\\S])"
+        },
+        "caller_scope": {
+          "const": "public_read"
+        },
+        "network": {
+          "$ref": "#/definitions/NetworkCoordinate"
+        },
+        "args": {
+          "type": "object",
+          "properties": {
+            "address": {
+              "type": "string",
+              "pattern": "^(synw|syns|syna|synm|synu|synq)\\.2\\.[A-Za-z0-9_-]{64}$(?![\\s\\S])"
+            },
+            "at_height": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^(?:0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]{1}|1844674407370955161[0-4]|18446744073709551615)$(?![\\s\\S])",
+                  "maxLength": 20,
+                  "x-maximum-integer": "18446744073709551615"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "address"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "caller_scope",
+        "network",
+        "args"
+      ],
+      "additionalProperties": false
+    },
+    "TransactionRequest": {
+      "type": "object",
+      "properties": {
+        "api_version": {
+          "const": 1
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[\\x21-\\x7e]+$(?![\\s\\S])"
+        },
+        "caller_scope": {
+          "const": "public_read"
+        },
+        "network": {
+          "$ref": "#/definitions/NetworkCoordinate"
+        },
+        "args": {
+          "type": "object",
+          "properties": {
+            "transaction_id": {
+              "type": "string",
+              "pattern": "^syntxn[A-Za-z0-9_-]{64}$(?![\\s\\S])",
+              "minLength": 70,
+              "maxLength": 70
+            }
+          },
+          "required": [
+            "transaction_id"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "caller_scope",
+        "network",
+        "args"
+      ],
+      "additionalProperties": false
+    },
+    "BlockRequest": {
+      "type": "object",
+      "properties": {
+        "api_version": {
+          "const": 1
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[\\x21-\\x7e]+$(?![\\s\\S])"
+        },
+        "caller_scope": {
+          "const": "public_read"
+        },
+        "network": {
+          "$ref": "#/definitions/NetworkCoordinate"
+        },
+        "args": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "height": {
+                  "type": "string",
+                  "pattern": "^(?:0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]{1}|1844674407370955161[0-4]|18446744073709551615)$(?![\\s\\S])",
+                  "maxLength": 20,
+                  "x-maximum-integer": "18446744073709551615"
+                },
+                "block_commitment": {
+                  "type": "null"
+                }
+              },
+              "required": [
+                "height"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "height": {
+                  "type": "null"
+                },
+                "block_commitment": {
+                  "type": "object",
+                  "properties": {
+                    "profile": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128,
+                          "pattern": "^[\\x21-\\x7e]+$(?![\\s\\S])"
+                        },
+                        "revision": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 4294967295
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "revision"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "algorithm": {
+                      "const": "SHA3-384"
+                    },
+                    "encoding": {
+                      "const": "lowercase-hex"
+                    },
+                    "value": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{96}$(?![\\s\\S])"
+                    }
+                  },
+                  "required": [
+                    "profile",
+                    "algorithm",
+                    "encoding",
+                    "value"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "block_commitment"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "caller_scope",
+        "network",
+        "args"
+      ],
+      "additionalProperties": false
+    },
+    "BlockByNumberRequest": {
+      "type": "object",
+      "properties": {
+        "api_version": {
+          "const": 1
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[\\x21-\\x7e]+$(?![\\s\\S])"
+        },
+        "caller_scope": {
+          "const": "public_read"
+        },
+        "network": {
+          "$ref": "#/definitions/NetworkCoordinate"
+        },
+        "args": {
+          "type": "object",
+          "properties": {
+            "height": {
+              "type": "string",
+              "pattern": "^(?:0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]{1}|1844674407370955161[0-4]|18446744073709551615)$(?![\\s\\S])",
+              "maxLength": 20,
+              "x-maximum-integer": "18446744073709551615"
+            },
+            "block_commitment": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "height"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "caller_scope",
+        "network",
+        "args"
+      ],
+      "additionalProperties": false
+    },
+    "BlockByHashRequest": {
+      "type": "object",
+      "properties": {
+        "api_version": {
+          "const": 1
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[\\x21-\\x7e]+$(?![\\s\\S])"
+        },
+        "caller_scope": {
+          "const": "public_read"
+        },
+        "network": {
+          "$ref": "#/definitions/NetworkCoordinate"
+        },
+        "args": {
+          "type": "object",
+          "properties": {
+            "height": {
+              "type": "null"
+            },
+            "block_commitment": {
+              "type": "object",
+              "properties": {
+                "profile": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "pattern": "^[\\x21-\\x7e]+$(?![\\s\\S])"
+                    },
+                    "revision": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 4294967295
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "revision"
+                  ],
+                  "additionalProperties": false
+                },
+                "algorithm": {
+                  "const": "SHA3-384"
+                },
+                "encoding": {
+                  "const": "lowercase-hex"
+                },
+                "value": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{96}$(?![\\s\\S])"
+                }
+              },
+              "required": [
+                "profile",
+                "algorithm",
+                "encoding",
+                "value"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "block_commitment"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "caller_scope",
+        "network",
+        "args"
+      ],
+      "additionalProperties": false
+    },
+    "EmptyRequest": {
+      "type": "object",
+      "properties": {
+        "api_version": {
+          "const": 1
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[\\x21-\\x7e]+$(?![\\s\\S])"
+        },
+        "caller_scope": {
+          "const": "public_read"
+        },
+        "network": {
+          "$ref": "#/definitions/NetworkCoordinate"
+        },
+        "args": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "caller_scope",
+        "network",
+        "args"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/definitions/AccountRequest"
+    },
+    {
+      "$ref": "#/definitions/TransactionRequest"
+    },
+    {
+      "$ref": "#/definitions/BlockRequest"
+    },
+    {
+      "$ref": "#/definitions/EmptyRequest"
+    }
+  ],
+  "x-method-contracts": {
+    "synergy_getAccount": "#/definitions/AccountRequest",
+    "synergy_getBalance": "#/definitions/AccountRequest",
+    "synergy_getAccountNonce": "#/definitions/AccountRequest",
+    "synergy_getNonce": "#/definitions/AccountRequest",
+    "synergy_getTransaction": "#/definitions/TransactionRequest",
+    "synergy_getTransactionByHash": "#/definitions/TransactionRequest",
+    "synergy_getTransactionReceipt": "#/definitions/TransactionRequest",
+    "synergy_getReceipt": "#/definitions/TransactionRequest",
+    "synergy_getTransactionStatus": "#/definitions/TransactionRequest",
+    "synergy_getTransactionFees": "#/definitions/TransactionRequest",
+    "synergy_getBlock": "#/definitions/BlockRequest",
+    "synergy_getBlockTransactionCount": "#/definitions/BlockRequest",
+    "synergy_getTransactionsInBlock": "#/definitions/BlockRequest",
+    "synergy_getBlockByHash": "#/definitions/BlockByHashRequest",
+    "synergy_getBlockByNumber": "#/definitions/BlockByNumberRequest",
+    "synergy_getFinalizedHead": "#/definitions/EmptyRequest",
+    "synergy_getLatestBlock": "#/definitions/EmptyRequest",
+    "synergy_getBlockNumber": "#/definitions/EmptyRequest",
+    "synergy_blockNumber": "#/definitions/EmptyRequest",
+    "synergy_getChainId": "#/definitions/EmptyRequest",
+    "synergy_chainId": "#/definitions/EmptyRequest",
+    "synergy_networkId": "#/definitions/EmptyRequest",
+    "synergy_genesisHash": "#/definitions/EmptyRequest",
+    "synergy_getHealth": "#/definitions/EmptyRequest",
+    "synergy_getHealthCheck": "#/definitions/EmptyRequest",
+    "synergy_getReadiness": "#/definitions/EmptyRequest",
+    "synergy_getNodeStatus": "#/definitions/EmptyRequest",
+    "synergy_nodeInfo": "#/definitions/EmptyRequest",
+    "synergy_ping": "#/definitions/EmptyRequest"
+  },
+  "x-status": "ENGINEERING_CANDIDATE_NOT_ACTIVATED",
+  "x-api-version-distinction": "Native read JSON API1, independent of QACE logical API3 and all canonical signing codecs.",
+  "x-runtime-checks": [
+    "Reject duplicate JSON keys before schema interpretation.",
+    "Exact typed coordinate match against the private verified Genesis/authority context, including all profile pins.",
+    "Block commitment profile equals independently authenticated active block profile.",
+    "Runtime integer fields use canonical JSON integer lexical form; decimal quantities are strings.",
+    "Actual typed48 store lookup, original public proof bytes and explicit proof qualification status."
+  ],
+  "x-no-authority": "Successful schema validation establishes syntax only; it never supplies custody, finality, native authority or activation."
+}

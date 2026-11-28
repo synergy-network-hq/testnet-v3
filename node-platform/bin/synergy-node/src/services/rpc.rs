@@ -19,7 +19,6 @@ use synergy_node_core::{
 use synergy_posy::persistence::FinalityStore;
 use synergy_posy::FinalizedBlockRecord;
 use synergy_rpc::{
-    auth::PublicOnlyAuthenticator,
     methods::{
         AccountQuery, BlockQuery, TransactionQuery, ACCOUNT_GET, BLOCK_GET, CHAIN_STATUS,
         CHAIN_TELEMETRY, EPOCH_TRANSITION_PROOF_V1, ETDAG_STATUS, NODE_STATUS, POSY_STATUS,
@@ -44,6 +43,9 @@ use synergy_ws::{server::WsServer, WsTopic};
 
 #[path = "rpc_ethereum.rs"]
 mod ethereum;
+
+#[path = "rpc_r1.rs"]
+pub(crate) mod r1;
 
 #[path = "rpc_proofs.rs"]
 pub(super) mod proofs;
@@ -1050,7 +1052,15 @@ impl RuntimeDispatcher {
 }
 
 impl RpcDispatcher for RuntimeDispatcher {
+    fn reserve_response_capacity(&self)->Result<Option<synergy_rpc::provider::RpcResponseCapacity>,RpcError>{
+        self.query_store.reserve_response_capacity()
+    }
     fn dispatch(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if self.query_store.read_contract() == synergy_rpc::provider::ReadContract::NativeR1V1
+            && synergy_rpc::r1_read::is_method(method)
+        {
+            return self.query_store.r1_read(method, params);
+        }
         if method=="eth_getTransactionCount" && params.as_array().is_some_and(|values|
             values.len()==2&&values[1].as_str()==Some("pending")) {
             let mut finalized=params.clone();finalized[1]=json!("latest");
@@ -1305,6 +1315,7 @@ struct PendingHttp {
     deadline: Instant,
     bytes: Vec<u8>,
     response: Option<Vec<u8>>,
+    response_capacity: Option<synergy_rpc::provider::RpcResponseCapacity>,
     offset: usize,
     upgrade: Option<Vec<u8>>,
     #[cfg(feature = "qualification-timing")]
@@ -1348,7 +1359,7 @@ struct RpcService {
     listener: Option<TcpListener>,
     #[cfg(test)]
     reserved_listener: Option<Arc<TcpListener>>,
-    server: Option<RpcServer<RuntimeDispatcher, PublicOnlyAuthenticator>>,
+    server: Option<RpcServer<RuntimeDispatcher, r1::ManagedReadAuthenticator>>,
 }
 
 impl ManagedService for RpcService {
@@ -1410,7 +1421,7 @@ impl ManagedService for RpcService {
                     telemetry_samples: Mutex::new(TelemetrySamples::default()),
                     proof_throttle: Mutex::new(proofs::ProofThrottle::default()),
                 }),
-                Arc::new(PublicOnlyAuthenticator),
+                Arc::new(r1::ManagedReadAuthenticator::new(self.query_store.read_contract())),
                 self.limits,
                 limiter,
             )
@@ -1459,6 +1470,7 @@ impl ManagedService for RpcService {
                 deadline: Instant::now() + Duration::from_millis(self.limits.request_timeout_ms),
                 bytes: Vec::new(),
                 response: None,
+                response_capacity: None,
                 offset: 0,
                 upgrade: None,
                 #[cfg(feature = "qualification-timing")]
@@ -1740,17 +1752,19 @@ impl RpcService {
             .server
             .as_ref()
             .ok_or("RPC server stopped")?
-            .handle_bytes(
+            .handle_bytes_reserved(
                 &pending.client_id,
                 None,
                 now_ms,
                 &pending.bytes[header_end + 4..],
-            );
+            ).into_parts();
         #[cfg(feature = "qualification-timing")]
         if let Some(id) = pending.diagnostic_request {
             use super::qualification_timing::{self as timing, HttpStage, Phase};
             timing::http_span(id, HttpStage::Dispatch, Phase::End);
         }
+        let (response,capacity)=response;
+        pending.response_capacity=capacity;
         let response = http_response(200, &response);
         Ok(Some(response))
     }
@@ -2051,6 +2065,46 @@ mod nonblocking_http_tests {
     use synergy_execution::{CandidateStore, ExecutionCandidate};
 
     #[test]
+    fn actual_http_queue_holds_shared_response_memory_until_write_owner_drops() {
+        struct Temp(std::path::PathBuf);
+        impl Drop for Temp {fn drop(&mut self){let _=fs::remove_dir_all(&self.0);}}
+        struct BudgetedObservation(Arc<WorldResourceBudget>);
+        impl CanonicalReadProvider for BudgetedObservation {
+            fn reserve_response_capacity(&self)->Result<Option<synergy_rpc::provider::RpcResponseCapacity>,RpcError>{
+                let permit=self.0.reserve(1024).map_err(|_|RpcError::unavailable("test budget full"))?;
+                synergy_rpc::provider::RpcResponseCapacity::new(512,Box::new(permit)).map(Some)
+            }
+            fn latest_finalized_height(&self)->Result<Option<u64>,RpcError>{panic!("observation must not read state")}
+            fn block(&self,_:&BlockQuery)->Result<Option<FinalizedBlockView>,RpcError>{panic!("observation must not read state")}
+            fn transaction(&self,_:&TransactionQuery)->Result<Option<FinalizedTransactionView>,RpcError>{panic!("observation must not read state")}
+            fn account(&self,_:&AccountQuery)->Result<Option<FinalizedAccountView>,RpcError>{panic!("observation must not read state")}
+        }
+        let temp=Temp(std::env::temp_dir().join(format!("rpc-response-lifetime-{}-{}",std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos())));
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();
+        let client=TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let(stream,_)=listener.accept().unwrap();stream.set_nonblocking(true).unwrap();
+        let budget=WorldResourceBudget::new(4096);
+        let mut service=fixture(&temp.0,listener.local_addr().unwrap());
+        service.query_store=Arc::new(BudgetedObservation(Arc::clone(&budget)));
+        service.server=Some(RpcServer::new(Arc::new(RuntimeDispatcher{
+            runtime:Arc::clone(&service.runtime),query_store:Arc::clone(&service.query_store),
+            admission:None,preparation:None,network_identity:None,
+            telemetry_samples:Mutex::new(TelemetrySamples::default()),proof_throttle:Mutex::new(proofs::ProofThrottle::default()),
+        }),Arc::new(r1::ManagedReadAuthenticator::new(service.query_store.read_contract())),service.limits,
+            RpcRateLimiter::new(RateLimit{requests:32,window_ms:1000},4).unwrap()).unwrap());
+        let body=br#"{"jsonrpc":"2.0","id":7,"method":"synergy_nodeStatus","params":{}}"#;
+        let mut bytes=format!("POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n",body.len()).into_bytes();bytes.extend_from_slice(body);
+        let mut pending=PendingHttp{stream,client_id:"public-response-memory-fixture".into(),deadline:Instant::now()+Duration::from_secs(1),bytes,response:None,response_capacity:None,offset:0,upgrade:None,
+            #[cfg(feature="qualification-timing")]diagnostic_request:None};
+        let response=service.prepare_http_response(&mut pending).unwrap().unwrap();
+        assert_eq!(budget.used(),1024);assert!(pending.response_capacity.is_some());
+        pending.response=Some(response);
+        assert!(service.poll_http_connection(&mut pending,65536,65536).unwrap());
+        assert_eq!(budget.used(),1024,"completed send retains ownership until queue removal");
+        drop(pending);assert_eq!(budget.used(),0);drop(client);
+    }
+
+    #[test]
     fn dispatcher_rejects_invalid_read_queries_before_any_provider_access() {
         struct NoReads;
         impl CanonicalReadProvider for NoReads {
@@ -2093,6 +2147,38 @@ mod nonblocking_http_tests {
             let error = dispatcher.dispatch(method, params).unwrap_err();
             assert_eq!(error.code, -32602);
             assert!(!error.message.contains("PRIVATE_SENTINEL"));
+        }
+    }
+
+    #[test]
+    fn native_r1_dispatch_never_falls_back_to_historical_storage_after_refusal() {
+        // Dispatch-only fixture: no verified context, success result, storage,
+        // identity or finality is manufactured by this test.
+        struct R1Only;
+        impl CanonicalReadProvider for R1Only {
+            fn read_contract(&self) -> synergy_rpc::provider::ReadContract {
+                synergy_rpc::provider::ReadContract::NativeR1V1
+            }
+            fn r1_read(&self, _: &str, _: Value) -> Result<Value, RpcError> {
+                Err(RpcError::unavailable("synthetic unactivated R1 adapter"))
+            }
+            fn latest_finalized_height(&self) -> Result<Option<u64>, RpcError> { panic!("historical fallback") }
+            fn block(&self, _: &BlockQuery) -> Result<Option<FinalizedBlockView>, RpcError> { panic!("historical fallback") }
+            fn transaction(&self, _: &TransactionQuery) -> Result<Option<FinalizedTransactionView>, RpcError> { panic!("historical fallback") }
+            fn account(&self, _: &AccountQuery) -> Result<Option<FinalizedAccountView>, RpcError> { panic!("historical fallback") }
+        }
+        let dispatcher = RuntimeDispatcher {
+            runtime: Arc::new(RwLock::new(synergy_node_core::RuntimeSnapshot {
+                node_name: "nonproduction-r1-routing-test".into(), role: "observer".into(), chain_id: u64::MAX-1,
+                lifecycle: synergy_node_core::NodeLifecycleState::Starting, services: vec![],
+            })),
+            query_store: Arc::new(R1Only), admission: None, preparation: None, network_identity: None,
+            telemetry_samples: Mutex::new(TelemetrySamples::default()), proof_throttle: Mutex::new(proofs::ProofThrottle::default()),
+        };
+        for method in [ACCOUNT_GET, BLOCK_GET, TRANSACTION_GET, "synergy_getBalance", "synergy_getFinalizedHead"] {
+            let error=dispatcher.dispatch(method,json!({"api_version":1})).unwrap_err();
+            assert_eq!(error.code,-32000);
+            assert_eq!(error.message,"synthetic unactivated R1 adapter");
         }
     }
 
@@ -2799,6 +2885,7 @@ mod nonblocking_http_tests {
             deadline: Instant::now() + Duration::from_secs(1),
             bytes: Vec::new(),
             response: None,
+            response_capacity: None,
             offset: 0,
             upgrade: None,
             #[cfg(feature = "qualification-timing")]
