@@ -268,6 +268,18 @@ impl FormationRegistrySnapshot {
         if registrations.len() != population.count() {
             return Err(FormationError::Population);
         }
+        // A formation-only key must be disjoint from every participant's
+        // birth/controller/runtime keys, including participants later in order.
+        // Checking only its own node permits cross-participant authority reuse.
+        let mut all_node_keys = BTreeSet::new();
+        for registration in &registrations {
+            for key in registration.node.possession_keys().map_err(|_| FormationError::Key)? {
+                all_node_keys.insert(key.public_key.clone());
+            }
+        }
+        if registrations.iter().any(|r| all_node_keys.contains(&r.formation_key.public_key)) {
+            return Err(FormationError::Key);
+        }
         let mut members = BTreeSet::new();
         let mut keys = BTreeSet::new();
         let mut node_roots = BTreeSet::new();
@@ -406,6 +418,11 @@ impl FormationRegistrySnapshot {
             self.network.chain_id,
             hex(&self.network.nic)
         ))
+    }
+    /// Exact existing AtomicStore key, for the native closure adapter. This
+    /// relative path is data and grants neither storage access nor authority.
+    pub fn storage_relative_root(&self) -> PathBuf {
+        self.base()
     }
     /// Consistent local observation only, not release authorization. The caller
     /// must enforce its durable post-computation release/retirement fence.

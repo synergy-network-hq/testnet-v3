@@ -107,3 +107,17 @@ pub struct R1GenesisSelection {
     pub expected_nic_hex: String,
     pub expected_genesis_hex: String,
 }
+
+/// Pre-Genesis public trust selection. No final Genesis, future owner identity
+/// or production-generation permission is represented by this carrier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct R1NicSelection {
+    pub managed_root: PathBuf,
+    pub pinned_bootstrap_input_path: PathBuf,
+    pub pinned_bootstrap_input_sha256: String,
+    pub profile_catalog_path: PathBuf,
+    pub profile_catalog_sha256: String,
+    pub approvals_path: PathBuf,
+    pub expected_nic_hex: String,
+}

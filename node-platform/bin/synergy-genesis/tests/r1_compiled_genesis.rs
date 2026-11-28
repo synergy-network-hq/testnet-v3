@@ -345,6 +345,127 @@ fn installed_received_bundle_checks_actual_signatures_and_confines_public_files(
         verified.genesis_approvals().genesis_digest(),
         Some(&verified.coordinate().genesis.digest)
     );
+    // Pre-Genesis authentication uses the same protected pin parser, but never
+    // opens the future core or accepts a placeholder final-Genesis field.
+    let nic_path = temporary.0.join("nic-approvals.json");
+    let nic_transport = serde_json::json!({"schema_version":1,"nic":approved["nic"]});
+    std::fs::write(&nic_path, serde_json::to_vec(&nic_transport).unwrap()).unwrap();
+    std::fs::set_permissions(&nic_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let nic_selection = synergy_config::R1NicSelection {
+        managed_root: selection.managed_root.clone(),
+        approvals_path: "nic-approvals.json".into(),
+        pinned_bootstrap_input_path: selection.pinned_bootstrap_input_path.clone(),
+        pinned_bootstrap_input_sha256: selection.pinned_bootstrap_input_sha256.clone(),
+        profile_catalog_path: selection.profile_catalog_path.clone(),
+        profile_catalog_sha256: selection.profile_catalog_sha256.clone(),
+        expected_nic_hex: selection.expected_nic_hex.clone(),
+    };
+    std::fs::rename(
+        temporary.0.join("genesis.core"),
+        temporary.0.join("unused-future-genesis.core"),
+    )
+    .unwrap();
+    let nic_verified = synergy_genesis::r1::received_bundle::load_received_nic_bundle(
+        &nic_selection,
+        u64::MAX - 1,
+        &engine,
+    )
+    .unwrap();
+    assert_eq!(
+        nic_verified.approvals().purpose(),
+        synergy_address_engine::apqe::bootstrap_approvals_r1::VerifiedApprovalPurpose::Nic
+    );
+    assert_eq!(nic_verified.catalog(), &common::catalog());
+    assert!(matches!(
+        synergy_genesis::r1::received_bundle::load_received_nic_bundle(
+            &nic_selection,
+            u64::MAX - 1,
+            &synergy_address_engine::apqe::crypto_engine::CryptoEngine::new()
+        ),
+        Err(BundleError::Catalog)
+    ));
+    let mut mixed_selection = serde_json::to_value(&nic_selection).unwrap();
+    mixed_selection["expected_genesis_hex"] = "00".repeat(48).into();
+    assert!(serde_json::from_value::<synergy_config::R1NicSelection>(mixed_selection).is_err());
+    let mixed_transport =
+        serde_json::json!({"schema_version":1,"nic":approved["nic"],"genesis":[]});
+    std::fs::write(&nic_path, serde_json::to_vec(&mixed_transport).unwrap()).unwrap();
+    assert!(matches!(
+        synergy_genesis::r1::received_bundle::load_received_nic_bundle(
+            &nic_selection,
+            u64::MAX - 1,
+            &engine
+        ),
+        Err(BundleError::Encoding)
+    ));
+    std::fs::write(
+        &nic_path,
+        serde_json::to_vec(&serde_json::json!({"schema_version":1,"nic":approved["genesis"]}))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        synergy_genesis::r1::received_bundle::load_received_nic_bundle(
+            &nic_selection,
+            u64::MAX - 1,
+            &engine
+        ),
+        Err(BundleError::Approval)
+    ));
+    std::fs::rename(
+        temporary.0.join("unused-future-genesis.core"),
+        temporary.0.join("genesis.core"),
+    )
+    .unwrap();
+    // The independently approved NIC is usable before any final Genesis file.
+    // The NIC carrier must not pretend an empty/future Genesis already exists.
+    let nic_path = temporary.0.join("nic-approvals.json");
+    std::fs::write(
+        &nic_path,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version":1,"nic":approvals("nic")
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&nic_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let nic_selection = synergy_config::R1NicSelection {
+        managed_root: selection.managed_root.clone(),
+        approvals_path: "nic-approvals.json".into(),
+        pinned_bootstrap_input_path: selection.pinned_bootstrap_input_path.clone(),
+        pinned_bootstrap_input_sha256: selection.pinned_bootstrap_input_sha256.clone(),
+        profile_catalog_path: selection.profile_catalog_path.clone(),
+        profile_catalog_sha256: selection.profile_catalog_sha256.clone(),
+        expected_nic_hex: selection.expected_nic_hex.clone(),
+    };
+    std::fs::remove_file(temporary.0.join("genesis.core")).unwrap();
+    use synergy_genesis::r1::received_bundle::load_received_nic_bundle;
+    let nic = load_received_nic_bundle(&nic_selection, u64::MAX - 1, &engine).unwrap();
+    assert_eq!(
+        nic.approvals().network(),
+        verified.nic_approvals().network()
+    );
+    assert_eq!(
+        nic.catalog().commitment().unwrap(),
+        verified.coordinate().activated_profiles.commitment
+    );
+    assert!(load_received_nic_bundle(&nic_selection, 9969, &engine).is_err());
+    let mut future = nic_selection.clone();
+    future.approvals_path = "approvals.json".into();
+    assert!(matches!(
+        load_received_nic_bundle(&future, u64::MAX - 1, &engine),
+        Err(BundleError::Encoding)
+    ));
+    std::fs::write(
+        temporary.0.join("genesis.core"),
+        bytes(f["genesis_core_c14n02_hex"].as_str().unwrap()),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        temporary.0.join("genesis.core"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
     let mut bad = selection.clone();
     bad.core_path = "../genesis.core".into();
     assert!(matches!(

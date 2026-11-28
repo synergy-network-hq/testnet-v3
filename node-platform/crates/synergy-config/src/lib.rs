@@ -27,7 +27,7 @@ pub use loader::{decode, load, ConfigLoadError, MAX_CONFIGURATION_BYTES};
 pub use network::NetworkConfiguration;
 pub use node::{
     ApqeProviderConfiguration, ApqeTransportConfiguration, ApqeTransportProfile, NodeConfiguration,
-    R1GenesisSelection, CONFIG_SCHEMA_VERSION,
+    R1GenesisSelection, R1NicSelection, CONFIG_SCHEMA_VERSION,
 };
 pub use p2p::P2pConfiguration;
 pub use rpc::RpcConfiguration;

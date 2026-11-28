@@ -1,7 +1,9 @@
 //! One read-only installed-artifact parser for node/keytool managed consumers.
 //! The existing native release/controller owns authentication of configuration
 //! pins. A successful parse/quorum is never commissioning or creation authority.
+mod nic;
 use super::{profiles::ProfileCatalog, VerifiedR1Genesis};
+pub use nic::{load_received_nic_bundle, VerifiedR1NicBundle};
 use serde::Deserialize;
 use std::{
     path::{Component, Path},
@@ -187,9 +189,13 @@ fn protected(file: &std::fs::File, directory: bool) -> Result<(), BundleError> {
     }
     Ok(())
 }
-#[cfg(not(unix))]
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+use windows::ProtectedRoot;
+#[cfg(not(any(unix, windows)))]
 struct ProtectedRoot;
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 impl ProtectedRoot {
     fn open(_: &Path) -> Result<Self, BundleError> {
         Err(BundleError::UnsupportedPlatform)
@@ -248,31 +254,26 @@ fn digest_matches(bytes: &[u8], expected: &str) -> Result<(), BundleError> {
     Ok(())
 }
 
-/// Authenticate existing public artifacts selected by a protected managed
-/// configuration. The caller must supply that authenticated configuration, not
-/// copy this selection from the candidate download or an RPC response.
-pub fn load_received_bundle(
-    selection: &R1GenesisSelection,
+/// Read bounded public managed metadata through the same protected descriptor
+/// boundary as Genesis. This primitive establishes no release, network,
+/// current-context or operation authority; the native owner authenticates pins.
+pub fn read_protected_managed_file(
+    root: &Path,
+    relative: &Path,
+    maximum: u64,
+) -> Result<Vec<u8>, BundleError> {
+    if maximum == 0 || maximum > 64 * 1024 * 1024 {
+        return Err(BundleError::Bounds);
+    }
+    ProtectedRoot::open(root)?.read(relative, maximum)
+}
+
+fn load_pinned_inputs(
+    root: &ProtectedRoot,
+    selection: &synergy_config::R1NicSelection,
     expected_chain: u64,
-    engine: &CryptoEngine,
-) -> Result<Arc<VerifiedR1Genesis>, BundleError> {
-    if expected_chain == 0 {
-        return Err(BundleError::Context);
-    }
-    let expected_nic = hex::<64>(&selection.expected_nic_hex)?;
-    let expected_genesis = hex::<48>(&selection.expected_genesis_hex)?;
-    if expected_nic == [0; 64] || expected_genesis == [0; 48] {
-        return Err(BundleError::Context);
-    }
-    for path in [
-        &selection.core_path,
-        &selection.approvals_path,
-        &selection.pinned_bootstrap_input_path,
-        &selection.profile_catalog_path,
-    ] {
-        normal_components(path)?;
-    }
-    let root = ProtectedRoot::open(&selection.managed_root)?;
+    expected_nic: &[u8; 64],
+) -> Result<(PinnedBootstrapAuthority, ProfileCatalog), BundleError> {
     let pinned_bytes = root.read(&selection.pinned_bootstrap_input_path, 1024 * 1024)?;
     digest_matches(&pinned_bytes, &selection.pinned_bootstrap_input_sha256)?;
     let catalog_bytes = root.read(&selection.profile_catalog_path, 1024 * 1024)?;
@@ -331,9 +332,48 @@ pub fn load_received_bundle(
             threshold: pins.threshold,
         },
         &birth,
-        &expected_nic,
+        expected_nic,
     )
     .map_err(|_| BundleError::Approval)?;
+    Ok((authority, catalog))
+}
+
+/// Authenticate existing public artifacts selected by a protected managed
+/// configuration. The caller must supply that authenticated configuration, not
+/// copy this selection from the candidate download or an RPC response.
+pub fn load_received_bundle(
+    selection: &R1GenesisSelection,
+    expected_chain: u64,
+    engine: &CryptoEngine,
+) -> Result<Arc<VerifiedR1Genesis>, BundleError> {
+    if expected_chain == 0 {
+        return Err(BundleError::Context);
+    }
+    let expected_nic = hex::<64>(&selection.expected_nic_hex)?;
+    let expected_genesis = hex::<48>(&selection.expected_genesis_hex)?;
+    if expected_nic == [0; 64] || expected_genesis == [0; 48] {
+        return Err(BundleError::Context);
+    }
+    for path in [
+        &selection.core_path,
+        &selection.approvals_path,
+        &selection.pinned_bootstrap_input_path,
+        &selection.profile_catalog_path,
+    ] {
+        normal_components(path)?;
+    }
+    let root = ProtectedRoot::open(&selection.managed_root)?;
+    let nic_selection = synergy_config::R1NicSelection {
+        managed_root: selection.managed_root.clone(),
+        approvals_path: selection.approvals_path.clone(),
+        pinned_bootstrap_input_path: selection.pinned_bootstrap_input_path.clone(),
+        pinned_bootstrap_input_sha256: selection.pinned_bootstrap_input_sha256.clone(),
+        profile_catalog_path: selection.profile_catalog_path.clone(),
+        profile_catalog_sha256: selection.profile_catalog_sha256.clone(),
+        expected_nic_hex: selection.expected_nic_hex.clone(),
+    };
+    let (authority, catalog) =
+        load_pinned_inputs(&root, &nic_selection, expected_chain, &expected_nic)?;
     let approvals: PublicApprovals =
         serde_json::from_slice(&root.read(&selection.approvals_path, 1024 * 1024)?)
             .map_err(|_| BundleError::Encoding)?;

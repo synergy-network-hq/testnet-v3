@@ -6,6 +6,7 @@ pub mod artifact_matrix;
 pub mod compiler;
 mod decode;
 pub mod formation;
+pub mod formation_fence;
 pub mod policy;
 pub mod profiles;
 pub mod received_bundle;
