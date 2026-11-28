@@ -73,6 +73,9 @@ pub trait CanonicalReadProvider: Send + Sync {
     fn reserve_response_capacity(&self) -> Result<Option<RpcResponseCapacity>, RpcError> {
         Ok(None)
     }
+    fn reserve_response_capacity_for(&self, _method: &str) -> Result<Option<RpcResponseCapacity>, RpcError> {
+        self.reserve_response_capacity()
+    }
     /// Selects the read contract only. This is not an authentication token;
     /// production R1 owners require the private verified Genesis constructor.
     fn read_contract(&self) -> ReadContract {

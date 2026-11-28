@@ -70,6 +70,24 @@ pub(crate) struct CanonicalR1QueryStore {
     capacity: R1ReadCapacity,
 }
 impl CanonicalR1QueryStore {
+    fn response_capacity(
+        &self,
+        floor: usize,
+    ) -> Result<Option<synergy_rpc::provider::RpcResponseCapacity>, RpcError> {
+        let peak = self
+            .capacity
+            .maximum_response_bytes
+            .max(floor)
+            .checked_mul(3)
+            .and_then(|n| n.checked_add(1024))
+            .ok_or_else(|| fault("response capacity overflow"))?;
+        let permit = self.world_budget.reserve(peak).map_err(fault)?;
+        synergy_rpc::provider::RpcResponseCapacity::new(
+            self.capacity.maximum_response_bytes,
+            Box::new(permit),
+        )
+        .map(Some)
+    }
     pub(crate) fn open(
         root: PathBuf,
         genesis: Arc<VerifiedR1Genesis>,
@@ -176,22 +194,22 @@ impl CanonicalReadProvider for CanonicalR1QueryStore {
     fn reserve_response_capacity(
         &self,
     ) -> Result<Option<synergy_rpc::provider::RpcResponseCapacity>, RpcError> {
-        // Store bounds: public proof <=4MiB plus <=4096 full transaction IDs.
+        // Store bounds: public proof <=4MiB plus <=1021 full transaction IDs.
         // Reserve conservative simultaneous owned projection/base64/JSON/HTTP
         // buffers from the same actual process budget, held through HTTP write.
-        let peak = self
-            .capacity
-            .maximum_response_bytes
-            .max(8 * 1024 * 1024)
-            .checked_mul(3)
-            .and_then(|n| n.checked_add(1024))
-            .ok_or_else(|| fault("response capacity overflow"))?;
-        let permit = self.world_budget.reserve(peak).map_err(fault)?;
-        synergy_rpc::provider::RpcResponseCapacity::new(
-            self.capacity.maximum_response_bytes,
-            Box::new(permit),
-        )
-        .map(Some)
+        self.response_capacity(8 * 1024 * 1024)
+    }
+    fn reserve_response_capacity_for(
+        &self,
+        method: &str,
+    ) -> Result<Option<synergy_rpc::provider::RpcResponseCapacity>, RpcError> {
+        // Complete receipt originals add up to1021*(4096+512) bytes before
+        // base64/JSON/HTTP buffers; retain the larger shared guard until write.
+        if method == "synergy_getBlockReceipts" {
+            self.response_capacity(16 * 1024 * 1024)
+        } else {
+            self.reserve_response_capacity()
+        }
     }
     fn read_contract(&self) -> ReadContract {
         ReadContract::NativeR1V1
@@ -199,6 +217,71 @@ impl CanonicalReadProvider for CanonicalR1QueryStore {
     fn r1_read(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         let expected = self.genesis.coordinate();
         match method {
+            "synergy_getProof" => {
+                let query = r1_read::decode::<AccountArgs>(params, expected)?;
+                let read = self
+                    .store()?
+                    .account_with_proof(&query.args.identity, query.args.at_height)
+                    .map_err(fault)?
+                    .ok_or_else(|| fault("account proof unavailable"))?;
+                let result = (|| {
+                    if read.identity != query.args.identity.to_text() {
+                        return Err(fault("proof identity mismatch"));
+                    }
+                    let leaves=read.leaves.into_iter().map(|leaf| {
+                        let domain=match leaf.key.domain {
+                            synergy_state::r1::R1StateDomain::NativeBalance=>"native_balance",
+                            synergy_state::r1::R1StateDomain::ReplayCoordinate=>"replay_coordinate",
+                            synergy_state::r1::R1StateDomain::AccountAuthorization=>"account_authorization",
+                            _=>return Err(fault("unsupported account proof domain")),
+                        };
+                        let key=leaf.key.canonical_bytes().map_err(fault)?;
+                        let value=leaf.value.map(|v|v.canonical_bytes().map_err(fault)).transpose()?;
+                        Ok(json!({"domain":domain,
+                            "key":{"codec":"QACE-C14N-02","encoding":"base64","value":BASE64.encode(key)},
+                            "value":value.map(|v|json!({"codec":"QACE-C14N-02","encoding":"base64","value":BASE64.encode(v)})),
+                            "proof":{"profile":profile(self.genesis.state_profile()),"bitmap":hex(&leaf.proof.bitmap),
+                                "siblings":leaf.proof.siblings.iter().map(|s|hex(s)).collect::<Vec<_>>()}}))
+                    }).collect::<Result<Vec<_>,RpcError>>()?;
+                    Ok::<_, RpcError>(
+                        json!({"stored_anchor":self.anchor(&read.anchor)?,"identity":read.identity,"leaves":leaves}),
+                    )
+                })()?;
+                Ok(self.response(query.request_id, result))
+            }
+            "synergy_getBlockReceipts" => {
+                let query = r1_read::decode::<BlockArgs>(params, expected)?;
+                if let BlockRead::Commitment { profile, .. } = &query.args {
+                    if profile != self.genesis.block_profile() {
+                        return Err(RpcError::invalid_params("block profile mismatch"));
+                    }
+                }
+                let store = self.store()?;
+                let (height, requested_digest) = match query.args {
+                    BlockRead::Height(h) => (Some(h), None),
+                    BlockRead::Commitment { digest, .. } => (
+                        store
+                            .block_by_digest(digest)
+                            .map_err(fault)?
+                            .map(|b| b.anchor.height),
+                        Some(digest),
+                    ),
+                };
+                let read = height
+                    .map(|h| store.block_receipts(h).map_err(fault))
+                    .transpose()?
+                    .flatten()
+                    .ok_or_else(|| fault("original block receipts unavailable"))?;
+                let result = (|| {
+                    if requested_digest.is_some_and(|d| d != read.block.anchor.block_digest) {
+                        return Err(fault("receipt block mismatch"));
+                    }
+                    Ok::<_, RpcError>(json!({"block":self.block_value(&read.block)?,
+                        "canonical_receipt_cores":read.canonical_receipt_cores.iter().map(|core|
+                            json!({"codec":"QACE-C14N-02","encoding":"base64","value":BASE64.encode(core)})).collect::<Vec<_>>()}))
+                })()?;
+                Ok(self.response(query.request_id, result))
+            }
             "synergy_getChainId"
             | "synergy_chainId"
             | "synergy_networkId"

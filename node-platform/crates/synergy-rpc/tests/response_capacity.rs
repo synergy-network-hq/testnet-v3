@@ -116,6 +116,10 @@ fn oversize_encoded_result_becomes_bounded_error_with_guard_retained() {
     assert!(bytes.len() <= 256);
     let decoded: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(decoded["error"]["code"], -32000);
+    assert_eq!(
+        decoded["id"], 7,
+        "capacity errors retain request correlation"
+    );
     assert!(decoded.get("result").is_none());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(live.load(Ordering::SeqCst), 1);
@@ -138,5 +142,63 @@ fn capacity_failure_and_private_methods_never_start_handler_work() {
         assert_eq!(decoded["error"]["code"], expected);
     }
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(live.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn server_passes_the_authenticated_method_to_capacity_selection_before_dispatch() {
+    struct MethodBudget(Arc<AtomicUsize>);
+    impl RpcDispatcher for MethodBudget {
+        fn reserve_response_capacity(&self) -> Result<Option<RpcResponseCapacity>, RpcError> {
+            panic!("method-specific policy must be selected by the server")
+        }
+        fn reserve_response_capacity_for(
+            &self,
+            method: &str,
+        ) -> Result<Option<RpcResponseCapacity>, RpcError> {
+            assert_eq!(method, "synergy_chainStatus");
+            self.0.fetch_add(1, Ordering::SeqCst);
+            RpcResponseCapacity::new(1024, Box::new(Guard(self.0.clone()))).map(Some)
+        }
+        fn dispatch(&self, method: &str, _: Value) -> Result<Value, RpcError> {
+            assert_eq!(self.0.load(Ordering::SeqCst), 1);
+            Ok(json!({"method":method}))
+        }
+    }
+    let live = Arc::new(AtomicUsize::new(0));
+    let server = RpcServer::new(
+        Arc::new(MethodBudget(live.clone())),
+        Arc::new(PublicOnlyAuthenticator),
+        RpcLimits {
+            max_body_bytes: 4096,
+            max_concurrent_requests: 2,
+            request_timeout_ms: 1000,
+        },
+        RpcRateLimiter::new(
+            RateLimit {
+                requests: 32,
+                window_ms: 1000,
+            },
+            4,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let (bytes, permit) = server
+        .handle_bytes_reserved(
+            "method-budget-fixture",
+            None,
+            0,
+            &request("synergy_chainStatus", json!({})),
+        )
+        .into_parts();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap()["result"]["method"],
+        "synergy_chainStatus"
+    );
+    assert_eq!(permit.as_ref().unwrap().maximum_encoded_bytes(), 1024);
+    assert_eq!(live.load(Ordering::SeqCst), 1);
+    drop(bytes);
+    drop(permit);
     assert_eq!(live.load(Ordering::SeqCst), 0);
 }

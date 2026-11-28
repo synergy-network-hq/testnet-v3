@@ -751,6 +751,447 @@
       ],
       "additionalProperties": false
     },
+    "StateLeafProof": {
+      "type": "object",
+      "properties": {
+        "domain": {
+          "enum": [
+            "native_balance",
+            "replay_coordinate",
+            "account_authorization"
+          ]
+        },
+        "key": {
+          "type": "object",
+          "properties": {
+            "codec": {
+              "const": "QACE-C14N-02"
+            },
+            "encoding": {
+              "const": "base64"
+            },
+            "value": {
+              "type": "string",
+              "minLength": 4,
+              "maxLength": 1368,
+              "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?$(?![\\s\\S])",
+              "allOf": [
+                {
+                  "if": {
+                    "minLength": 1368
+                  },
+                  "then": {
+                    "pattern": "==$"
+                  }
+                }
+              ]
+            }
+          },
+          "required": [
+            "codec",
+            "encoding",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "codec": {
+                  "const": "QACE-C14N-02"
+                },
+                "encoding": {
+                  "const": "base64"
+                },
+                "value": {
+                  "type": "string",
+                  "minLength": 4,
+                  "maxLength": 176128,
+                  "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?$(?![\\s\\S])"
+                }
+              },
+              "required": [
+                "codec",
+                "encoding",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "proof": {
+          "type": "object",
+          "properties": {
+            "profile": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[\\x21-\\x7e]+$(?![\\s\\S])"
+                },
+                "revision": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4294967295
+                }
+              },
+              "required": [
+                "name",
+                "revision"
+              ],
+              "additionalProperties": false
+            },
+            "bitmap": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{96}$(?![\\s\\S])"
+            },
+            "siblings": {
+              "type": "array",
+              "maxItems": 384,
+              "items": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{96}$(?![\\s\\S])"
+              }
+            }
+          },
+          "required": [
+            "profile",
+            "bitmap",
+            "siblings"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "domain",
+        "key",
+        "value",
+        "proof"
+      ],
+      "additionalProperties": false
+    },
+    "AccountProofProjection": {
+      "type": "object",
+      "properties": {
+        "stored_anchor": {
+          "$ref": "#/definitions/StoredReadAnchor"
+        },
+        "identity": {
+          "type": "string",
+          "pattern": "^(synw|syns|syna|synm|synu|synq)\\.2\\.[A-Za-z0-9_-]{64}$(?![\\s\\S])"
+        },
+        "leaves": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 3,
+          "items": {
+            "$ref": "#/definitions/StateLeafProof"
+          }
+        }
+      },
+      "required": [
+        "stored_anchor",
+        "identity",
+        "leaves"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "identity": {
+                "pattern": "^synq\\.2\\."
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "leaves": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "additionalItems": false,
+                "items": [
+                  {
+                    "allOf": [
+                      {
+                        "$ref": "#/definitions/StateLeafProof"
+                      },
+                      {
+                        "properties": {
+                          "domain": {
+                            "const": "native_balance"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "$ref": "#/definitions/StateLeafProof"
+                      },
+                      {
+                        "properties": {
+                          "domain": {
+                            "const": "replay_coordinate"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "leaves": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "additionalItems": false,
+                "items": [
+                  {
+                    "allOf": [
+                      {
+                        "$ref": "#/definitions/StateLeafProof"
+                      },
+                      {
+                        "properties": {
+                          "domain": {
+                            "const": "native_balance"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "$ref": "#/definitions/StateLeafProof"
+                      },
+                      {
+                        "properties": {
+                          "domain": {
+                            "const": "replay_coordinate"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "$ref": "#/definitions/StateLeafProof"
+                      },
+                      {
+                        "properties": {
+                          "domain": {
+                            "const": "account_authorization"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "StoredBlockProjection": {
+      "type": "object",
+      "properties": {
+        "stored_anchor": {
+          "$ref": "#/definitions/StoredReadAnchor"
+        },
+        "parent_block_commitment": {
+          "type": "object",
+          "properties": {
+            "profile": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[\\x21-\\x7e]+$(?![\\s\\S])"
+                },
+                "revision": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4294967295
+                }
+              },
+              "required": [
+                "name",
+                "revision"
+              ],
+              "additionalProperties": false
+            },
+            "algorithm": {
+              "const": "SHA3-384"
+            },
+            "encoding": {
+              "const": "lowercase-hex"
+            },
+            "value": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{96}$(?![\\s\\S])"
+            }
+          },
+          "required": [
+            "profile",
+            "algorithm",
+            "encoding",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        "epoch": {
+          "$ref": "#/definitions/Uint64Decimal"
+        },
+        "transactions": {
+          "type": "array",
+          "maxItems": 1021,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^(syntxn|synxxn)[A-Za-z0-9_-]{64}$(?![\\s\\S])"
+          }
+        },
+        "receipts_commitment": {
+          "type": "object",
+          "properties": {
+            "profile": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[\\x21-\\x7e]+$(?![\\s\\S])"
+                },
+                "revision": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4294967295
+                }
+              },
+              "required": [
+                "name",
+                "revision"
+              ],
+              "additionalProperties": false
+            },
+            "algorithm": {
+              "const": "SHA3-384"
+            },
+            "encoding": {
+              "const": "lowercase-hex"
+            },
+            "value": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{96}$(?![\\s\\S])"
+            }
+          },
+          "required": [
+            "profile",
+            "algorithm",
+            "encoding",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        "public_finality_proof": {
+          "type": "object",
+          "properties": {
+            "encoding": {
+              "const": "base64"
+            },
+            "value": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 5592408,
+              "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?$(?![\\s\\S])",
+              "allOf": [
+                {
+                  "if": {
+                    "minLength": 5592408
+                  },
+                  "then": {
+                    "pattern": "==$"
+                  }
+                }
+              ]
+            }
+          },
+          "required": [
+            "encoding",
+            "value"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "stored_anchor",
+        "parent_block_commitment",
+        "epoch",
+        "transactions",
+        "receipts_commitment",
+        "public_finality_proof"
+      ],
+      "additionalProperties": false
+    },
+    "BlockReceiptsProjection": {
+      "type": "object",
+      "properties": {
+        "block": {
+          "$ref": "#/definitions/StoredBlockProjection"
+        },
+        "canonical_receipt_cores": {
+          "type": "array",
+          "maxItems": 1021,
+          "items": {
+            "type": "object",
+            "properties": {
+              "codec": {
+                "const": "QACE-C14N-02"
+              },
+              "encoding": {
+                "const": "base64"
+              },
+              "value": {
+                "type": "string",
+                "minLength": 4,
+                "maxLength": 6144,
+                "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?$(?![\\s\\S])"
+              }
+            },
+            "required": [
+              "codec",
+              "encoding",
+              "value"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "block",
+        "canonical_receipt_cores"
+      ],
+      "additionalProperties": false
+    },
     "GetAccountResponse": {
       "type": "object",
       "properties": {
@@ -918,6 +1359,76 @@
         "finality_verified_by_rpc"
       ],
       "additionalProperties": false
+    },
+    "GetProofResponse": {
+      "type": "object",
+      "properties": {
+        "api_version": {
+          "const": 1
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[\\x21-\\x7e]+$(?![\\s\\S])"
+        },
+        "network": {
+          "$ref": "#/definitions/NetworkCoordinate"
+        },
+        "result": {
+          "$ref": "#/definitions/AccountProofProjection"
+        },
+        "proof_profile_status": {
+          "const": "STORED_PROJECTION_REQUIRES_INDEPENDENT_POSY_VERIFICATION"
+        },
+        "finality_verified_by_rpc": {
+          "const": false
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "network",
+        "result",
+        "proof_profile_status",
+        "finality_verified_by_rpc"
+      ],
+      "additionalProperties": false
+    },
+    "GetBlockReceiptsResponse": {
+      "type": "object",
+      "properties": {
+        "api_version": {
+          "const": 1
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[\\x21-\\x7e]+$(?![\\s\\S])"
+        },
+        "network": {
+          "$ref": "#/definitions/NetworkCoordinate"
+        },
+        "result": {
+          "$ref": "#/definitions/BlockReceiptsProjection"
+        },
+        "proof_profile_status": {
+          "const": "STORED_PROJECTION_REQUIRES_INDEPENDENT_POSY_VERIFICATION"
+        },
+        "finality_verified_by_rpc": {
+          "const": false
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "network",
+        "result",
+        "proof_profile_status",
+        "finality_verified_by_rpc"
+      ],
+      "additionalProperties": false
     }
   },
   "oneOf": [
@@ -939,6 +1450,7 @@
     "synergy_getBalance": "#/definitions/AccountRequest",
     "synergy_getAccountNonce": "#/definitions/AccountRequest",
     "synergy_getNonce": "#/definitions/AccountRequest",
+    "synergy_getProof": "#/definitions/AccountRequest",
     "synergy_getTransaction": "#/definitions/TransactionRequest",
     "synergy_getTransactionByHash": "#/definitions/TransactionRequest",
     "synergy_getTransactionReceipt": "#/definitions/TransactionRequest",
@@ -948,6 +1460,7 @@
     "synergy_getBlock": "#/definitions/BlockRequest",
     "synergy_getBlockTransactionCount": "#/definitions/BlockRequest",
     "synergy_getTransactionsInBlock": "#/definitions/BlockRequest",
+    "synergy_getBlockReceipts": "#/definitions/BlockRequest",
     "synergy_getBlockByHash": "#/definitions/BlockByHashRequest",
     "synergy_getBlockByNumber": "#/definitions/BlockByNumberRequest",
     "synergy_getFinalizedHead": "#/definitions/EmptyRequest",
@@ -969,7 +1482,9 @@
     "synergy_getAccount": "#/definitions/GetAccountResponse",
     "synergy_getBalance": "#/definitions/GetBalanceResponse",
     "synergy_getAccountNonce": "#/definitions/GetAccountNonceResponse",
-    "synergy_getNonce": "#/definitions/GetNonceResponse"
+    "synergy_getNonce": "#/definitions/GetNonceResponse",
+    "synergy_getProof": "#/definitions/GetProofResponse",
+    "synergy_getBlockReceipts": "#/definitions/GetBlockReceiptsResponse"
   },
   "x-response-container": "JSON_RPC_RESULT_OBJECT",
   "x-response-coverage": {
@@ -977,7 +1492,9 @@
       "synergy_getAccount",
       "synergy_getAccountNonce",
       "synergy_getBalance",
-      "synergy_getNonce"
+      "synergy_getBlockReceipts",
+      "synergy_getNonce",
+      "synergy_getProof"
     ],
     "remaining_read_methods": [
       "synergy_blockNumber",
@@ -1015,6 +1532,8 @@
     "Exact typed coordinate match against the private verified Genesis/authority context, including all profile pins.",
     "Block commitment profile equals independently authenticated active block profile.",
     "Account response identity, requested historical height and anchor profiles match the independently authenticated request/catalog; null lookup is not a verified absence proof.",
+    "State proofs decode original C14N02 keys/values under the exact state profile; verify ordered bitmap/siblings against an independently trusted root and PoSy block binding.",
+    "Complete receipt cores decode canonically and reproduce every original ordered transaction/index/projection field and selected receipt root; compact projections cannot supply missing originals.",
     "Runtime integer fields use canonical JSON integer lexical form; decimal quantities are strings.",
     "Actual typed48 store lookup, original public proof bytes and explicit proof qualification status."
   ],

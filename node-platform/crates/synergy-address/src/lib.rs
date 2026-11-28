@@ -631,6 +631,18 @@ mod tests {
 
 /// Shared APQE public candidate types; no new derivation or runtime authority.
 pub mod r1_public {
+    pub use synergy_address_engine::apqe::native_identity_derivation_r1::{
+        canonical_received_policy_frame, received_policy_commitment, validate_received_identity,
+        validate_node_birth_from_policy_frame,
+    };
+    pub use synergy_address_engine::apqe::network_birth_r1::ReceivedNetworkBirth;
+    pub use synergy_address_engine::apqe::managed_creation::{
+        inspect_creation_parameters, CreationParametersInspection,
+    };
+    pub use synergy_address_engine::apqe::custody_binding_r1::{
+        inspect_creation_scope, CreationScopeInspection, CreationScopeKind,
+        RuntimeIdentityCreationPurpose,
+    };
     pub use synergy_address_engine::apqe::policy_transition_r1::{
         verify_received_ordinary_authorization, IndexedOrdinaryProof,
         VerifiedOrdinaryAuthorization, ORDINARY_TRANSACTION_CONTEXT,

@@ -1055,6 +1055,9 @@ impl RpcDispatcher for RuntimeDispatcher {
     fn reserve_response_capacity(&self)->Result<Option<synergy_rpc::provider::RpcResponseCapacity>,RpcError>{
         self.query_store.reserve_response_capacity()
     }
+    fn reserve_response_capacity_for(&self,method:&str)->Result<Option<synergy_rpc::provider::RpcResponseCapacity>,RpcError>{
+        self.query_store.reserve_response_capacity_for(method)
+    }
     fn dispatch(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         if self.query_store.read_contract() == synergy_rpc::provider::ReadContract::NativeR1V1
             && synergy_rpc::r1_read::is_method(method)

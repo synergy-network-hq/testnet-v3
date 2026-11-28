@@ -109,7 +109,10 @@ impl<D: RpcDispatcher, A: RpcAuthenticator> RpcServer<D, A> {
         if let Err(error) = admitted {
             return encode_failure(id, error).into();
         }
-        let capacity = match self.dispatcher.reserve_response_capacity() {
+        let capacity = match self
+            .dispatcher
+            .reserve_response_capacity_for(&request.method)
+        {
             Ok(capacity) => capacity,
             Err(error) => return encode_failure(id, error).into(),
         };
@@ -130,6 +133,7 @@ impl<D: RpcDispatcher, A: RpcAuthenticator> RpcServer<D, A> {
         if let Ok(mut metrics) = self.metrics.lock() {
             metrics.finish(result.is_err());
         }
+        let capacity_error_id = id.clone();
         let bytes = match result {
             Ok(value) => encode_response(RpcResponse::success(id, value)),
             Err(error) => encode_failure(id, error),
@@ -139,7 +143,7 @@ impl<D: RpcDispatcher, A: RpcAuthenticator> RpcServer<D, A> {
             .is_some_and(|cap| bytes.len() > cap.maximum_encoded_bytes())
         {
             encode_failure(
-                serde_json::Value::Null,
+                capacity_error_id,
                 RpcError::unavailable("RPC response exceeds selected capacity"),
             )
         } else {

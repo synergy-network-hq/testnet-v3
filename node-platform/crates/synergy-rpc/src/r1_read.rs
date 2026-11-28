@@ -18,7 +18,9 @@ use crate::RpcError;
 /// gated and never implied by inclusion here or by a provider profile label.
 pub const METHODS: &[&str] = &[
     "synergy_getAccount",
+    "synergy_getProof",
     "synergy_getBlock",
+    "synergy_getBlockReceipts",
     "synergy_getTransaction",
     "synergy_getBalance",
     "synergy_getAccountNonce",

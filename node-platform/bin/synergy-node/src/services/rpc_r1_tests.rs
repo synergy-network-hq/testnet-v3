@@ -39,9 +39,9 @@ fn verified_genesis() -> Arc<VerifiedR1Genesis> {
     assert_eq!(f["production_import_permitted"], false);
     assert_eq!(f["chain_id"], u64::MAX - 1);
     let catalog = catalog();
-    assert_eq!(
-        catalog.canonical_frame().unwrap(),
-        bytes(f["profile_catalog_frame_hex"].as_str().unwrap())
+    assert!(
+        catalog.canonical_frame().unwrap()==bytes(f["profile_catalog_frame_hex"].as_str().unwrap()),
+        "public compiled fixture profile catalog differs from current source; refresh the genuine signed fixture, never bypass verification"
     );
     let commitment = catalog.commitment().unwrap();
     let keys: Vec<_> = f["roots"]
@@ -130,7 +130,7 @@ fn params(genesis: &VerifiedR1Genesis, args: Value) -> Value {
 }
 
 #[test]
-fn actual_private_genesis_context_drives_all_29_typed_read_adapters() {
+fn actual_private_genesis_context_drives_all_registered_typed_read_adapters() {
     let temp = Temp::new();
     let genesis = verified_genesis();
     let state = &genesis.compiled().state().state;
@@ -158,7 +158,7 @@ fn actual_private_genesis_context_drives_all_29_typed_read_adapters() {
         block_digest: [0x5a; 48],
         state_root: *genesis.initial_state_root(),
     };
-    let block = StoredBlockRead {
+    let mut block = StoredBlockRead {
         anchor: anchor.clone(),
         parent_block_digest: [0; 48],
         epoch: 0,
@@ -177,7 +177,28 @@ fn actual_private_genesis_context_drives_all_29_typed_read_adapters() {
         events_commitment: [0x2a; 48],
         error_code: Some("PUBLIC_SYNTHETIC_RESOURCE_LIMIT".into()),
     };
-    publish_nonproduction_projection(&temp.0, &block, state, &[tx]).unwrap();
+    let receipt = synergy_state::r1_receipts::R1ReceiptCore {
+        transaction: synergy_address::r1_public::TransactionIdentifierPresentation::parse(&tx_id)
+            .unwrap(),
+        sequence_index: 0,
+        result: tx.status,
+        gas_used: tx.gas_used,
+        paid_nwei: tx.fee_paid_nwei,
+        refunded_nwei: 123,
+        events_commitment: tx.events_commitment,
+        permitted_return_commitment: [77; 48],
+        error_code: tx.error_code.clone(),
+        operation_outcome: vec![9, 8, 7],
+    };
+    block.receipts_root = synergy_state::r1_receipts::receipts_root(&[receipt.clone()]).unwrap();
+    synergy_state::r1_finalized::publish_nonproduction_projection_with_receipts(
+        &temp.0,
+        &block,
+        state,
+        &[tx.clone()],
+        &[receipt.clone()],
+    )
+    .unwrap();
     let budget = WorldResourceBudget::new(256 * 1024 * 1024);
     let provider = Arc::new(
         CanonicalR1QueryStore::open(
@@ -218,6 +239,7 @@ fn actual_private_genesis_context_drives_all_29_typed_read_adapters() {
     for method in r1_read::METHODS {
         let args = match *method {
             "synergy_getAccount"
+            | "synergy_getProof"
             | "synergy_getBalance"
             | "synergy_getNonce"
             | "synergy_getAccountNonce" => json!({"address":identity}),
@@ -231,6 +253,7 @@ fn actual_private_genesis_context_drives_all_29_typed_read_adapters() {
                 json!({"block_commitment":commitment(genesis.block_profile(),&block.anchor.block_digest)})
             }
             "synergy_getBlock"
+            | "synergy_getBlockReceipts"
             | "synergy_getBlockByNumber"
             | "synergy_getBlockTransactionCount"
             | "synergy_getTransactionsInBlock" => json!({"height":"0"}),
@@ -254,13 +277,15 @@ fn actual_private_genesis_context_drives_all_29_typed_read_adapters() {
             && matches!(
                 *method,
                 "synergy_getAccount"
+                    | "synergy_getProof"
+                    | "synergy_getBlockReceipts"
                     | "synergy_getBalance"
                     | "synergy_getAccountNonce"
                     | "synergy_getNonce"
             )
         {
             println!(
-                "R1_PUBLIC_ACCOUNT_FIXTURE {}",
+                "R1_PUBLIC_READ_FIXTURE {}",
                 json!({
                     "purpose":"PUBLIC_SYNTHETIC_CONSUMER_QUALIFICATION_ONLY","production_import_permitted":false,
                     "request":serde_json::from_slice::<Value>(&body).unwrap(),"response":outer,
@@ -277,6 +302,74 @@ fn actual_private_genesis_context_drives_all_29_typed_read_adapters() {
         assert_ne!(response["result"], Value::Null, "{method}");
         assert_eq!(budget.used(), 0, "snapshot permit leaked by {method}");
         match *method {
+            "synergy_getProof" => {
+                assert_eq!(response["result"]["identity"], identity);
+                let leaves = response["result"]["leaves"].as_array().unwrap();
+                assert_eq!(leaves.len(), 3);
+                for leaf in leaves {
+                    let domain = match leaf["domain"].as_str().unwrap() {
+                        "native_balance" => synergy_state::r1::R1StateDomain::NativeBalance,
+                        "replay_coordinate" => synergy_state::r1::R1StateDomain::ReplayCoordinate,
+                        "account_authorization" => {
+                            synergy_state::r1::R1StateDomain::AccountAuthorization
+                        }
+                        _ => panic!("unexpected domain"),
+                    };
+                    let key = synergy_state::r1::R1StateKey::native(domain, &identity).unwrap();
+                    assert_eq!(
+                        BASE64
+                            .decode(leaf["key"]["value"].as_str().unwrap())
+                            .unwrap(),
+                        key.canonical_bytes().unwrap()
+                    );
+                    let value = state.get(&key).unwrap();
+                    assert_eq!(
+                        BASE64
+                            .decode(leaf["value"]["value"].as_str().unwrap())
+                            .unwrap(),
+                        value.canonical_bytes().unwrap()
+                    );
+                    let proof = synergy_state::r1_smt::R1PointProof {
+                        bitmap: bytes(leaf["proof"]["bitmap"].as_str().unwrap())
+                            .try_into()
+                            .unwrap(),
+                        siblings: leaf["proof"]["siblings"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|s| bytes(s.as_str().unwrap()).try_into().unwrap())
+                            .collect(),
+                    };
+                    synergy_state::r1_smt::verify(
+                        genesis.initial_state_root(),
+                        &key,
+                        Some(value),
+                        &proof,
+                    )
+                    .unwrap();
+                }
+            }
+            "synergy_getBlockReceipts" => {
+                let cores = response["result"]["canonical_receipt_cores"]
+                    .as_array()
+                    .unwrap();
+                assert_eq!(cores.len(), 1);
+                let encoded = BASE64.decode(cores[0]["value"].as_str().unwrap()).unwrap();
+                assert_eq!(encoded, receipt.canonical_bytes().unwrap());
+                let original =
+                    synergy_state::r1_receipts::R1ReceiptCore::decode_canonical(&encoded).unwrap();
+                assert_eq!(original.refunded_nwei, 123);
+                assert_eq!(original.permitted_return_commitment, [77; 48]);
+                assert_eq!(original.operation_outcome, vec![9, 8, 7]);
+                assert_eq!(
+                    synergy_state::r1_receipts::receipts_root(&[original]).unwrap(),
+                    block.receipts_root
+                );
+                assert_eq!(
+                    response["result"]["block"]["receipts_commitment"]["value"],
+                    hex(&block.receipts_root)
+                );
+            }
             "synergy_getAccount" => {
                 assert_eq!(response["result"]["identity"], identity);
                 assert_eq!(response["result"]["balance_nwei"], "2");
@@ -314,6 +407,69 @@ fn actual_private_genesis_context_drives_all_29_typed_read_adapters() {
         provider.latest_finalized_height().is_err(),
         "no historical fallback"
     );
+    for namespace in ["synq", "syns"] {
+        let absent =
+            synergy_address::r1_public::NativeIdentityPresentation::from_raw(namespace, [42; 48])
+                .unwrap();
+        let read = provider
+            .r1_read(
+                "synergy_getProof",
+                params(&genesis, json!({"address":absent.to_text()})),
+            )
+            .unwrap();
+        let leaves = read["result"]["leaves"].as_array().unwrap();
+        assert_eq!(leaves.len(), if namespace == "synq" { 2 } else { 3 });
+        assert!(leaves.iter().all(|leaf| leaf["value"].is_null()));
+    }
+    assert!(
+        provider
+            .r1_read(
+                "synergy_getProof",
+                params(&genesis, json!({"address":identity,"at_height":"1"}))
+            )
+            .is_err(),
+        "missing historical proof is unavailable, never nonmembership"
+    );
+    assert!(
+        provider
+            .r1_read(
+                "synergy_getBlockReceipts",
+                params(&genesis, json!({"height":"1"}))
+            )
+            .is_err(),
+        "missing original receipt evidence is unavailable, never an empty list"
+    );
+    let by_hash=provider.r1_read("synergy_getBlockReceipts",params(&genesis,json!({"block_commitment":commitment(genesis.block_profile(),&block.anchor.block_digest)}))).unwrap();
+    assert_eq!(
+        by_hash["result"]["canonical_receipt_cores"][0]["value"],
+        BASE64.encode(receipt.canonical_bytes().unwrap())
+    );
+    let compact = Temp::new();
+    publish_nonproduction_projection(&compact.0, &block, state, &[tx]).unwrap();
+    let unavailable = CanonicalR1QueryStore::open(
+        compact.0.clone(),
+        Arc::clone(&genesis),
+        runtime(u64::MAX - 1),
+        Arc::clone(&budget),
+        capacity(),
+    )
+    .unwrap();
+    assert!(
+        unavailable
+            .r1_read(
+                "synergy_getBlockReceipts",
+                params(&genesis, json!({"height":"0"}))
+            )
+            .is_err(),
+        "compact receipt cannot invent original fields"
+    );
+    let larger = provider
+        .reserve_response_capacity_for("synergy_getBlockReceipts")
+        .unwrap()
+        .unwrap();
+    assert!(budget.used() >= 48 * 1024 * 1024);
+    drop(larger);
+    assert_eq!(budget.used(), 0);
 }
 
 #[test]
@@ -395,6 +551,24 @@ fn actual_verified_context_checks_before_store_io_and_cannot_fake_missing_state(
     assert!(provider
         .r1_read("synergy_getFinalizedHead", params(&genesis, json!({})))
         .is_err());
+    let wrong_profile = R1ProfileRef {
+        name: "UNAPPROVED-BLOCK-PROFILE".into(),
+        revision: 1,
+    };
+    assert_eq!(
+        provider
+            .r1_read(
+                "synergy_getBlockReceipts",
+                params(
+                    &genesis,
+                    json!({"block_commitment":commitment(&wrong_profile,&[0x5a;48])})
+                )
+            )
+            .unwrap_err()
+            .code,
+        -32602,
+        "selector profile must be checked before missing-store access"
+    );
     let health = provider
         .r1_read("synergy_getHealth", params(&genesis, json!({})))
         .unwrap();
