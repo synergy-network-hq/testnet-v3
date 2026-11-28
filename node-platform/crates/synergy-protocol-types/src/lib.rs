@@ -16,6 +16,7 @@ mod epoch;
 mod hash;
 mod height;
 mod node_address;
+mod network_r1;
 mod r1_public_node;
 mod role;
 mod serialization;
@@ -31,6 +32,7 @@ pub use epoch::{Epoch, EpochOverflow};
 pub use hash::ProtocolHash;
 pub use height::{Height, HeightOverflow};
 pub use node_address::{NodeAddress, NodeAddressError, NodeClass};
+pub use network_r1::{R1ContextError,R1ProfileRef,R1NetworkRef,R1GenesisReference,R1ProfileSetReference,R1NetworkCoordinate};
 pub use r1_public_node::R1NodePresentation;
 pub use role::NodeRole;
 pub use serialization::{FrameDescriptor, FrameDescriptorError, WireVersion};
@@ -120,3 +122,5 @@ mod tests {
 }
 
 pub mod canonical_bytes;
+
+pub mod c14n02;
