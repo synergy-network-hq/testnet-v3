@@ -4590,6 +4590,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha3 0.10.9",
+ "synergy-address",
  "synergy-protocol-types",
  "synergy-storage",
 ]

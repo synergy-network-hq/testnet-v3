@@ -2,7 +2,7 @@ use super::{
     codec::{Reader, Writer},
     Digest48, R1ProofError, Result,
 };
-use sha3::{Digest, Sha3_384};
+use synergy_address::r1_public::{HashAlgorithm, Primitives};
 use synergy_protocol_types::R1NetworkCoordinate;
 
 /// Subject references exclude the replaceable signature bundle.
@@ -205,5 +205,9 @@ pub(super) fn framed_digest(domain: &[u8], object: &[u8]) -> Result<Digest48> {
     w.variable(domain, 128)?;
     w.u16(1)?;
     w.fixed(object)?;
-    Ok(Sha3_384::digest(&w.bytes).into())
+    Primitives
+        .hash(HashAlgorithm::Sha3384, &w.bytes)
+        .map_err(|_| R1ProofError::Profile)?
+        .try_into()
+        .map_err(|_| R1ProofError::Encoding)
 }
