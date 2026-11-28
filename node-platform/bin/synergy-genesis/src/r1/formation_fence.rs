@@ -90,6 +90,108 @@ impl FormationFence for PreparationFormationFence {
         )
     }
 }
+/// Actual NIC-only native use bridge. The lease can only originate in the
+/// existing protected native issuer; the independent Core owner additionally
+/// proves every Node/registration/controller/Root approval in the full registry.
+/// Retaining this read-only lease cannot unlock a key or issue a ceremony.
+pub struct ManagedFormationFence {
+    owner: Arc<VerifiedFormationAuthority>,
+    lease: synergy_address_engine::apqe::managed_creation::formation_use::ManagedFormationUseFence,
+}
+impl ManagedFormationFence {
+    pub fn new(
+        auth: &synergy_address_engine::apqe::managed_creation::formation_use::VerifiedManagedFormationUseAuthorization,
+        owner: Arc<VerifiedFormationAuthority>,
+    ) -> Result<Self, Error> {
+        let lease = auth.fence_lease();
+        let out = Self { owner, lease };
+        out.check_owner()?;
+        // No initialize/recover, new lock, substitute store or phase transition.
+        let r = out.owner.registry();
+        with_open_storage(
+            &out.lease.formation_store_root(),
+            &r.storage_relative_root(),
+            r.canonical_bytes(),
+            &mut || out.lease.ensure_current().map_err(|_| Error::Closed),
+        )?;
+        Ok(out)
+    }
+    fn check_owner(&self) -> Result<(), Error> {
+        self.lease.ensure_current().map_err(|_| Error::Closed)?;
+        let r = self.owner.registry();
+        if self.lease.network() != r.network()
+            || &self.lease.activated_profiles() != r.activated_profiles()
+            || &self.lease.registry_commitment() != r.commitment()
+            || self.lease.input_commitment()
+                != r.preseed_commitment().map_err(|_| Error::Authority)?
+            || self.lease.target_epoch() != 1
+        {
+            return Err(Error::Context);
+        }
+        let entry = r
+            .registrations()
+            .iter()
+            .find(|entry| entry.node.identity == self.lease.participant_id())
+            .ok_or(Error::Participant)?;
+        let id = entry
+            .node
+            .validate_birth(r.network())
+            .map_err(|_| Error::Authority)?;
+        let actual = &entry.formation_key;
+        let expected = self.lease.public_key_record();
+        if id.raw48() != self.lease.participant_raw48()
+            || actual.role != expected.role
+            || actual.algorithm != synergy_address_engine::types::Algorithm::MlDsa87
+            || actual.generation != expected.key_generation
+            || actual.public_key != expected.full_public_key
+        {
+            return Err(Error::Context);
+        }
+        Ok(())
+    }
+}
+impl FormationFence for ManagedFormationFence {
+    fn with_open(
+        &self,
+        channel: &FormationAuthority<'_>,
+        context: &FormationContext,
+        effect: &mut dyn FnMut() -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        self.check_owner()?;
+        let r = self.owner.registry();
+        with_open_storage(
+            &self.lease.formation_store_root(),
+            &r.storage_relative_root(),
+            r.canonical_bytes(),
+            &mut || {
+                // Retirement takes the SAME writer lock and cannot cross this
+                // closure. The native policy/expiry check is shared with APQE,
+                // including its original monotonic deadline (no renewed grant).
+                self.lease.ensure_current().map_err(|_| Error::Closed)?;
+                if channel.network() != r.network()
+                    || channel.profiles() != r.activated_profiles()
+                    || channel.registry_commitment() != r.commitment()
+                    || channel.input_commitment() != &self.lease.input_commitment()
+                    || channel.target_epoch() != 1
+                    || (context.initiator() != self.lease.participant_raw48()
+                        && context.responder() != self.lease.participant_raw48())
+                {
+                    return Err(Error::Context);
+                }
+                FormationContext::new(channel, *context.initiator(), *context.responder())?;
+                let peer = channel.participant(self.lease.participant_raw48())?;
+                let expected = self.lease.public_key_record();
+                if peer.key_generation() != expected.key_generation
+                    || peer.public_key() != expected.full_public_key
+                {
+                    return Err(Error::Context);
+                }
+                effect()?;
+                self.lease.ensure_current().map_err(|_| Error::Closed)
+            },
+        )
+    }
+}
 fn with_open_storage(
     root: &Path,
     base: &Path,

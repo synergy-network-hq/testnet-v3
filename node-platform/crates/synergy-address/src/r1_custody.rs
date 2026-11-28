@@ -16,6 +16,10 @@ use synergy_storage::{
 };
 #[path = "r1_custody_rebind.rs"]
 mod rebind;
+#[path = "r1_custody_runtime.rs"]
+mod runtime_use;
+#[path = "r1_custody_formation.rs"]
+mod formation_use;
 pub use rebind::{CompletedIdentityRebind, CustodyRebindLease};
 
 const MAX_RECORD: usize = 2 * 1024 * 1024;
