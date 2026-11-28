@@ -155,7 +155,7 @@ impl ComputedR1Transfer {
         &self.origin
     }
 }
-fn hash(tag: &str, body: &[u8]) -> Result<[u8; 48], NativeError> {
+pub(crate) fn hash(tag: &str, body: &[u8]) -> Result<[u8; 48], NativeError> {
     let mut e = Encoder::with_domain(tag, 8192)?;
     for b in body {
         e.u8(*b)?;

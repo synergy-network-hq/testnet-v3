@@ -6,6 +6,7 @@
 pub mod r1_payload;
 pub mod r1_fees;
 pub mod r1_native;
+pub mod r1_enrollment;
 
 mod candidate;
 mod candidate_store;

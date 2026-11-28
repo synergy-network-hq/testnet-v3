@@ -14,6 +14,9 @@ use synergy_address_engine::{
 use synergy_storage::{
     AtomicStore, RequiredRecord, StoragePrecondition, StorageTransaction, StorageWrite,
 };
+#[path = "r1_custody_rebind.rs"]
+mod rebind;
+pub use rebind::{CompletedIdentityRebind, CustodyRebindLease};
 
 const MAX_RECORD: usize = 2 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +26,8 @@ pub enum CustodyJournalError {
     InvalidIntent,
     Conflict,
     AmbiguousGeneration,
+    AmbiguousProof,
+    AmbiguousRebind,
     InvalidStage,
     InvalidSeal,
     Storage,
@@ -39,6 +44,8 @@ impl std::error::Error for CustodyJournalError {}
 pub enum CustodyStage {
     Reserved,
     Generating,
+    Proving,
+    Rebinding,
     SealedPending,
     Retired,
 }
@@ -81,6 +88,67 @@ impl PublicCustodyKey {
         }
     }
 }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProofReservation {
+    native_request_digest: Vec<u8>,
+    operation_nonce: Vec<u8>,
+    proof_plan_commitment: Vec<u8>,
+    birth_plan_commitment: Vec<u8>,
+    expected_envelope_commitment: Vec<u8>,
+    source_journal_generation: u64,
+}
+impl ProofReservation {
+    fn validate(&self) -> Result<(), CustodyJournalError> {
+        if self.native_request_digest.len() != 32
+            || self.operation_nonce.len() != 32
+            || self.proof_plan_commitment.len() != 64
+            || self.birth_plan_commitment.len() != 64
+            || self.expected_envelope_commitment.len() != 64
+            || self.source_journal_generation == 0
+            || self.source_journal_generation.checked_add(2).is_none()
+            || [
+                &self.native_request_digest,
+                &self.operation_nonce,
+                &self.proof_plan_commitment,
+                &self.birth_plan_commitment,
+                &self.expected_envelope_commitment,
+            ]
+            .iter()
+            .any(|v| v.iter().all(|b| *b == 0))
+        {
+            return Err(CustodyJournalError::InvalidIntent);
+        }
+        Ok(())
+    }
+}
+struct ProofSpec<'a> {
+    slot: &'a str,
+    key_generation: u64,
+    reservation: ProofReservation,
+}
+/// An opaque durable signing fence, never a signing capability or secret.
+pub struct CustodyProofLease {
+    record: Record,
+    bytes: Vec<u8>,
+    marker: Vec<u8>,
+}
+/// Public proof bytes released only after the journal/result CAS has committed.
+pub struct CompletedIdentityProof {
+    bytes: Vec<u8>,
+}
+impl CompletedIdentityProof {
+    pub fn canonical_public_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompletedProofMarker {
+    schema: u16,
+    reservation: ProofReservation,
+    completion_record_commitment: Vec<u8>,
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Record {
@@ -100,6 +168,12 @@ struct Record {
     envelope_commitment: Option<Vec<u8>>,
     envelope: Option<EncryptedEnvelope>,
     public_key: Option<PublicCustodyKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    birth_plan_commitment: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proof_reservation: Option<ProofReservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rebind_reservation: Option<rebind::RebindReservation>,
 }
 impl Record {
     fn intent(&self) -> Result<CustodyCreationIntent, CustodyJournalError> {
@@ -135,6 +209,43 @@ impl Record {
             return Err(CustodyJournalError::Corrupt);
         }
         validate_intent(&self.intent()?)?;
+        if self
+            .birth_plan_commitment
+            .as_ref()
+            .is_some_and(|b| b.len() != 64 || b.iter().all(|v| *v == 0))
+        {
+            return Err(CustodyJournalError::Corrupt);
+        }
+        if self.stage == CustodyStage::Proving {
+            let r = self
+                .proof_reservation
+                .as_ref()
+                .ok_or(CustodyJournalError::Corrupt)?;
+            r.validate()?;
+            if self.birth_plan_commitment.as_ref() != Some(&r.birth_plan_commitment)
+                || self.envelope_commitment.as_ref() != Some(&r.expected_envelope_commitment)
+                || r.source_journal_generation.checked_add(1) != Some(self.journal_generation)
+            {
+                return Err(CustodyJournalError::Corrupt);
+            }
+        } else if self.proof_reservation.is_some() {
+            return Err(CustodyJournalError::Corrupt);
+        }
+        if self.stage == CustodyStage::Rebinding {
+            let r = self
+                .rebind_reservation
+                .as_ref()
+                .ok_or(CustodyJournalError::Corrupt)?;
+            r.validate()?;
+            if self.birth_plan_commitment.as_ref() != Some(&r.birth_plan_commitment)
+                || self.envelope_commitment.as_ref() != Some(&r.expected_envelope_commitment)
+                || r.source_journal_generation.checked_add(1) != Some(self.journal_generation)
+            {
+                return Err(CustodyJournalError::Corrupt);
+            }
+        } else if self.rebind_reservation.is_some() {
+            return Err(CustodyJournalError::Corrupt);
+        }
         match self.stage {
             CustodyStage::Reserved | CustodyStage::Generating => {
                 if self.full_binding_aad.is_some()
@@ -145,7 +256,7 @@ impl Record {
                     return Err(CustodyJournalError::Corrupt);
                 }
             }
-            CustodyStage::SealedPending => {
+            CustodyStage::SealedPending | CustodyStage::Proving | CustodyStage::Rebinding => {
                 let key = self
                     .public_key
                     .as_ref()
@@ -379,6 +490,8 @@ impl NativeCustodyJournal {
                             Ok(Some(SealedPendingCustody { record, bytes }))
                         }
                         CustodyStage::Generating => Err(CustodyJournalError::AmbiguousGeneration),
+                        CustodyStage::Proving => Err(CustodyJournalError::AmbiguousProof),
+                        CustodyStage::Rebinding => Err(CustodyJournalError::AmbiguousRebind),
                         _ => Err(CustodyJournalError::InvalidStage),
                     }
                 },
@@ -589,6 +702,8 @@ impl NativeCustodyJournal {
                         },
                     )),
                     CustodyStage::Generating => Err(CustodyJournalError::AmbiguousGeneration),
+                    CustodyStage::Proving => Err(CustodyJournalError::AmbiguousProof),
+                    CustodyStage::Rebinding => Err(CustodyJournalError::AmbiguousRebind),
                     CustodyStage::Retired => Err(CustodyJournalError::Conflict),
                 };
             }
@@ -621,6 +736,9 @@ impl NativeCustodyJournal {
             envelope_commitment: None,
             envelope: None,
             public_key: None,
+            birth_plan_commitment: None,
+            proof_reservation: None,
+            rebind_reservation: None,
         };
         let bytes = encode(&r)?;
         let mut tx =
@@ -674,6 +792,315 @@ impl NativeCustodyJournal {
         )
         .map_err(|_| CustodyJournalError::Conflict)?;
         Ok((record, bytes))
+    }
+    // Actual callers enter only through the opaque admitted proof capability.
+    fn reserve_proof_checked(
+        &mut self,
+        spec: ProofSpec<'_>,
+    ) -> Result<CustodyProofLease, CustodyJournalError> {
+        spec.reservation.validate()?;
+        let Some((mut record, old)) = self.current(spec.slot)? else {
+            return Err(CustodyJournalError::Conflict);
+        };
+        if record.stage == CustodyStage::Proving {
+            return Err(CustodyJournalError::AmbiguousProof);
+        }
+        if record.stage != CustodyStage::SealedPending
+            || record.key_generation != spec.key_generation
+            || record.journal_generation != spec.reservation.source_journal_generation
+            || record.envelope_commitment.as_ref()
+                != Some(&spec.reservation.expected_envelope_commitment)
+            || record
+                .birth_plan_commitment
+                .as_ref()
+                .is_some_and(|b| b != &spec.reservation.birth_plan_commitment)
+        {
+            return Err(CustodyJournalError::Conflict);
+        }
+        let marker = encode(&(
+            1u16,
+            "PENDING-IDENTITY-PROOF",
+            &record.slot_ref,
+            record.key_generation,
+            &spec.reservation,
+        ))?;
+        let operation = format!(
+            "proof-operations/{}.json",
+            hex(&spec.reservation.operation_nonce)
+        );
+        record.birth_plan_commitment = Some(spec.reservation.birth_plan_commitment.clone());
+        record.proof_reservation = Some(spec.reservation);
+        record.stage = CustodyStage::Proving;
+        record.journal_generation = record
+            .journal_generation
+            .checked_add(1)
+            .ok_or(CustodyJournalError::Conflict)?;
+        record.validate(self.network)?;
+        let bytes = encode(&record)?;
+        let mut tx =
+            StorageTransaction::new(2 * MAX_RECORD).map_err(|_| CustodyJournalError::Storage)?;
+        tx.put(slot_path(spec.slot), bytes.clone())
+            .map_err(|_| CustodyJournalError::Storage)?;
+        tx.put(&operation, marker.clone())
+            .map_err(|_| CustodyJournalError::Storage)?;
+        tx.commit_guarded(
+            &mut self.store,
+            &[
+                StoragePrecondition {
+                    relative_path: slot_path(spec.slot).into(),
+                    required: RequiredRecord::Exact(old),
+                },
+                StoragePrecondition {
+                    relative_path: operation.into(),
+                    required: RequiredRecord::Missing,
+                },
+            ],
+        )
+        .map_err(|_| CustodyJournalError::Conflict)?;
+        Ok(CustodyProofLease {
+            record,
+            bytes,
+            marker,
+        })
+    }
+    pub fn from_managed_proof(
+        auth: &synergy_address_engine::apqe::managed_creation::identity_proof::VerifiedManagedProofAuthorization,
+    ) -> Result<Self, CustodyJournalError> {
+        #[cfg(not(unix))]
+        {
+            let _ = auth;
+            return Err(CustodyJournalError::PlatformUnqualified);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let root = auth.journal_root();
+            if !root.starts_with(auth.platform_root())
+                || root.canonicalize().ok().as_deref() != Some(root.as_path())
+            {
+                return Err(CustodyJournalError::Storage);
+            }
+            // Proof/rebind must never initialize a missing custody installation.
+            for path in root
+                .ancestors()
+                .take_while(|p| p.starts_with(auth.platform_root()))
+            {
+                let m = fs::symlink_metadata(path).map_err(|_| CustodyJournalError::Storage)?;
+                if m.file_type().is_symlink()
+                    || !m.is_dir()
+                    || m.uid() != 0
+                    || m.permissions().mode() & 0o022 != 0
+                {
+                    return Err(CustodyJournalError::Storage);
+                }
+            }
+            if !root.join("context.json").is_file() {
+                return Err(CustodyJournalError::Storage);
+            }
+            Self::open_private(root, Some(auth.network()), Admission::NativeManaged)
+        }
+    }
+    pub fn reserve_managed_proof(
+        &mut self,
+        auth: &synergy_address_engine::apqe::managed_creation::identity_proof::VerifiedManagedProofAuthorization,
+    ) -> Result<CustodyProofLease, CustodyJournalError> {
+        if !matches!(self.admission, Admission::NativeManaged)
+            || self.network != Some(auth.network())
+            || self.root != auth.journal_root()
+        {
+            return Err(CustodyJournalError::Conflict);
+        }
+        let Some((record, _)) = self.current(auth.slot_ref())? else {
+            return Err(CustodyJournalError::Conflict);
+        };
+        let key = record
+            .public_key
+            .as_ref()
+            .ok_or(CustodyJournalError::Corrupt)?;
+        let expected = auth.public_key_record();
+        if key.role != expected.role
+            || key.algorithm != expected.algorithm
+            || key.key_generation != expected.key_generation
+            || key.full_public_key != expected.full_public_key
+            || record.creation_scope_commitment.as_slice() != auth.creation_scope_commitment()
+        {
+            return Err(CustodyJournalError::Conflict);
+        }
+        self.reserve_proof_checked(ProofSpec {
+            slot: auth.slot_ref(),
+            key_generation: auth.key_generation(),
+            reservation: ProofReservation {
+                native_request_digest: auth.native_request_digest().to_vec(),
+                operation_nonce: auth.operation_nonce().to_vec(),
+                proof_plan_commitment: auth.proof_plan_commitment().to_vec(),
+                birth_plan_commitment: auth.birth_plan_commitment().to_vec(),
+                expected_envelope_commitment: auth.expected_envelope_commitment().to_vec(),
+                source_journal_generation: auth.expected_journal_generation(),
+            },
+        })
+    }
+    pub fn managed_proof_record(
+        &self,
+        lease: &CustodyProofLease,
+    ) -> Result<(PathBuf, fs::File), CustodyJournalError> {
+        if !matches!(self.admission, Admission::NativeManaged)
+            || lease.record.stage != CustodyStage::Proving
+        {
+            return Err(CustodyJournalError::InvalidStage);
+        }
+        if self
+            .current(&lease.record.slot_ref)?
+            .is_none_or(|(_, b)| b != lease.bytes)
+        {
+            return Err(CustodyJournalError::Conflict);
+        }
+        let path = self.root.join(slot_path(&lease.record.slot_ref));
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            return Err(CustodyJournalError::PlatformUnqualified);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+                .open(&path)
+                .map_err(|_| CustodyJournalError::Storage)?;
+            Ok((path, file))
+        }
+    }
+    pub fn complete_managed_proof(
+        &mut self,
+        lease: &CustodyProofLease,
+        receipt: synergy_address_engine::apqe::managed_creation::identity_proof::ManagedIdentityProofReceipt,
+    ) -> Result<CompletedIdentityProof, CustodyJournalError> {
+        if !matches!(self.admission, Admission::NativeManaged)
+            || self.root != receipt.journal_root()
+            || self.network != Some(receipt.network())
+            || receipt.slot_ref() != lease.record.slot_ref
+            || receipt.key_generation() != lease.record.key_generation
+            || receipt.creation_scope_commitment().as_slice()
+                != lease.record.creation_scope_commitment
+            || receipt.original_creation_request_digest().as_slice()
+                != lease.record.native_request_digest
+        {
+            return Err(CustodyJournalError::Conflict);
+        }
+        let expected = ProofReservation {
+            native_request_digest: receipt.native_request_digest().to_vec(),
+            operation_nonce: receipt.operation_nonce().to_vec(),
+            proof_plan_commitment: receipt.proof_plan_commitment().to_vec(),
+            birth_plan_commitment: receipt.birth_plan_commitment().to_vec(),
+            expected_envelope_commitment: receipt.expected_envelope_commitment().to_vec(),
+            source_journal_generation: receipt.expected_journal_generation(),
+        };
+        let key = lease
+            .record
+            .public_key
+            .as_ref()
+            .ok_or(CustodyJournalError::Corrupt)?;
+        let public = receipt.public_key_record();
+        if lease.record.proof_reservation.as_ref() != Some(&expected)
+            || key.role != public.role
+            || key.algorithm != public.algorithm
+            || key.key_generation != public.key_generation
+            || key.full_public_key != public.full_public_key
+        {
+            return Err(CustodyJournalError::Conflict);
+        }
+        self.complete_proof_checked(
+            lease,
+            receipt.canonical_public_bytes(),
+            receipt.completion_record_commitment(),
+        )
+    }
+    fn complete_proof_checked(
+        &mut self,
+        lease: &CustodyProofLease,
+        public: &[u8],
+        commitment: [u8; 64],
+    ) -> Result<CompletedIdentityProof, CustodyJournalError> {
+        use crate::r1_public::{HashAlgorithm, Primitives};
+        if public.is_empty() || public.len() > synergy_address_engine::apqe::managed_creation::identity_proof::MAX_PROOF_RECEIPT_BYTES
+            || Primitives.hash(HashAlgorithm::Sha3512, public).map_err(|_| CustodyJournalError::Corrupt)?.as_slice() != commitment {
+            return Err(CustodyJournalError::Corrupt);
+        }
+        let r = lease
+            .record
+            .proof_reservation
+            .as_ref()
+            .ok_or(CustodyJournalError::InvalidStage)?;
+        let mut record = lease.record.clone();
+        record.stage = CustodyStage::SealedPending;
+        record.proof_reservation = None;
+        record.journal_generation = record
+            .journal_generation
+            .checked_add(1)
+            .ok_or(CustodyJournalError::Conflict)?;
+        record.validate(self.network)?;
+        let bytes = encode(&record)?;
+        let op = format!("proof-operations/{}.json", hex(&r.operation_nonce));
+        let result = format!("proof-results/{}.bin", hex(&r.operation_nonce));
+        let marker = encode(&CompletedProofMarker {
+            schema: 1,
+            reservation: r.clone(),
+            completion_record_commitment: commitment.to_vec(),
+        })?;
+        let mut tx =
+            StorageTransaction::new(3 * MAX_RECORD).map_err(|_| CustodyJournalError::Storage)?;
+        tx.put(slot_path(&record.slot_ref), bytes)
+            .map_err(|_| CustodyJournalError::Storage)?;
+        tx.put(&op, marker)
+            .map_err(|_| CustodyJournalError::Storage)?;
+        tx.put(&result, public.to_vec())
+            .map_err(|_| CustodyJournalError::Storage)?;
+        tx.commit_guarded(
+            &mut self.store,
+            &[
+                StoragePrecondition {
+                    relative_path: slot_path(&record.slot_ref).into(),
+                    required: RequiredRecord::Exact(lease.bytes.clone()),
+                },
+                StoragePrecondition {
+                    relative_path: op.into(),
+                    required: RequiredRecord::Exact(lease.marker.clone()),
+                },
+                StoragePrecondition {
+                    relative_path: result.into(),
+                    required: RequiredRecord::Missing,
+                },
+            ],
+        )
+        .map_err(|_| CustodyJournalError::Conflict)?;
+        Ok(CompletedIdentityProof {
+            bytes: public.to_vec(),
+        })
+    }
+    /// Exact persisted public result; never decrypts, signs or reissues a proof.
+    pub fn completed_proof(
+        &self,
+        operation_nonce: &[u8; 32],
+        request_digest: &[u8; 32],
+    ) -> Result<Option<CompletedIdentityProof>, CustodyJournalError> {
+        use crate::r1_public::{HashAlgorithm, Primitives};
+        self.store.inspect_consistent(|reader| {
+            let Some(marker) = reader.read_optional_bounded(format!("proof-operations/{}.json",hex(operation_nonce))).map_err(|_|CustodyJournalError::Storage)? else { return Ok(None); };
+            let marker:CompletedProofMarker=serde_json::from_slice(&marker).map_err(|_|CustodyJournalError::AmbiguousProof)?;
+            marker.reservation.validate()?;
+            if marker.schema!=1 || marker.reservation.operation_nonce.as_slice()!=operation_nonce
+                || marker.reservation.native_request_digest.as_slice()!=request_digest || marker.completion_record_commitment.len()!=64 {
+                return Err(CustodyJournalError::Conflict);
+            }
+            let bytes=reader.with_maximum_bytes(synergy_address_engine::apqe::managed_creation::identity_proof::MAX_PROOF_RECEIPT_BYTES)
+                .read_optional_bounded(format!("proof-results/{}.bin",hex(operation_nonce))).map_err(|_|CustodyJournalError::Storage)?
+                .ok_or(CustodyJournalError::Corrupt)?;
+            if bytes.is_empty() || Primitives.hash(HashAlgorithm::Sha3512,&bytes).map_err(|_|CustodyJournalError::Corrupt)?!=marker.completion_record_commitment {
+                return Err(CustodyJournalError::Corrupt);
+            }
+            Ok(Some(CompletedIdentityProof {bytes}))
+        }).map_err(|_|CustodyJournalError::Storage)?
     }
     /// A second call, including after an ambiguous process exit, cannot begin RNG
     /// again under the same reservation. The generation remains burned.
@@ -969,6 +1396,117 @@ mod tests {
         };
         assert_eq!(resumed.envelope_commitment(), pending.envelope_commitment());
         assert_eq!(resumed.journal_generation(), 3);
+        // Storage-only proof lifecycle test; synthetic public bytes are NOT
+        // engine-validated identity proofs and never cross the managed wrapper.
+        let reservation = ProofReservation {
+            native_request_digest: vec![31; 32],
+            operation_nonce: vec![32; 32],
+            proof_plan_commitment: vec![33; 64],
+            birth_plan_commitment: vec![34; 64],
+            expected_envelope_commitment: pending.envelope_commitment().to_vec(),
+            source_journal_generation: 3,
+        };
+        let proving = restarted
+            .reserve_proof_checked(ProofSpec {
+                slot: &i.slot_ref,
+                key_generation: 1,
+                reservation: reservation.clone(),
+            })
+            .unwrap();
+        assert_eq!(proving.record.journal_generation, 4);
+        assert_eq!(
+            proving.record.native_request_digest,
+            i.native_request_digest
+        );
+        assert_eq!(
+            proving.record.creation_scope_commitment,
+            i.creation_scope_commitment
+        );
+        assert_eq!(
+            proving.record.birth_plan_commitment.as_deref(),
+            Some(&[34u8; 64][..])
+        );
+        assert!(matches!(
+            restarted.reserve(&i, 0),
+            Err(CustodyJournalError::AmbiguousProof)
+        ));
+        assert!(matches!(
+            restarted.completed_proof(&[32; 32], &[31; 32]),
+            Err(CustodyJournalError::AmbiguousProof)
+        ));
+        drop(restarted);
+        let mut restarted = NativeCustodyJournal::for_public_bootstrap_fixture(&temp.0).unwrap();
+        assert!(matches!(
+            restarted.reserve_proof_checked(ProofSpec {
+                slot: &i.slot_ref,
+                key_generation: 1,
+                reservation: reservation.clone()
+            }),
+            Err(CustodyJournalError::AmbiguousProof)
+        ));
+        let public = b"PUBLIC-SYNTHETIC-STORAGE-LIFECYCLE-ONLY";
+        use crate::r1_public::{HashAlgorithm, Primitives};
+        let digest: [u8; 64] = Primitives
+            .hash(HashAlgorithm::Sha3512, public)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let mut bad = digest;
+        bad[63] ^= 1;
+        assert!(restarted
+            .complete_proof_checked(&proving, public, bad)
+            .is_err());
+        assert_eq!(
+            restarted.current(&i.slot_ref).unwrap().unwrap().0.stage,
+            CustodyStage::Proving
+        );
+        let completed = restarted
+            .complete_proof_checked(&proving, public, digest)
+            .unwrap();
+        assert_eq!(completed.canonical_public_bytes(), public);
+        assert!(restarted
+            .complete_proof_checked(&proving, public, digest)
+            .is_err());
+        assert_eq!(
+            restarted
+                .completed_proof(&[32; 32], &[31; 32])
+                .unwrap()
+                .unwrap()
+                .canonical_public_bytes(),
+            public
+        );
+        assert!(restarted.completed_proof(&[32; 32], &[30; 32]).is_err());
+        let current = restarted.current(&i.slot_ref).unwrap().unwrap().0;
+        assert_eq!(current.stage, CustodyStage::SealedPending);
+        assert_eq!(current.journal_generation, 5);
+        assert_eq!(current.key_generation, 1);
+        assert_eq!(current.native_request_digest, i.native_request_digest);
+        assert_eq!(
+            current.creation_scope_commitment,
+            i.creation_scope_commitment
+        );
+        let mut other_birth = reservation;
+        other_birth.source_journal_generation = 5;
+        other_birth.operation_nonce = vec![35; 32];
+        other_birth.birth_plan_commitment = vec![36; 64];
+        assert!(matches!(
+            restarted.reserve_proof_checked(ProofSpec {
+                slot: &i.slot_ref,
+                key_generation: 1,
+                reservation: other_birth
+            }),
+            Err(CustodyJournalError::Conflict)
+        ));
+        assert_eq!(
+            restarted
+                .current(&i.slot_ref)
+                .unwrap()
+                .unwrap()
+                .0
+                .journal_generation,
+            5
+        );
+        rebind::test_public_storage_transition(&mut restarted, &i.slot_ref);
     }
     fn reserve(
         j: &mut NativeCustodyJournal,
