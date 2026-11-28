@@ -369,41 +369,7 @@ impl NativeCustodyJournal {
         request: &[u8; 32],
     ) -> Result<Option<CompletedIdentityRebind>, CustodyJournalError> {
         self.store
-            .inspect_consistent(|reader| {
-                let Some(marker) = reader
-                    .read_optional_bounded(format!("rebind-operations/{}.json", hex(nonce)))
-                    .map_err(|_| CustodyJournalError::Storage)?
-                else {
-                    return Ok(None);
-                };
-                let marker: CompletionMarker = serde_json::from_slice(&marker)
-                    .map_err(|_| CustodyJournalError::AmbiguousRebind)?;
-                marker.reservation.validate()?;
-                if marker.schema != 1
-                    || marker.reservation.operation_nonce.as_slice() != nonce
-                    || marker.reservation.native_request_digest.as_slice() != request
-                {
-                    return Err(CustodyJournalError::Conflict);
-                }
-                let bytes = reader
-                    .with_maximum_bytes(MAX_PROOF_RECEIPT_BYTES)
-                    .read_optional_bounded(format!("rebind-results/{}.bin", hex(nonce)))
-                    .map_err(|_| CustodyJournalError::Storage)?
-                    .ok_or(CustodyJournalError::Corrupt)?;
-                if bytes.is_empty()
-                    || hash(&bytes)?.as_slice() != marker.completion_record_commitment
-                {
-                    return Err(CustodyJournalError::Corrupt);
-                }
-                let envelope_commitment = marker
-                    .envelope_commitment
-                    .try_into()
-                    .map_err(|_| CustodyJournalError::Corrupt)?;
-                Ok(Some(CompletedIdentityRebind {
-                    bytes,
-                    envelope_commitment,
-                }))
-            })
+            .inspect_consistent(|reader| read_completed_rebind(reader, nonce, request))
             .map_err(|_| CustodyJournalError::Storage)?
     }
 }
@@ -502,4 +468,42 @@ pub(super) fn test_public_storage_transition(journal: &mut NativeCustodyJournal,
         public
     );
     assert!(reopened.completed_rebind(&[62; 32], &[60; 32]).is_err());
+}
+
+pub(super) fn read_completed_rebind(
+    reader: &synergy_storage::AtomicStoreReader<'_>,
+    nonce: &[u8; 32],
+    request: &[u8; 32],
+) -> Result<Option<CompletedIdentityRebind>, CustodyJournalError> {
+    let Some(marker) = reader
+        .read_optional_bounded(format!("rebind-operations/{}.json", hex(nonce)))
+        .map_err(|_| CustodyJournalError::Storage)?
+    else {
+        return Ok(None);
+    };
+    let marker: CompletionMarker =
+        serde_json::from_slice(&marker).map_err(|_| CustodyJournalError::AmbiguousRebind)?;
+    marker.reservation.validate()?;
+    if marker.schema != 1
+        || marker.reservation.operation_nonce.as_slice() != nonce
+        || marker.reservation.native_request_digest.as_slice() != request
+    {
+        return Err(CustodyJournalError::Conflict);
+    }
+    let bytes = reader
+        .with_maximum_bytes(MAX_PROOF_RECEIPT_BYTES)
+        .read_optional_bounded(format!("rebind-results/{}.bin", hex(nonce)))
+        .map_err(|_| CustodyJournalError::Storage)?
+        .ok_or(CustodyJournalError::Corrupt)?;
+    if bytes.is_empty() || hash(&bytes)?.as_slice() != marker.completion_record_commitment {
+        return Err(CustodyJournalError::Corrupt);
+    }
+    let envelope_commitment = marker
+        .envelope_commitment
+        .try_into()
+        .map_err(|_| CustodyJournalError::Corrupt)?;
+    Ok(Some(CompletedIdentityRebind {
+        bytes,
+        envelope_commitment,
+    }))
 }

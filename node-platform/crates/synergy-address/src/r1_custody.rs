@@ -14,12 +14,14 @@ use synergy_address_engine::{
 use synergy_storage::{
     AtomicStore, RequiredRecord, StoragePrecondition, StorageTransaction, StorageWrite,
 };
-#[path = "r1_custody_rebind.rs"]
-mod rebind;
-#[path = "r1_custody_runtime.rs"]
-mod runtime_use;
 #[path = "r1_custody_formation.rs"]
 mod formation_use;
+#[path = "r1_custody_rebind.rs"]
+mod rebind;
+#[path = "r1_custody_results.rs"]
+mod results;
+#[path = "r1_custody_runtime.rs"]
+mod runtime_use;
 pub use rebind::{CompletedIdentityRebind, CustodyRebindLease};
 
 const MAX_RECORD: usize = 2 * 1024 * 1024;
@@ -1088,23 +1090,11 @@ impl NativeCustodyJournal {
         operation_nonce: &[u8; 32],
         request_digest: &[u8; 32],
     ) -> Result<Option<CompletedIdentityProof>, CustodyJournalError> {
-        use crate::r1_public::{HashAlgorithm, Primitives};
-        self.store.inspect_consistent(|reader| {
-            let Some(marker) = reader.read_optional_bounded(format!("proof-operations/{}.json",hex(operation_nonce))).map_err(|_|CustodyJournalError::Storage)? else { return Ok(None); };
-            let marker:CompletedProofMarker=serde_json::from_slice(&marker).map_err(|_|CustodyJournalError::AmbiguousProof)?;
-            marker.reservation.validate()?;
-            if marker.schema!=1 || marker.reservation.operation_nonce.as_slice()!=operation_nonce
-                || marker.reservation.native_request_digest.as_slice()!=request_digest || marker.completion_record_commitment.len()!=64 {
-                return Err(CustodyJournalError::Conflict);
-            }
-            let bytes=reader.with_maximum_bytes(synergy_address_engine::apqe::managed_creation::identity_proof::MAX_PROOF_RECEIPT_BYTES)
-                .read_optional_bounded(format!("proof-results/{}.bin",hex(operation_nonce))).map_err(|_|CustodyJournalError::Storage)?
-                .ok_or(CustodyJournalError::Corrupt)?;
-            if bytes.is_empty() || Primitives.hash(HashAlgorithm::Sha3512,&bytes).map_err(|_|CustodyJournalError::Corrupt)?!=marker.completion_record_commitment {
-                return Err(CustodyJournalError::Corrupt);
-            }
-            Ok(Some(CompletedIdentityProof {bytes}))
-        }).map_err(|_|CustodyJournalError::Storage)?
+        self.store
+            .inspect_consistent(|reader| {
+                read_completed_proof(reader, operation_nonce, request_digest)
+            })
+            .map_err(|_| CustodyJournalError::Storage)?
     }
     /// A second call, including after an ambiguous process exit, cannot begin RNG
     /// again under the same reservation. The generation remains burned.
@@ -1614,4 +1604,45 @@ mod tests {
             0o600
         );
     }
+}
+
+fn read_completed_proof(
+    reader: &synergy_storage::AtomicStoreReader<'_>,
+    operation_nonce: &[u8; 32],
+    request_digest: &[u8; 32],
+) -> Result<Option<CompletedIdentityProof>, CustodyJournalError> {
+    use crate::r1_public::{HashAlgorithm, Primitives};
+
+    let Some(marker) = reader
+        .read_optional_bounded(format!("proof-operations/{}.json", hex(operation_nonce)))
+        .map_err(|_| CustodyJournalError::Storage)?
+    else {
+        return Ok(None);
+    };
+    let marker: CompletedProofMarker =
+        serde_json::from_slice(&marker).map_err(|_| CustodyJournalError::AmbiguousProof)?;
+    marker.reservation.validate()?;
+    if marker.schema != 1
+        || marker.reservation.operation_nonce.as_slice() != operation_nonce
+        || marker.reservation.native_request_digest.as_slice() != request_digest
+        || marker.completion_record_commitment.len() != 64
+    {
+        return Err(CustodyJournalError::Conflict);
+    }
+    let bytes = reader
+        .with_maximum_bytes(
+            synergy_address_engine::apqe::managed_creation::identity_proof::MAX_PROOF_RECEIPT_BYTES,
+        )
+        .read_optional_bounded(format!("proof-results/{}.bin", hex(operation_nonce)))
+        .map_err(|_| CustodyJournalError::Storage)?
+        .ok_or(CustodyJournalError::Corrupt)?;
+    if bytes.is_empty()
+        || Primitives
+            .hash(HashAlgorithm::Sha3512, &bytes)
+            .map_err(|_| CustodyJournalError::Corrupt)?
+            != marker.completion_record_commitment
+    {
+        return Err(CustodyJournalError::Corrupt);
+    }
+    Ok(Some(CompletedIdentityProof { bytes }))
 }
