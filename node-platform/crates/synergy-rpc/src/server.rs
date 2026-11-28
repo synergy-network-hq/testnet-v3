@@ -47,15 +47,23 @@ impl<D: RpcDispatcher, A: RpcAuthenticator> RpcServer<D, A> {
         let request = match serde_json::from_slice::<RpcRequest>(body) {
             Ok(request) => request,
             Err(error) => {
-                return encode_failure(
-                    serde_json::Value::Null,
-                    RpcError::invalid_request(format!("invalid JSON: {error}")),
-                )
+                let failure = match error.classify() {
+                    serde_json::error::Category::Syntax | serde_json::error::Category::Eof => {
+                        RpcError::parse_error()
+                    }
+                    _ => RpcError::invalid_request("invalid JSON-RPC request"),
+                };
+                return encode_failure(serde_json::Value::Null, failure);
             }
         };
         let id = request.id.clone();
         if let Err(error) = request.validate() {
-            return encode_failure(id, error);
+            let response_id = if id.is_string() || id.is_number() || id.is_null() {
+                id
+            } else {
+                serde_json::Value::Null
+            };
+            return encode_failure(response_id, error);
         }
         if let Err(error) = self.authenticator.authorize(&request.method, credential) {
             return encode_failure(id, error);

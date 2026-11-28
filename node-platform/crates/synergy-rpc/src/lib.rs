@@ -27,6 +27,12 @@ impl RpcRequest {
         if self.jsonrpc != "2.0" || self.method.trim().is_empty() || self.method.len() > 256 {
             return Err(RpcError::invalid_request("invalid JSON-RPC request"));
         }
+        if !matches!(self.id, Value::String(_) | Value::Number(_) | Value::Null) {
+            return Err(RpcError::invalid_request("invalid JSON-RPC identifier"));
+        }
+        if !matches!(self.params, Value::Object(_) | Value::Array(_) | Value::Null) {
+            return Err(RpcError::invalid_params("RPC params must be structured"));
+        }
         Ok(())
     }
 }
@@ -40,6 +46,14 @@ pub struct RpcError {
 }
 
 impl RpcError {
+    pub fn parse_error() -> Self {
+        Self {
+            code: -32700,
+            message: "parse error".into(),
+            data: None,
+        }
+    }
+
     pub fn invalid_request(message: impl Into<String>) -> Self {
         Self {
             code: -32600,
