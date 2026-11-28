@@ -163,7 +163,13 @@ pub fn response_ceiling(method: &str) -> Option<usize> {
         | "synergy_chainId"
         | "synergy_networkId"
         | "synergy_genesisHash"
-        | "synergy_ping" => 4 * 1024,
+        | "synergy_ping"
+        | "synergy_systemVersion"
+        | "synergy_nodeStatus"
+        | "synergy_chainStatus"
+        | "synergy_syncStatus"
+        | "synergy_posyStatus"
+        | "synergy_etdagStatus" => 4 * 1024,
         _ => return None,
     })
 }

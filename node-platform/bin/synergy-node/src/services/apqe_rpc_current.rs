@@ -121,7 +121,7 @@ mod tests {
         serde_json::to_vec(v).unwrap()
     }
     #[test]
-    fn exact_31_current_aliases_use_shared_typed_preflight_without_changing_legacy_access() {
+    fn exact_37_current_aliases_use_shared_typed_preflight_without_changing_legacy_access() {
         let c = context();
         let mut differs = false;
         for method in synergy_rpc::r1_read::METHODS {

@@ -28,7 +28,7 @@ use synergy_state::world_resources::WorldResourceBudget;
 
 #[cfg(test)]
 #[path = "rpc_r1_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 /// A managed injected R1 provider selects the narrow read-wire allowlist.
 /// Every other method keeps the existing independent access classification.
@@ -191,6 +191,11 @@ impl CanonicalR1QueryStore {
             "receipts_commitment":commitment(&read.receipt_profile,&read.receipts_root),
             "public_finality_proof":{"encoding":"base64","value":BASE64.encode(&read.public_finality_proof)}}))
     }
+}
+fn public_service_observation(service:&synergy_node_core::ServiceObservation)->Value {
+    json!({"id":service.id.as_str(),"state":service.state,
+        "health":match service.health {synergy_node_core::ServiceHealth::Healthy=>"healthy",synergy_node_core::ServiceHealth::Degraded{..}=>"degraded",synergy_node_core::ServiceHealth::Unhealthy{..}=>"unhealthy"},
+        "readiness":match service.readiness {synergy_node_core::ServiceReadiness::Ready=>"ready",synergy_node_core::ServiceReadiness::Pending{..}=>"pending",synergy_node_core::ServiceReadiness::Blocked{..}=>"blocked"}})
 }
 fn fault(_: impl std::fmt::Display) -> RpcError {
     RpcError::unavailable("R1 canonical read unavailable")
@@ -359,7 +364,13 @@ impl CanonicalReadProvider for CanonicalR1QueryStore {
             | "synergy_getReadiness"
             | "synergy_getNodeStatus"
             | "synergy_nodeInfo"
-            | "synergy_ping" => {
+            | "synergy_ping"
+            | "synergy_systemVersion"
+            | "synergy_nodeStatus"
+            | "synergy_chainStatus"
+            | "synergy_syncStatus"
+            | "synergy_posyStatus"
+            | "synergy_etdagStatus" => {
                 let query = r1_read::decode::<EmptyArgs>(params, expected)?;
                 let runtime = self.runtime.read().map_err(fault)?;
                 if runtime.chain_id != expected.network.chain_id {
@@ -372,17 +383,28 @@ impl CanonicalReadProvider for CanonicalR1QueryStore {
                 {
                     return Err(fault("runtime observation exceeds selected bounds"));
                 }
-                let services=runtime.services.iter().map(|service|json!({
-                    "id":service.id.as_str(),"state":service.state,
-                    "health":match service.health {synergy_node_core::ServiceHealth::Healthy=>"healthy",synergy_node_core::ServiceHealth::Degraded{..}=>"degraded",synergy_node_core::ServiceHealth::Unhealthy{..}=>"unhealthy"},
-                    "readiness":match service.readiness {synergy_node_core::ServiceReadiness::Ready=>"ready",synergy_node_core::ServiceReadiness::Pending{..}=>"pending",synergy_node_core::ServiceReadiness::Blocked{..}=>"blocked"},
-                })).collect::<Vec<_>>();
-                let result = if method == "synergy_ping" {
-                    json!({"scope":"RPC_LIVENESS_ONLY","responding":true})
-                } else {
-                    json!({"scope":"NODE_RUNTIME_OBSERVATION","node_name":runtime.node_name,
+                let result = match method {
+                    "synergy_systemVersion" => {
+                        let version=env!("CARGO_PKG_VERSION");
+                        if version.is_empty() || version.len()>128 || !version.bytes().all(|b|b.is_ascii_graphic()) {
+                            return Err(fault("build observation exceeds selected bound"));
+                        }
+                        // Compile metadata is not exact release identity or
+                        // evidence of installed-package/provider qualification.
+                        json!({"node":version,"rpc":"1"})
+                    }
+                    "synergy_nodeStatus" => json!({"node_name":runtime.node_name,"role":runtime.role,
+                        "chain_id":runtime.chain_id.to_string(),"lifecycle":runtime.lifecycle,"ready":runtime.ready()}),
+                    "synergy_chainStatus" => json!({"chain_id":runtime.chain_id.to_string(),
+                        "lifecycle":runtime.lifecycle,"ready":runtime.ready()}),
+                    "synergy_syncStatus"|"synergy_posyStatus"|"synergy_etdagStatus" => {
+                        let id=match method {"synergy_syncStatus"=>"sync","synergy_posyStatus"=>"posy",_=>"etdag"};
+                        public_service_observation(runtime.service(id).ok_or_else(||fault("runtime service unavailable"))?)
+                    }
+                    "synergy_ping" => json!({"scope":"RPC_LIVENESS_ONLY","responding":true}),
+                    _ => json!({"scope":"NODE_RUNTIME_OBSERVATION","node_name":runtime.node_name,
                         "role":runtime.role,"chain_id":runtime.chain_id.to_string(),
-                        "lifecycle":runtime.lifecycle,"services":services,"ready":runtime.ready()})
+                        "lifecycle":runtime.lifecycle,"services":runtime.services.iter().map(public_service_observation).collect::<Vec<_>>(),"ready":runtime.ready()}),
                 };
                 let mut response = self.response(query.request_id, result);
                 response["proof_profile_status"] = json!("NOT_APPLICABLE_RUNTIME_OBSERVATION");

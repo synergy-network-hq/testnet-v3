@@ -27,7 +27,7 @@ impl Drop for Temp {
         }
     }
 }
-fn verified_genesis() -> Arc<VerifiedR1Genesis> {
+pub(crate) fn verified_genesis() -> Arc<VerifiedR1Genesis> {
     let path=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../21-Aegis-Engine/synergy-address-engine/tests/fixtures/r1_compiled_genesis_public.json");
     let input = std::fs::read(path).expect("public signed fixture required, never skip");
     assert!(input.len() <= 1024 * 1024);
@@ -126,6 +126,20 @@ fn runtime(chain_id: u64) -> RuntimeView {
                 state: synergy_node_core::ServiceState::Starting,
                 health: synergy_node_core::ServiceHealth::Unhealthy { reason: "PUBLIC_TEST_PRIVATE_REASON_SENTINEL".into() },
                 readiness: synergy_node_core::ServiceReadiness::Blocked { reason: "PUBLIC_TEST_PRIVATE_REASON_SENTINEL".into() },
+            },
+            synergy_node_core::ServiceObservation {
+                id:synergy_node_core::ServiceId::new("sync").unwrap(),state:synergy_node_core::ServiceState::Starting,
+                health:synergy_node_core::ServiceHealth::Degraded{reason:"PUBLIC_TEST_PRIVATE_REASON_SENTINEL".into()},
+                readiness:synergy_node_core::ServiceReadiness::Pending{reason:"PUBLIC_TEST_PRIVATE_REASON_SENTINEL".into()},
+            },
+            synergy_node_core::ServiceObservation {
+                id:synergy_node_core::ServiceId::new("posy").unwrap(),state:synergy_node_core::ServiceState::Registered,
+                health:synergy_node_core::ServiceHealth::Unhealthy{reason:"PUBLIC_TEST_PRIVATE_REASON_SENTINEL".into()},
+                readiness:synergy_node_core::ServiceReadiness::Blocked{reason:"PUBLIC_TEST_PRIVATE_REASON_SENTINEL".into()},
+            },
+            synergy_node_core::ServiceObservation {
+                id:synergy_node_core::ServiceId::new("etdag").unwrap(),state:synergy_node_core::ServiceState::Running,
+                health:synergy_node_core::ServiceHealth::Healthy,readiness:synergy_node_core::ServiceReadiness::Ready,
             },
         ],
     }))
@@ -395,6 +409,22 @@ fn actual_private_genesis_context_drives_all_registered_typed_read_adapters() {
             "synergy_ping" => {
                 assert_eq!(response["result"], json!({"scope":"RPC_LIVENESS_ONLY","responding":true}));
             }
+            "synergy_systemVersion"=>{
+                assert_eq!(response["result"],json!({"node":env!("CARGO_PKG_VERSION"),"rpc":"1"}));
+                assert_eq!(response["proof_profile_status"],"NOT_APPLICABLE_RUNTIME_OBSERVATION");
+            }
+            "synergy_nodeStatus"|"synergy_chainStatus"=>{
+                assert_eq!(response["result"]["chain_id"],(u64::MAX-1).to_string());
+                assert_eq!(response["result"]["lifecycle"],"starting");assert_eq!(response["result"]["ready"],false);
+                assert!(response["result"].get("services").is_none());
+            }
+            "synergy_syncStatus"|"synergy_posyStatus"|"synergy_etdagStatus"=>{
+                let(id,health,readiness)=match *method {"synergy_syncStatus"=>("sync","degraded","pending"),
+                    "synergy_posyStatus"=>("posy","unhealthy","blocked"),_=>("etdag","healthy","ready")};
+                assert_eq!(response["result"]["id"],id);assert_eq!(response["result"]["health"],health);
+                assert_eq!(response["result"]["readiness"],readiness);
+                assert!(!response.to_string().contains("PUBLIC_TEST_PRIVATE_REASON_SENTINEL"));
+            }
             "synergy_getAccount" => {
                 assert_eq!(response["result"]["identity"], identity);
                 assert_eq!(response["result"]["balance_nwei"], "2");
@@ -611,6 +641,11 @@ fn actual_verified_context_checks_before_store_io_and_cannot_fake_missing_state(
         !temp.0.exists(),
         "read-only missing store cannot create a chain"
     );
+    provider.runtime.write().unwrap().services.clear();
+    for method in ["synergy_syncStatus","synergy_posyStatus","synergy_etdagStatus"] {
+        assert_eq!(provider.r1_read(method,params(&genesis,json!({}))).unwrap_err().code,-32000);
+    }
+
 }
 
 #[test]

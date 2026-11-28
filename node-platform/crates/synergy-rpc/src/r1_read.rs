@@ -48,6 +48,12 @@ pub const METHODS: &[&str] = &[
     "synergy_getNodeStatus",
     "synergy_nodeInfo",
     "synergy_ping",
+    "synergy_systemVersion",
+    "synergy_nodeStatus",
+    "synergy_chainStatus",
+    "synergy_syncStatus",
+    "synergy_posyStatus",
+    "synergy_etdagStatus",
 ];
 pub fn is_method(method: &str) -> bool {
     METHODS.contains(&method)
@@ -112,7 +118,13 @@ pub fn preflight(
         | "synergy_getReadiness"
         | "synergy_getNodeStatus"
         | "synergy_nodeInfo"
-        | "synergy_ping" => {
+        | "synergy_ping"
+        | "synergy_systemVersion"
+        | "synergy_nodeStatus"
+        | "synergy_chainStatus"
+        | "synergy_syncStatus"
+        | "synergy_posyStatus"
+        | "synergy_etdagStatus" => {
             decode::<EmptyArgs>(params, expected)?;
         }
         _ => return Err(RpcError::method_not_found()),
