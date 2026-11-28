@@ -1013,6 +1013,9 @@ impl NativeCustodyJournal {
         lease: &CustodyProofLease,
         receipt: synergy_address_engine::apqe::managed_creation::identity_proof::ManagedIdentityProofReceipt,
     ) -> Result<CompletedIdentityProof, CustodyJournalError> {
+        receipt
+            .ensure_current()
+            .map_err(|_| CustodyJournalError::InvalidIntent)?;
         if !matches!(self.admission, Admission::NativeManaged)
             || self.root != receipt.journal_root()
             || self.network != Some(receipt.network())
@@ -1047,11 +1050,15 @@ impl NativeCustodyJournal {
         {
             return Err(CustodyJournalError::Conflict);
         }
-        self.complete_proof_checked(
+        let completed = self.complete_proof_checked(
             lease,
             receipt.canonical_public_bytes(),
             receipt.completion_record_commitment(),
-        )
+        )?;
+        receipt
+            .ensure_current()
+            .map_err(|_| CustodyJournalError::InvalidIntent)?;
+        Ok(completed)
     }
     fn complete_proof_checked(
         &mut self,
@@ -1181,6 +1188,9 @@ impl NativeCustodyJournal {
         lease: &CustodyGenerationLease,
         material: synergy_address_engine::apqe::managed_creation::ManagedSealedKey,
     ) -> Result<SealedPendingCustody, CustodyJournalError> {
+        material
+            .ensure_current()
+            .map_err(|_| CustodyJournalError::InvalidIntent)?;
         if !matches!(self.admission, Admission::NativeManaged)
             || lease.record.stage != CustodyStage::Generating
         {
@@ -1203,6 +1213,9 @@ impl NativeCustodyJournal {
         record.envelope_commitment = Some(material.envelope_commitment().to_vec());
         record.envelope = Some(material.encrypted_envelope().clone());
         let (record, bytes) = self.advance(&lease.bytes, record, CustodyStage::SealedPending)?;
+        material
+            .ensure_current()
+            .map_err(|_| CustodyJournalError::InvalidIntent)?;
         Ok(SealedPendingCustody { record, bytes })
     }
     pub fn seal_generated(

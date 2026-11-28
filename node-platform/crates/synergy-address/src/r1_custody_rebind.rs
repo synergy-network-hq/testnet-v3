@@ -250,6 +250,9 @@ impl NativeCustodyJournal {
         lease: &CustodyRebindLease,
         receipt: ManagedIdentityRebindReceipt,
     ) -> Result<CompletedIdentityRebind, CustodyJournalError> {
+        receipt
+            .ensure_current()
+            .map_err(|_| CustodyJournalError::InvalidIntent)?;
         let r = &lease.record;
         let reservation = r
             .rebind_reservation
@@ -278,13 +281,17 @@ impl NativeCustodyJournal {
         {
             return Err(CustodyJournalError::Conflict);
         }
-        self.complete_rebind_checked(
+        let completed = self.complete_rebind_checked(
             lease,
             receipt.encrypted_envelope(),
             receipt.envelope_commitment(),
             receipt.canonical_receipt_bytes(),
             receipt.completion_record_commitment(),
-        )
+        )?;
+        receipt
+            .ensure_current()
+            .map_err(|_| CustodyJournalError::InvalidIntent)?;
+        Ok(completed)
     }
     fn complete_rebind_checked(
         &mut self,

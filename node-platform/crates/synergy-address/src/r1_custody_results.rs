@@ -8,7 +8,7 @@ impl NativeCustodyJournal {
         nonce: &[u8; 32],
         request: &[u8; 32],
     ) -> Result<Option<CompletedIdentityProof>, CustodyJournalError> {
-        inspect(platform_root, network, |reader| {
+        inspect(platform_root, Some(network), |reader| {
             super::read_completed_proof(reader, nonce, request)
         })
     }
@@ -18,23 +18,21 @@ impl NativeCustodyJournal {
         nonce: &[u8; 32],
         request: &[u8; 32],
     ) -> Result<Option<CompletedIdentityRebind>, CustodyJournalError> {
-        inspect(platform_root, network, |reader| {
+        inspect(platform_root, Some(network), |reader| {
             super::rebind::read_completed_rebind(reader, nonce, request)
         })
     }
 }
-fn inspect<T>(
+pub(super) fn inspect<T>(
     platform_root: &Path,
-    network: NetworkRef,
+    network: Option<NetworkRef>,
     read: impl FnOnce(&synergy_storage::AtomicStoreReader<'_>) -> Result<Option<T>, CustodyJournalError>,
 ) -> Result<Option<T>, CustodyJournalError> {
-    if !platform_root.is_absolute() || network.chain_id == 0 {
+    if !platform_root.is_absolute() || network.is_some_and(|n| n.chain_id == 0) {
         return Err(CustodyJournalError::InvalidIntent);
     }
     let root = platform_root.join(
-        synergy_address_engine::apqe::managed_creation::managed_journal_relative_root(Some(
-            network,
-        )),
+        synergy_address_engine::apqe::managed_creation::managed_journal_relative_root(network),
     );
     match fs::symlink_metadata(&root) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -70,14 +68,14 @@ fn inspect<T>(
 }
 fn inspect_existing<T>(
     root: &Path,
-    network: NetworkRef,
+    network: Option<NetworkRef>,
     read: impl FnOnce(&synergy_storage::AtomicStoreReader<'_>) -> Result<Option<T>, CustodyJournalError>,
 ) -> Result<Option<T>, CustodyJournalError> {
     AtomicStore::inspect_existing_read_only(root, MAX_RECORD, |reader| {
         let expected = encode(&(
             1u16,
             "NATIVE-MANAGED-CUSTODY-JOURNAL",
-            Some((network.chain_id, network.nic.to_vec())),
+            network.map(|n| (n.chain_id, n.nic.to_vec())),
         ))?;
         if reader
             .with_maximum_bytes(4096)
@@ -103,6 +101,7 @@ mod tests {
             "no-native-proof-result-root-{}",
             std::process::id()
         ));
+        assert!(NativeCustodyJournal::inspect_managed_completed_root_approval(&root, &[1;32], &[2;32]).unwrap().is_none());
         assert!(!root.exists());
         let n = NetworkRef {
             chain_id: u64::MAX - 1,
@@ -162,7 +161,7 @@ mod tests {
         tx.put("context.json", marker).unwrap();
         tx.commit(&mut store).unwrap();
         assert!(
-            inspect_existing(&temp.0, n, |r| super::super::read_completed_proof(
+            inspect_existing(&temp.0, Some(n), |r| super::super::read_completed_proof(
                 r, &[1; 32], &[2; 32]
             ))
             .unwrap()
@@ -171,11 +170,16 @@ mod tests {
         let mut wrong = n;
         wrong.nic[63] ^= 1;
         assert!(matches!(
-            inspect_existing(&temp.0, wrong, |r| super::super::read_completed_proof(
-                r, &[1; 32], &[2; 32]
-            )),
+            inspect_existing(
+                &temp.0,
+                Some(wrong),
+                |r| super::super::read_completed_proof(r, &[1; 32], &[2; 32])
+            ),
             Err(CustodyJournalError::Conflict)
         ));
+        assert!(matches!(inspect_existing(&temp.0, None,
+            |r| super::super::root_approval::read_completed_root_approval(r, &[1;32], &[2;32])),
+            Err(CustodyJournalError::Conflict)));
         let mut tx = StorageTransaction::new(MAX_RECORD).unwrap();
         tx.put(
             format!("proof-operations/{}.json", hex(&[1; 32])),
@@ -184,7 +188,7 @@ mod tests {
         .unwrap();
         tx.commit(&mut store).unwrap();
         assert!(matches!(
-            inspect_existing(&temp.0, n, |r| super::super::read_completed_proof(
+            inspect_existing(&temp.0, Some(n), |r| super::super::read_completed_proof(
                 r, &[1; 32], &[2; 32]
             )),
             Err(CustodyJournalError::AmbiguousProof)
@@ -197,9 +201,9 @@ mod tests {
         .unwrap();
         tx.commit(&mut store).unwrap();
         assert!(matches!(
-            inspect_existing(&temp.0, n, |r| super::super::rebind::read_completed_rebind(
-                r, &[1; 32], &[2; 32]
-            )),
+            inspect_existing(&temp.0, Some(n), |r| {
+                super::super::rebind::read_completed_rebind(r, &[1; 32], &[2; 32])
+            }),
             Err(CustodyJournalError::AmbiguousRebind)
         ));
     }

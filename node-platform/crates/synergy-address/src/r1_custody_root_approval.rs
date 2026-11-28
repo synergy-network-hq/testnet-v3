@@ -443,34 +443,49 @@ impl NativeCustodyJournal {
             return Err(CustodyJournalError::Conflict);
         }
         self.store
-            .inspect_consistent(|reader| {
-                let Some(marker) = reader
-                    .read_optional_bounded(marker_path(nonce))
-                    .map_err(|_| CustodyJournalError::Storage)?
-                else {
-                    return Ok(None);
-                };
-                let m: CompleteMarker = serde_json::from_slice(&marker)
-                    .map_err(|_| CustodyJournalError::AmbiguousRootApproval)?;
-                m.reservation.validate()?;
-                if m.schema != 1
-                    || m.reservation.operation_nonce.as_slice() != nonce
-                    || m.reservation.native_request_digest.as_slice() != request
-                {
-                    return Err(CustodyJournalError::Conflict);
-                }
-                let bytes = reader
-                    .with_maximum_bytes(1024 * 1024)
-                    .read_optional_bounded(result_path(nonce))
-                    .map_err(|_| CustodyJournalError::Storage)?
-                    .ok_or(CustodyJournalError::Corrupt)?;
-                if bytes.is_empty() || hash(&bytes)?.as_slice() != m.completion_record_commitment {
-                    return Err(CustodyJournalError::Corrupt);
-                }
-                Ok(Some(CompletedRootApproval { bytes }))
-            })
+            .inspect_consistent(|reader| read_completed_root_approval(reader, nonce, request))
             .map_err(|_| CustodyJournalError::Storage)?
     }
+    pub fn inspect_managed_completed_root_approval(
+        platform_root: &Path,
+        nonce: &[u8; 32],
+        request: &[u8; 32],
+    ) -> Result<Option<CompletedRootApproval>, CustodyJournalError> {
+        super::results::inspect(platform_root, None, |reader| {
+            read_completed_root_approval(reader, nonce, request)
+        })
+    }
+}
+
+pub(super) fn read_completed_root_approval(
+    reader: &synergy_storage::AtomicStoreReader<'_>,
+    nonce: &[u8; 32],
+    request: &[u8; 32],
+) -> Result<Option<CompletedRootApproval>, CustodyJournalError> {
+    let Some(marker) = reader
+        .read_optional_bounded(marker_path(nonce))
+        .map_err(|_| CustodyJournalError::Storage)?
+    else {
+        return Ok(None);
+    };
+    let m: CompleteMarker =
+        serde_json::from_slice(&marker).map_err(|_| CustodyJournalError::AmbiguousRootApproval)?;
+    m.reservation.validate()?;
+    if m.schema != 1
+        || m.reservation.operation_nonce.as_slice() != nonce
+        || m.reservation.native_request_digest.as_slice() != request
+    {
+        return Err(CustodyJournalError::Conflict);
+    }
+    let bytes = reader
+        .with_maximum_bytes(1024 * 1024)
+        .read_optional_bounded(result_path(nonce))
+        .map_err(|_| CustodyJournalError::Storage)?
+        .ok_or(CustodyJournalError::Corrupt)?;
+    if bytes.is_empty() || hash(&bytes)?.as_slice() != m.completion_record_commitment {
+        return Err(CustodyJournalError::Corrupt);
+    }
+    Ok(Some(CompletedRootApproval { bytes }))
 }
 
 /// Storage-only adversarial checks using the existing sealed public fixture.
