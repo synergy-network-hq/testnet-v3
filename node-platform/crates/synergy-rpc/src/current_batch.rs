@@ -136,6 +136,7 @@ pub fn response_ceiling(method: &str) -> Option<usize> {
         // Page output is small, but real store lookup owns the entire bounded original proof.
         "synergy_getTransactionByBlockHashAndIndex"|"synergy_getTransactionByBlockNumberAndIndex" => 8 * 1024 * 1024,
         "synergy_getFinalizedProofPageV1" => 8 * 1024 * 1024,
+        "synergy_getBlockRange" => 32 * 1024 * 1024,
         "synergy_getBlockReceipts" => 16 * 1024 * 1024,
         "synergy_getBlock"
         | "synergy_getBlockByHash"

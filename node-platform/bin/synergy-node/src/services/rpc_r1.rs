@@ -18,7 +18,7 @@ use synergy_rpc::{
         CanonicalReadProvider, FinalizedAccountView, FinalizedBlockView, FinalizedTransactionView,
         ReadContract,
     },
-    r1_read::{self, AccountArgs, BlockArgs, BlockRead, EmptyArgs, FinalityProofPageArgs, TransactionArgs, TransactionInBlockArgs},
+    r1_read::{self, AccountArgs, BlockArgs, BlockRead, BlockRangeArgs, EmptyArgs, FinalityProofPageArgs, TransactionArgs, TransactionInBlockArgs},
     RpcError,
 };
 use synergy_state::r1_finalized::{
@@ -296,6 +296,23 @@ impl CanonicalReadProvider for CanonicalR1QueryStore {
     fn r1_read(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         let expected = self.genesis.coordinate();
         match method {
+            "synergy_getBlockRange"=>{
+                let query=r1_read::decode::<BlockRangeArgs>(params,expected)?;
+                let store=self.store()?;
+                let head=store.current_anchor().ok_or_else(||fault("stored range anchor unavailable"))?;
+                if query.args.last_height>head.height {return Err(fault("complete requested block range unavailable"));}
+                let mut blocks=Vec::with_capacity(query.args.count as usize);
+                let mut previous=None;
+                for height in query.args.from_height..=query.args.last_height {
+                    let block=store.block(height).map_err(fault)?.ok_or_else(||fault("complete requested block range unavailable"))?;
+                    if block.anchor.height!=height || previous.is_some_and(|digest|digest!=block.parent_block_digest) {return Err(fault("stored range ancestry mismatch"));}
+                    previous=Some(block.anchor.block_digest);
+                    blocks.push(self.block_value(&block)?);
+                }
+                Ok(self.response(query.request_id,json!({"from_height":query.args.from_height.to_string(),
+                    "count":query.args.count.to_string(),"blocks":blocks,
+                    "next_height":query.args.last_height.checked_add(1).map(|h|h.to_string())})))
+            }
             "synergy_getTransactionByBlockHashAndIndex"|"synergy_getTransactionByBlockNumberAndIndex"=>{
                 // Direct calls receive the same method-specific selector checks
                 // as prepared native/HTTP batches, before storage I/O.

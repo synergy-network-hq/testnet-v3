@@ -21,6 +21,7 @@ pub const METHODS: &[&str] = &[
     "synergy_getProof",
     "synergy_getFinalizedProofPageV1",
     "synergy_getBlock",
+    "synergy_getBlockRange",
     "synergy_getBlockReceipts",
     "synergy_getTransaction",
     "synergy_getTransactionByBlockHashAndIndex",
@@ -71,6 +72,7 @@ pub fn preflight(
     expected: &R1NetworkCoordinate,
 ) -> Result<(), RpcError> {
     match method {
+        "synergy_getBlockRange"=>{decode::<BlockRangeArgs>(params,expected)?;}
         "synergy_getTransactionByBlockHashAndIndex"|"synergy_getTransactionByBlockNumberAndIndex"=>{
             let query=decode::<TransactionInBlockArgs>(params,expected)?;
             if (method=="synergy_getTransactionByBlockHashAndIndex")!=matches!(query.args.block,BlockRead::Commitment{..}) { return Err(invalid()); }
@@ -472,5 +474,23 @@ impl ReadArguments for TransactionInBlockArgs {
     type Parsed=TransactionInBlockRead;
     fn parse(self)->Result<Self::Parsed,RpcError> {
         Ok(TransactionInBlockRead {block:BlockArgs{height:self.height,block_commitment:self.block_commitment}.parse()?,index:decimal(&self.index)?})
+    }
+}
+
+/// Four complete source-bounded block projections per local read request.
+/// This is a resource boundary, not a protocol/finality rule.
+pub const MAX_BLOCK_RANGE_COUNT:u64=4;
+#[derive(Debug,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlockRangeArgs {pub from_height:String,pub limit:String}
+#[derive(Debug)]
+pub struct BlockRangeRead {pub from_height:u64,pub last_height:u64,pub count:u64}
+impl ReadArguments for BlockRangeArgs {
+    type Parsed=BlockRangeRead;
+    fn parse(self)->Result<Self::Parsed,RpcError> {
+        let from_height=decimal(&self.from_height)?;let count=decimal(&self.limit)?;
+        if !(1..=MAX_BLOCK_RANGE_COUNT).contains(&count) {return Err(invalid());}
+        let last_height=from_height.checked_add(count-1).ok_or_else(invalid)?;
+        Ok(BlockRangeRead{from_height,last_height,count})
     }
 }

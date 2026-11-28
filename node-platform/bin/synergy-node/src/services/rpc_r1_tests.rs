@@ -272,6 +272,7 @@ fn actual_private_genesis_context_drives_all_registered_typed_read_adapters() {
     let server = native_server(&provider);
     for method in r1_read::METHODS {
         let args = match *method {
+            "synergy_getBlockRange"=>json!({"from_height":"0","limit":"1"}),
             "synergy_getTransactionByBlockHashAndIndex"=>json!({"index":"0","block_commitment":commitment(genesis.block_profile(),&block.anchor.block_digest)}),
             "synergy_getTransactionByBlockNumberAndIndex"=>json!({"height":"0","index":"0"}),
             "synergy_getFinalizedProofPageV1"=>json!({"kind":"finality","height":"0","offset":"0","limit":"65536"}),
@@ -339,6 +340,12 @@ fn actual_private_genesis_context_drives_all_registered_typed_read_adapters() {
         assert_ne!(response["result"], Value::Null, "{method}");
         assert_eq!(budget.used(), 0, "snapshot permit leaked by {method}");
         match *method {
+            "synergy_getBlockRange"=>{
+                assert_eq!(response["result"]["from_height"],"0");assert_eq!(response["result"]["count"],"1");
+                assert_eq!(response["result"]["blocks"].as_array().unwrap().len(),1);
+                assert_eq!(response["result"]["blocks"][0],provider.block_value(&block).unwrap());
+                assert_eq!(response["result"]["next_height"],"1");
+            }
             "synergy_getFinalizedProofPageV1"=>{
                 assert_eq!(BASE64.decode(response["result"]["page"]["value"].as_str().unwrap()).unwrap(),block.public_finality_proof);
                 assert_eq!(response["result"]["next_offset"],Value::Null);
@@ -488,6 +495,23 @@ fn actual_private_genesis_context_drives_all_registered_typed_read_adapters() {
             else{json!({"block_commitment":commitment(genesis.block_profile(),&block.anchor.block_digest),"index":"0"})};
         assert_eq!(provider.r1_read(method,params(&genesis,wrong)).unwrap_err().code,-32602);
     }
+    // Explicit complete range: a future/missing member refuses the entire
+    // request rather than returning an apparently successful prefix.
+    let unavailable=provider.r1_read("synergy_getBlockRange",params(&genesis,json!({"from_height":"0","limit":"2"}))).unwrap_err();
+    assert_eq!(unavailable.code,-32000);
+    for args in [json!({"from_height":"0","limit":"0"}),json!({"from_height":"0","limit":"5"}),
+        json!({"from_height":"18446744073709551615","limit":"2"}),json!({"from_height":"01","limit":"1"})] {
+        assert_eq!(provider.r1_read("synergy_getBlockRange",params(&genesis,args)).unwrap_err().code,-32602);
+    }
+    let mut next_block=block.clone();next_block.anchor.height=1;next_block.parent_block_digest=block.anchor.block_digest;next_block.anchor.block_digest=[0x5b;48];
+    let mut next_tx=tx.clone();next_tx.anchor=next_block.anchor.clone();next_tx.transaction_id=format!("syntxn{}",base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0xa6;48]));
+    next_block.transactions=vec![next_tx.transaction_id.clone()];
+    let mut next_receipt=receipt.clone();next_receipt.transaction=synergy_address::r1_public::TransactionIdentifierPresentation::parse(&next_tx.transaction_id).unwrap();
+    next_block.receipts_root=synergy_state::r1_receipts::receipts_root(&[next_receipt.clone()]).unwrap();
+    synergy_state::r1_finalized::publish_nonproduction_projection_with_receipts(&temp.0,&next_block,state,&[next_tx],&[next_receipt]).unwrap();
+    let result=provider.r1_read("synergy_getBlockRange",params(&genesis,json!({"from_height":"0","limit":"2"}))).unwrap();
+    assert_eq!(result["result"]["blocks"],json!([provider.block_value(&block).unwrap(),provider.block_value(&next_block).unwrap()]));
+    assert_eq!(result["result"]["next_height"],"2");assert_eq!(result["finality_verified_by_rpc"],false);
     // Reassemble every original byte through the actual registered RpcServer;
     // a checksum detects page mix-up but supplies no PoSy verification authority.
     let mut assembled=Vec::new(); let mut offset=0usize;
@@ -519,7 +543,7 @@ fn actual_private_genesis_context_drives_all_registered_typed_read_adapters() {
     }
     let mut wrong=params(&genesis,bound.clone()); wrong["network"]["network_incarnation_commitment"]["value"]=json!("00".repeat(64));
     assert_eq!(provider.r1_read("synergy_getFinalizedProofPageV1",wrong).unwrap_err().code,-32010);
-    assert!(provider.r1_read("synergy_getFinalizedProofPageV1",params(&genesis,json!({"kind":"finality","height":"1","offset":"0","limit":"7"}))).is_err());
+    assert!(provider.r1_read("synergy_getFinalizedProofPageV1",params(&genesis,json!({"kind":"finality","height":"2","offset":"0","limit":"7"}))).is_err());
     let absent_temp=Temp::new();let mut absent_block=block.clone();absent_block.public_finality_proof.clear();
     synergy_state::r1_finalized::publish_nonproduction_projection_with_receipts(&absent_temp.0,&absent_block,state,&[tx.clone()],&[receipt.clone()]).unwrap();
     let absent_provider=Arc::new(CanonicalR1QueryStore::open(absent_temp.0.clone(),Arc::clone(&genesis),runtime(u64::MAX-1),WorldResourceBudget::new(256*1024*1024),capacity()).unwrap());
@@ -555,7 +579,7 @@ fn actual_private_genesis_context_drives_all_registered_typed_read_adapters() {
         provider
             .r1_read(
                 "synergy_getProof",
-                params(&genesis, json!({"address":identity,"at_height":"1"}))
+                params(&genesis, json!({"address":identity,"at_height":"2"}))
             )
             .is_err(),
         "missing historical proof is unavailable, never nonmembership"
@@ -564,7 +588,7 @@ fn actual_private_genesis_context_drives_all_registered_typed_read_adapters() {
         provider
             .r1_read(
                 "synergy_getBlockReceipts",
-                params(&genesis, json!({"height":"1"}))
+                params(&genesis, json!({"height":"2"}))
             )
             .is_err(),
         "missing original receipt evidence is unavailable, never an empty list"

@@ -289,3 +289,15 @@ fn transaction_index_reads_pin_the_exact_selector_and_preserve_u64_without_narro
         assert!(r1_read::preflight(number,request(json!({"height":"0","index":index})),&expected()).is_err());
     }
 }
+
+#[test]
+fn complete_block_ranges_bound_count_and_checked_u64_end_before_io() {
+    use synergy_rpc::r1_read::BlockRangeArgs;
+    for (height,count) in [("0","1"),("1","4"),("18446744073709551615","1")] {
+        assert!(r1_read::decode::<BlockRangeArgs>(request(json!({"from_height":height,"limit":count})),&expected()).is_ok());
+    }
+    for args in [json!({"from_height":"0","limit":"0"}),json!({"from_height":"0","limit":"5"}),
+        json!({"from_height":"18446744073709551615","limit":"2"}),json!({"from_height":"0","limit":1}),json!({"from_height":"0\n","limit":"1"})] {
+        assert!(r1_read::decode::<BlockRangeArgs>(request(args),&expected()).is_err());
+    }
+}
