@@ -6,6 +6,7 @@ pub mod membership;
 pub mod validator_admission;
 pub mod network;
 pub mod preparation;
+pub mod infrastructure_preparation;
 pub mod signing;
 pub mod validator_set;
 pub mod verify;

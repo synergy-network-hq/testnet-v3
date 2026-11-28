@@ -50,6 +50,13 @@ fn policy() -> AegisPolicy {
 }
 fn run_arguments(arguments: &[String]) -> Result<(), String> {
     match arguments {
+        [command, genesis, roster, infrastructure] if command == "prepare-fleet-plan" => {
+            let plan = synergy_genesis::infrastructure_preparation::plan(
+                &read_bounded(genesis, MAX_GENESIS_BYTES)?, &read_bounded(roster, 1024 * 1024)?,
+                &read_bounded(infrastructure, 1024 * 1024)?)?;
+            println!("{}", serde_json::to_string_pretty(&plan).map_err(|e| e.to_string())?);
+            return Ok(());
+        }
         [command] if command == "prepare-schema" => {
             println!("{}", serde_json::to_string_pretty(&synergy_genesis::preparation::input_schemas()).map_err(|e| e.to_string())?);
             return Ok(());
@@ -62,8 +69,8 @@ fn run_arguments(arguments: &[String]) -> Result<(), String> {
             println!("{}", serde_json::to_string_pretty(&plan).map_err(|e| e.to_string())?);
             return Ok(());
         }
-        [command, ..] if matches!(command.as_str(), "prepare-plan" | "prepare-schema") => {
-            return Err("usage: synergy-genesis prepare-plan GENESIS_STAGING_JSON ROSTER_STAGING_JSON | prepare-schema; read-only stdout, no generation or output files".into());
+        [command, ..] if matches!(command.as_str(), "prepare-plan" | "prepare-schema" | "prepare-fleet-plan") => {
+            return Err("usage: synergy-genesis prepare-plan GENESIS_STAGING_JSON ROSTER_STAGING_JSON | prepare-fleet-plan GENESIS_STAGING_JSON ROSTER_STAGING_JSON INFRASTRUCTURE_JSON | prepare-schema; read-only stdout, no generation or output files".into());
         }
         _ => {}
     }

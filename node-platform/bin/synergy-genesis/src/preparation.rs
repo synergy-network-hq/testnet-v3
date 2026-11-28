@@ -60,11 +60,18 @@ public_struct!(StagedState {
     execution_state_root:(), aivm_state_root:(), receipt_root:(), allocation_commitment:(),
     validator_set_commitment:(), system_registry_commitment:(), profile_set_commitment:()
 });
-public_struct!(StagedNativeAsset {
-    token_address: (),
-    decimals: u8,
-    issued_nwei: String
-});
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StagedNativeAsset {
+    pub token_address: (),
+    pub decimals: u8,
+    pub issued_nwei: String,
+    /// Public metadata revision; absent in historical preparation inputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
+}
 public_struct!(StagedContracts { required_deployments:(), deployment_receipts:Vec<()>, no_automatic_historical_redeploy:bool });
 public_struct!(StagedIntegrity {
     genesis_commitment:(), root_approvals:Vec<()>, genesis_schema_profile:(),
@@ -267,6 +274,16 @@ fn plan_for_chain(genesis: &[u8], roster: &[u8], expected: u64) -> Result<Prepar
         || !g.system_contracts.deployment_receipts.is_empty()
         || !g.system_contracts.no_automatic_historical_redeploy
         || !g.integrity.root_approvals.is_empty()
+        || g.initial_state
+            .native_asset
+            .name
+            .as_deref()
+            .is_some_and(|n| n != "Testnet Synergy Coin")
+        || g.initial_state
+            .native_asset
+            .symbol
+            .as_deref()
+            .is_some_and(|s| s != "tSNRG")
         || g.initial_state.native_asset.decimals != 9
         || g.initial_state.native_asset.issued_nwei != "202000000000000000"
     {
@@ -429,8 +446,15 @@ pub fn validate_stage_order(stages: &[Stage]) -> Result<(), String> {
 /// Exact preparation schemas are constructed from the adapter's fixed template.
 /// No schema here is an approved runtime, cryptographic or signing codec.
 pub fn input_schemas() -> Value {
+    let mut genesis = schema_for(&genesis_template(TARGET_CHAIN_ID));
+    // Metadata was added by the supplied revision. The parser and schema both
+    // accept the older preparation shape while enforcing the exact name if set.
+    genesis["properties"]["initial_state"]["properties"]["native_asset"]["required"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|field| field != "name" && field != "symbol");
     json!({"schema":"synergy.genesis-preparation-schemas/1","runtime_compatible":false,
-        "genesis":schema_for(&genesis_template(TARGET_CHAIN_ID)),"roster":schema_for(&roster_template(TARGET_CHAIN_ID))})
+        "genesis":genesis,"roster":schema_for(&roster_template(TARGET_CHAIN_ID))})
 }
 fn schema_for(value: &Value) -> Value {
     match value {
@@ -483,6 +507,28 @@ mod tests {
         plan_for_chain(&g, &r, SYNTHETIC_CHAIN)
     }
 
+    #[test]
+    fn native_asset_name_accepts_exact_metadata_revision_and_old_preparation_shape() {
+        let (mut g, r) = fixture();
+        assert!(synthetic_plan(&g, &r).is_ok());
+        g["initial_state"]["native_asset"]
+            .as_object_mut()
+            .unwrap()
+            .remove("name");
+        g["initial_state"]["native_asset"]
+            .as_object_mut()
+            .unwrap()
+            .remove("symbol");
+        assert!(synthetic_plan(&g, &r).is_ok());
+        g["initial_state"]["native_asset"]["symbol"] = json!("unapproved symbol");
+        assert!(synthetic_plan(&g, &r).is_err());
+        g["initial_state"]["native_asset"]
+            .as_object_mut()
+            .unwrap()
+            .remove("symbol");
+        g["initial_state"]["native_asset"]["name"] = json!("unapproved metadata revision");
+        assert!(synthetic_plan(&g, &r).is_err());
+    }
     #[test]
     fn typed_public_preparation_returns_no_runtime_or_ceremony_output() {
         let (g, r) = fixture();
@@ -683,7 +729,7 @@ mod tests {
         );
     }
     #[test]
-    fn actual_node_address_consumer_refuses_r1_until_profile_adapter_exists() {
+    fn historical_runtime_parser_is_not_silently_broadened_by_candidate_preparation() {
         // Fixed presentation-shaped synthetic input, no derivation or keypair.
         for class in 1..=5 {
             let presentation = format!("synv{class}.2.{}", "A".repeat(64));
@@ -712,7 +758,7 @@ pub fn genesis_template(chain_id: u64) -> Value {
         "validator_roster_file":"config/roster.json","monetary_allocation_file":"config/monetary.json","protocol_configuration_file":"config/protocol.json",
         "system_registry_file":"config/system.json","address_registry_file":"config/address.json","formation_registry_file":"formation/registry.json",
         "formation_result_file":"formation/result.json","release_bindings_file":"formation/release.json",
-        "initial_state":{"balances":null,"bond_positions":null,"registry_state":null,"native_asset":{"token_address":null,"decimals":9,"issued_nwei":"202000000000000000"},
+        "initial_state":{"balances":null,"bond_positions":null,"registry_state":null,"native_asset":{"name":"Testnet Synergy Coin","symbol":"tSNRG","token_address":null,"decimals":9,"issued_nwei":"202000000000000000"},
             "transactions":[],"receipts":[],"historical_state_import":false,"execution_state_root":null,"aivm_state_root":null,"receipt_root":null,"allocation_commitment":null,
             "validator_set_commitment":null,"system_registry_commitment":null,"profile_set_commitment":null},
         "system_contracts":{"required_deployments":null,"deployment_receipts":[],"no_automatic_historical_redeploy":true},
