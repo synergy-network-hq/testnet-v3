@@ -150,36 +150,12 @@ impl UpdateCoordinator<'_> {
             .install
             .install(&staged)
             .map_err(UpdateError::Install)?;
-        self.audit(
-            &staged.release_id,
+        finish_installed_release(
+            self.runtime,
+            self.rollback,
+            self.audit,
+            &install,
             verified.signed.release.sequence,
-            UpdatePhase::Installed,
-            request.timestamp_unix_seconds,
-        )?;
-        let health = self
-            .runtime
-            .health_after_install()
-            .map_err(UpdateError::Runtime)?;
-        if let Err(reason) = HealthGate.check(health) {
-            let rollback = self
-                .rollback
-                .rollback(&install)
-                .map_err(UpdateError::Rollback)?;
-            self.audit(
-                &staged.release_id,
-                verified.signed.release.sequence,
-                UpdatePhase::RolledBack,
-                request.timestamp_unix_seconds,
-            )?;
-            return Err(UpdateError::Unhealthy {
-                reason,
-                restored_release_id: rollback.restored_release_id,
-            });
-        }
-        self.audit(
-            &staged.release_id,
-            verified.signed.release.sequence,
-            UpdatePhase::Healthy,
             request.timestamp_unix_seconds,
         )?;
         Ok(UpdateOutcome::Installed {
@@ -207,6 +183,96 @@ impl UpdateCoordinator<'_> {
     }
 }
 
+fn finish_installed_release(
+    runtime: &dyn UpdateRuntime,
+    rollback: &dyn RollbackCoordinator,
+    audit: &dyn AuditSink,
+    install: &InstallReceipt,
+    sequence: u64,
+    timestamp_unix_seconds: u64,
+) -> Result<(), UpdateError> {
+    let event = |phase| AuditEvent {
+        sequence,
+        release_id: install.release_id.clone(),
+        phase,
+        outcome: AuditOutcome::Succeeded,
+        timestamp_unix_seconds,
+    };
+    if let Err(reason) = audit.record(&event(UpdatePhase::Installed)) {
+        let (recovery, rollback_audit_error) =
+            recover_failed_install(rollback, audit, install, sequence, timestamp_unix_seconds);
+        return Err(UpdateError::PostInstallAudit {
+            reason,
+            recovery,
+            rollback_audit_error,
+        });
+    }
+    check_installed_health(
+        runtime,
+        rollback,
+        audit,
+        install,
+        sequence,
+        timestamp_unix_seconds,
+    )?;
+    // Health has now passed: a failed final audit needs reconciliation, not rollback.
+    audit
+        .record(&event(UpdatePhase::Healthy))
+        .map_err(UpdateError::Audit)
+}
+
+// A failed probe cannot establish that the installed release is safe to retain.
+// Preserve recovery and audit failures alongside the original health failure.
+fn check_installed_health(
+    runtime: &dyn UpdateRuntime,
+    rollback: &dyn RollbackCoordinator,
+    audit: &dyn AuditSink,
+    install: &InstallReceipt,
+    sequence: u64,
+    timestamp_unix_seconds: u64,
+) -> Result<(), UpdateError> {
+    let reason = match runtime.health_after_install() {
+        Ok(health) => match HealthGate.check(health) {
+            Ok(()) => return Ok(()),
+            Err(reason) => reason.to_owned(),
+        },
+        Err(reason) => reason,
+    };
+    let (recovery, rollback_audit_error) =
+        recover_failed_install(rollback, audit, install, sequence, timestamp_unix_seconds);
+    Err(UpdateError::PostInstallHealth {
+        reason,
+        recovery,
+        rollback_audit_error,
+    })
+}
+
+fn recover_failed_install(
+    rollback: &dyn RollbackCoordinator,
+    audit: &dyn AuditSink,
+    install: &InstallReceipt,
+    sequence: u64,
+    timestamp_unix_seconds: u64,
+) -> (Result<crate::RollbackReceipt, String>, Option<String>) {
+    let recovery = rollback.rollback(install);
+    let outcome = match &recovery {
+        Ok(_) => AuditOutcome::Succeeded,
+        Err(reason) => AuditOutcome::Failed {
+            reason: reason.clone(),
+        },
+    };
+    let rollback_audit_error = audit
+        .record(&AuditEvent {
+            sequence,
+            release_id: install.release_id.clone(),
+            phase: UpdatePhase::RolledBack,
+            outcome,
+            timestamp_unix_seconds,
+        })
+        .err();
+    (recovery, rollback_audit_error)
+}
+
 #[derive(Debug)]
 pub enum UpdateError {
     Policy(&'static str),
@@ -222,6 +288,16 @@ pub enum UpdateError {
     Install(String),
     Rollback(String),
     Audit(String),
+    PostInstallAudit {
+        reason: String,
+        recovery: Result<crate::RollbackReceipt, String>,
+        rollback_audit_error: Option<String>,
+    },
+    PostInstallHealth {
+        reason: String,
+        recovery: Result<crate::RollbackReceipt, String>,
+        rollback_audit_error: Option<String>,
+    },
     Unhealthy {
         reason: &'static str,
         restored_release_id: String,
@@ -246,6 +322,31 @@ impl fmt::Display for UpdateError {
                 write!(formatter, "release verification failed: {reason:?}")
             }
             Self::Staging(reason) => write!(formatter, "release staging failed: {reason:?}"),
+            Self::PostInstallHealth {
+                reason,
+                recovery,
+                rollback_audit_error,
+            }
+            | Self::PostInstallAudit {
+                reason,
+                recovery,
+                rollback_audit_error,
+            } => {
+                let kind = if matches!(self, Self::PostInstallAudit { .. }) {
+                    "audit"
+                } else {
+                    "health"
+                };
+                write!(formatter, "post-install {kind} failed ({reason}); ")?;
+                match recovery {
+                    Ok(receipt) => write!(formatter, "restored {}", receipt.restored_release_id)?,
+                    Err(error) => write!(formatter, "rollback failed ({error})")?,
+                }
+                if let Some(error) = rollback_audit_error {
+                    write!(formatter, "; rollback audit failed ({error})")?;
+                }
+                Ok(())
+            }
             Self::Unhealthy {
                 reason,
                 restored_release_id,
@@ -258,3 +359,7 @@ impl fmt::Display for UpdateError {
 }
 
 impl std::error::Error for UpdateError {}
+
+#[cfg(test)]
+#[path = "coordinator_tests.rs"]
+mod tests;
