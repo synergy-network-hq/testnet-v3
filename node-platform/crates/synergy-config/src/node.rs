@@ -21,6 +21,7 @@ pub struct NodeConfiguration {
     pub network_id: String,
     /// Signed new-network context used to bind transport, sync, and PoSy
     /// callers to one chain incarnation. Legacy Genesis formats are excluded.
+    #[serde(default)]
     pub manifest_path: PathBuf,
     /// Selected signed Genesis; CLI preflight/start require authentication against
     /// consensus.authority_trust_key_path before using any network context.
@@ -30,6 +31,11 @@ pub struct NodeConfiguration {
     /// independently authenticated configuration owner. Never commission authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub r1_genesis: Option<R1GenesisSelection>,
+    /// Native managed runtime selections. Values/receipt paths are never an
+    /// admission or startup permit; the concrete owners verify them separately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r1_runtime: Option<R1RuntimeConfiguration>,
+    #[serde(default)]
     pub public_identity_path: PathBuf,
     /// Optional governed Aegis identity-to-public-key bindings for P2P authentication.
     #[serde(default)]
@@ -120,4 +126,30 @@ pub struct R1NicSelection {
     pub profile_catalog_sha256: String,
     pub approvals_path: PathBuf,
     pub expected_nic_hex: String,
+}
+
+/// Explicit runtime policy from the authenticated managed configuration owner.
+/// No boolean, guessed release or default resource budget enables operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct R1RuntimeConfiguration {
+    pub local_node_identity: String,
+    /// Explicit managed process capacity, checked against the shared storage
+    /// pool. No legacy serde capacity default selects this native policy.
+    pub process_world_budget_bytes: usize,
+    /// Relative beneath r1_genesis.managed_root; each original one-use native
+    /// receipt is authenticated/consumed by the existing APQE native owner.
+    pub transport_use_receipts: Vec<PathBuf>,
+    /// Distinct consensus permission; never a transport-use alias.
+    pub consensus_use_receipt: Option<PathBuf>,
+    pub rpc_read_policy: Option<R1RuntimeReadPolicy>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct R1RuntimeReadPolicy {
+    pub request_timeout_ms: u64,
+    pub maximum_hashes: u64,
+    pub maximum_response_bytes: usize,
+    pub public_quota_bytes: usize,
+    pub protected_world_headroom_bytes: usize,
 }

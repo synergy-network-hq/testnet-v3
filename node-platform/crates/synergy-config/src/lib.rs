@@ -27,7 +27,8 @@ pub use loader::{decode, load, ConfigLoadError, MAX_CONFIGURATION_BYTES};
 pub use network::NetworkConfiguration;
 pub use node::{
     ApqeProviderConfiguration, ApqeTransportConfiguration, ApqeTransportProfile, NodeConfiguration,
-    R1GenesisSelection, R1NicSelection, CONFIG_SCHEMA_VERSION,
+    R1GenesisSelection, R1NicSelection, R1RuntimeConfiguration, R1RuntimeReadPolicy,
+    CONFIG_SCHEMA_VERSION,
 };
 pub use p2p::P2pConfiguration;
 pub use rpc::RpcConfiguration;
@@ -57,6 +58,7 @@ mod tests {
             manifest_path: PathBuf::from("/etc/synergy/network-manifest.json"),
             genesis_path: None,
             r1_genesis: None,
+            r1_runtime: None,
             public_identity_path: PathBuf::from("/etc/synergy/public-identity.json"),
             aegis_key_bindings_path: Some(PathBuf::from("/etc/synergy/aegis-bindings.json")),
             aegis_signing_key_path: Some(PathBuf::from("/etc/synergy/aegis-identity.key")),
@@ -297,5 +299,142 @@ mod tests {
         config.etdag.ingress_kem_secret_key_path =
             Some(PathBuf::from("/etc/synergy/keys/ingress.key"));
         assert!(config.validate().is_ok());
+    }
+    fn current_configuration() -> NodeConfiguration {
+        let mut c = configuration(NodeRole::Validator);
+        c.chain_id = u64::MAX - 1;
+        c.network_id = "public-synthetic-current-r1".into();
+        c.manifest_path = PathBuf::new();
+        c.public_identity_path = PathBuf::new();
+        c.aegis_key_bindings_path = None;
+        c.aegis_signing_key_path = None;
+        c.consensus = ConsensusConfiguration::default();
+        c.consensus.mode = ConsensusMode::Observe;
+        c.aegis_provider = Some(ApqeProviderConfiguration {
+            report_path: "/managed/public-fixture/provider/report.json".into(),
+            authenticated_report_sha256: "11".repeat(32),
+        });
+        c.admin_socket_path = "/managed/public-fixture/run/admin.sock".into();
+        c.storage.data_directory = "/managed/public-fixture/state".into();
+        c.storage.world_memory_budget_bytes = 64 * 1024 * 1024;
+        c.r1_genesis = Some(R1GenesisSelection {
+            managed_root: "/managed/public-fixture".into(),
+            core_path: "public/core.bin".into(),
+            approvals_path: "public/approvals.json".into(),
+            pinned_bootstrap_input_path: "public/birth.json".into(),
+            pinned_bootstrap_input_sha256: "12".repeat(32),
+            profile_catalog_path: "public/catalog.bin".into(),
+            profile_catalog_sha256: "13".repeat(32),
+            expected_nic_hex: "14".repeat(64),
+            expected_genesis_hex: "15".repeat(48),
+        });
+        c.r1_runtime = Some(R1RuntimeConfiguration {
+            process_world_budget_bytes: 64 * 1024 * 1024,
+            local_node_identity: format!("synv1.2.{}", "A".repeat(64)),
+            transport_use_receipts: vec!["native/transport-use.json".into()],
+            consensus_use_receipt: None,
+            rpc_read_policy: None,
+        });
+        c
+    }
+    #[test]
+    fn current_configuration_needs_no_legacy_dummy_files_and_grants_no_authority() {
+        let c = current_configuration();
+        assert!(c.validate().is_ok());
+        let mut json = serde_json::to_value(&c).unwrap();
+        json.as_object_mut().unwrap().remove("manifest_path");
+        json.as_object_mut().unwrap().remove("public_identity_path");
+        let decoded: NodeConfiguration = serde_json::from_value(json).unwrap();
+        assert!(decoded.validate().is_ok());
+        // Syntax is not transport/provider/startup qualification.
+        assert!(decoded.require_native_post_quantum_transport().is_err());
+        let mut legacy = configuration(NodeRole::ObserverLight);
+        assert!(legacy.validate().is_ok());
+        legacy.chain_id = 9969;
+        assert!(legacy.validate().is_err());
+    }
+    #[test]
+    fn current_configuration_rejects_legacy_mix_wrong_class_and_unconfined_receipts() {
+        let c = current_configuration();
+        let mut wrong = c.clone();
+        wrong.manifest_path = "/legacy/manifest.json".into();
+        assert!(wrong.validate().is_err());
+        wrong = c.clone();
+        wrong.consensus.authority_binding = Some("/legacy/authority.json".into());
+        assert!(wrong.validate().is_err());
+        wrong = c.clone();
+        wrong.r1_runtime.as_mut().unwrap().local_node_identity =
+            format!("synv5.2.{}", "A".repeat(64));
+        assert!(wrong.validate().is_err());
+        wrong = c.clone();
+        wrong.r1_runtime.as_mut().unwrap().transport_use_receipts[0] = "../escape".into();
+        assert!(wrong.validate().is_err());
+        wrong = c.clone();
+        wrong.storage.data_directory = "/unmanaged/state".into();
+        assert!(wrong.validate().is_err());
+        wrong = c.clone();
+        wrong.r1_genesis.as_mut().unwrap().expected_nic_hex = "00".repeat(64);
+        assert!(wrong.validate().is_err());
+        wrong = c.clone();
+        wrong.consensus.mode = ConsensusMode::ValidateAndVote;
+        wrong.etdag.enabled = true;
+        assert!(wrong.validate().is_err());
+        wrong.r1_runtime.as_mut().unwrap().consensus_use_receipt =
+            Some("native/transport-use.json".into());
+        assert!(wrong.validate().is_err());
+        wrong.r1_runtime.as_mut().unwrap().consensus_use_receipt =
+            Some("native/consensus-use.json".into());
+        assert!(wrong.validate().is_ok());
+        wrong.role = NodeRole::Sentry;
+        assert!(wrong.validate().is_err());
+    }
+    #[test]
+    fn current_public_reads_require_explicit_quota_and_protected_process_headroom() {
+        let mut c = current_configuration();
+        c.rpc.enabled = true;
+        c.rpc.listen_address = Some("127.0.0.1:19001".parse().unwrap());
+        assert!(c.validate().is_err());
+        c.r1_runtime.as_mut().unwrap().rpc_read_policy = Some(R1RuntimeReadPolicy {
+            request_timeout_ms: 1000,
+            maximum_hashes: 64,
+            maximum_response_bytes: 1024,
+            public_quota_bytes: 16 * 1024 * 1024,
+            protected_world_headroom_bytes: 32 * 1024 * 1024,
+        });
+        assert!(c.validate().is_ok());
+        c.r1_runtime
+            .as_mut()
+            .unwrap()
+            .rpc_read_policy
+            .as_mut()
+            .unwrap()
+            .maximum_response_bytes = 64 * 1024 * 1024;
+        assert!(c.validate().is_err());
+        c.r1_runtime
+            .as_mut()
+            .unwrap()
+            .rpc_read_policy
+            .as_mut()
+            .unwrap()
+            .maximum_response_bytes = 1024;
+        c.r1_runtime.as_mut().unwrap().process_world_budget_bytes = 1;
+        assert!(c.validate().is_err());
+        c.r1_runtime.as_mut().unwrap().process_world_budget_bytes = 64 * 1024 * 1024;
+        c.r1_runtime
+            .as_mut()
+            .unwrap()
+            .rpc_read_policy
+            .as_mut()
+            .unwrap()
+            .protected_world_headroom_bytes = 64 * 1024 * 1024;
+        assert!(c.validate().is_err());
+        c.r1_runtime
+            .as_mut()
+            .unwrap()
+            .rpc_read_policy
+            .as_mut()
+            .unwrap()
+            .protected_world_headroom_bytes = 0;
+        assert!(c.validate().is_err());
     }
 }

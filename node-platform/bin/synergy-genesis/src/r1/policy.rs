@@ -558,7 +558,7 @@ impl CompletePolicy {
         })
     }
 }
-fn role_number(role: NodeRole) -> u16 {
+pub(super) fn role_number(role: NodeRole) -> u16 {
     match role {
         NodeRole::Validator => 1,
         NodeRole::Sentry => 2,

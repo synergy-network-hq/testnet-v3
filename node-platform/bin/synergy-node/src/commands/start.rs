@@ -303,13 +303,16 @@ fn advance_lifecycle_readiness(
 /// CLI entry point for the complete configured supervised service graph.
 pub fn run(config_path: &Path) -> Result<(), StartError> {
     let configuration = load(config_path).map_err(StartError::Configuration)?;
+    if crate::services::r1_startup::selected(&configuration) {
+        return start_loaded_configuration(config_path,configuration,Vec::new())?.run();
+    }
     // Fail before custody unlock, lifecycle transition, or listener creation.
     let capacity_authority =
         authority::load(&configuration).map_err(StartError::AuthorityTransition)?;
     validate_processing_memory(&configuration, capacity_authority.as_deref())
         .map_err(StartError::AuthorityTransition)?;
     drop(capacity_authority);
-    start_with_services(config_path, Vec::new())?.run()
+    start_loaded_configuration(config_path, configuration, Vec::new())?.run()
 }
 
 fn load_preflight_configuration(config_path: &Path) -> Result<NodeConfiguration, String> {
@@ -329,6 +332,7 @@ fn load_preflight_configuration(config_path: &Path) -> Result<NodeConfiguration,
 /// services, opens a database, reads private custody, or binds a listener.
 pub fn preflight(config_path: &Path) -> Result<serde_json::Value, String> {
     let configuration = load_preflight_configuration(config_path)?;
+    if crate::services::r1_startup::selected(&configuration) { return crate::services::r1_startup::preflight(&configuration); }
     if configuration.apqe_transport.is_some() {
         crate::services::apqe_transport::preflight(&configuration)?;
     } else {
@@ -437,9 +441,26 @@ fn preflight_voting_binding(
 /// healthy by this boundary.
 pub fn start_with_services(
     config_path: &Path,
-    mut registrations: Vec<ServiceRegistration>,
+    registrations: Vec<ServiceRegistration>,
 ) -> Result<StartedNode, StartError> {
     let configuration = load(config_path).map_err(StartError::Configuration)?;
+    start_loaded_configuration(config_path, configuration, registrations)
+}
+/// Retain the exact parsed selection across preflight and construction. A
+/// concurrent config replacement cannot switch a current operation to legacy.
+fn start_loaded_configuration(
+    config_path:&Path,
+    configuration:NodeConfiguration,
+    mut registrations:Vec<ServiceRegistration>,
+)->Result<StartedNode,StartError>{
+    if crate::services::r1_startup::selected(&configuration) {
+        if !registrations.is_empty() { return Err(StartError::ServiceRegistration{service:"current-native-runtime",reason:"external supplied services cannot authorize current native startup".into()}); }
+        let current=crate::services::r1_startup::VerifiedR1StartupInputs::authenticate(&configuration).map_err(StartError::AuthorityTransition)?;
+        // This branch never enters the historical authority/JSON32 store graph.
+        // Actual native owners/permissions must replace this explicit missing
+        // graph before a current lifecycle or socket can be started.
+        return Err(StartError::ServiceRegistration{service:"current-native-runtime",reason:current.unavailable_owner_reason()});
+    }
     if configuration.apqe_transport.is_some() {
         crate::services::apqe_transport::verify_runtime(&configuration)
             .map_err(StartError::AuthorityTransition)?;

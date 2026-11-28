@@ -10694,6 +10694,7 @@ fn prepare_socket_fixture_with_protocol(
             manifest_path: root.join("manifest.json"),
             genesis_path: (secure || ethereum.is_some()).then(|| root.join("genesis.sgen")),
             r1_genesis: None,
+            r1_runtime: None,
             public_identity_path: dir.join("identity.json"),
             aegis_key_bindings_path: Some(root.join("bindings.json")),
             aegis_signing_key_path: Some(dir.join("transport.key")),

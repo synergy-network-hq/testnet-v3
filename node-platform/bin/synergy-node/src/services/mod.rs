@@ -29,6 +29,7 @@ mod network_secure;
 mod owned_service;
 pub mod posy;
 pub(crate) mod posy_r1;
+pub(crate) mod r1_startup;
 pub(crate) mod preparation;
 pub(crate) mod processing_pipeline;
 mod processing_handoff;

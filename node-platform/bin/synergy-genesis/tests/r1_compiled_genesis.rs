@@ -109,6 +109,7 @@ fn actual_compiled_genesis_recomputes_state_and_requires_both_native_quorums() {
         bytes(f["receipts_root48_hex"].as_str().unwrap())
     );
     assert_eq!(verified.initial_validator_keys().len(), 1);
+    assert!(matches!(verified.initial_runtime_admission_registry(), Err(r1::GenesisError::FormationUnavailable)), "real root approvals for a schema1 fixture cannot supply runtime registry authority");
     assert_eq!(
         verified.block_profile().name,
         synergy_posy::r1::BLOCK_PROFILE_NAME

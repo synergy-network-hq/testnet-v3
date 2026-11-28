@@ -35,6 +35,20 @@ pub enum ProfileKind {
     FormationInput = 21,
     NativeTransaction = 22,
     ExecutionPayload = 23,
+    // Declared candidate definitions only. ALL stays the exact23 selected set
+    // until the coordinated owner freeze; these cannot enter a catalog yet.
+    CompleteFormation = 24,
+    InitialBootstrapScore = 25,
+    ProtocolProfile = 26,
+    FormationAssignment = 27,
+    PoSySchedule = 28,
+    Custody = 29,
+    FormationTransport = 30,
+    RpcResponse = 31,
+    InitialWalletEnrollment = 32,
+    NativeRuntimeUse = 33,
+    NativeFormationUse = 34,
+    RuntimeAdmissionRegistry = 35,
 }
 impl ProfileKind {
     pub const ALL: [Self; 23] = [
@@ -87,6 +101,18 @@ impl ProfileKind {
             Self::FormationInput => super::formation::INPUT_PROFILE,
             Self::NativeTransaction => synergy_transaction::r1::PROFILE_NAME,
             Self::ExecutionPayload => synergy_execution::r1_payload::PROFILE_NAME,
+            Self::CompleteFormation => super::complete_formation::FORMATION_PROFILE,
+            Self::InitialBootstrapScore => super::complete_formation::INITIAL_SCORE_PROFILE,
+            Self::ProtocolProfile => synergy_protocol_types::protocol_profile_r1::PROFILE_NAME,
+            Self::FormationAssignment => super::complete_formation::ASSIGNMENT_PROFILE,
+            Self::PoSySchedule => synergy_posy::r1::SCHEDULE_PROFILE_NAME,
+            Self::Custody => "APQE-CUSTODY-R1",
+            Self::FormationTransport => synergy_address_engine::apqe::formation_channel::PROFILE.name,
+            Self::RpcResponse => synergy_protocol_types::r1_rpc_response::PROFILE_NAME,
+            Self::InitialWalletEnrollment => synergy_execution::r1_enrollment::PROFILE_NAME,
+            Self::NativeRuntimeUse => synergy_address_engine::apqe::managed_creation::runtime_use::PROFILE.name,
+            Self::NativeFormationUse => synergy_address_engine::apqe::managed_creation::formation_use::PROFILE.name,
+            Self::RuntimeAdmissionRegistry => synergy_address_engine::apqe::managed_runtime_transport::PROFILE.name,
         }
     }
     pub fn revision(self) -> u32 {
@@ -112,6 +138,18 @@ impl ProfileKind {
  Self::FormationInput=>super::formation::INPUT_SCHEMA,
  Self::NativeTransaction=>synergy_transaction::r1::PROFILE_SCHEMA.as_bytes(),
  Self::ExecutionPayload=>synergy_execution::r1_payload::PROFILE_SCHEMA.as_bytes(),
+ Self::CompleteFormation=>super::complete_formation::FORMATION_FIELDS_SCHEMA,
+ Self::InitialBootstrapScore=>super::complete_formation::INITIAL_SCORE_SCHEMA,
+ Self::ProtocolProfile=>synergy_protocol_types::protocol_profile_r1::PROFILE_SCHEMA,
+ Self::FormationAssignment=>super::complete_formation::ASSIGNMENT_SCHEMA,
+ Self::PoSySchedule=>synergy_posy::r1::SCHEDULE_PROFILE_SCHEMA,
+ Self::Custody=>synergy_address_engine::apqe::custody_binding_r1::PROFILE_SCHEMA,
+ Self::FormationTransport=>synergy_address_engine::apqe::formation_channel::PROFILE_SCHEMA,
+ Self::RpcResponse=>synergy_protocol_types::r1_rpc_response::PROFILE_SCHEMA,
+ Self::InitialWalletEnrollment=>synergy_execution::r1_enrollment::PROFILE_SCHEMA.as_bytes(),
+ Self::NativeRuntimeUse=>synergy_address_engine::apqe::managed_creation::runtime_use::PROFILE_SCHEMA,
+ Self::NativeFormationUse=>synergy_address_engine::apqe::managed_creation::formation_use::PROFILE_SCHEMA,
+ Self::RuntimeAdmissionRegistry=>synergy_address_engine::apqe::managed_runtime_transport::PROFILE_SCHEMA,
  Self::NodePossession=>b"F(IDENTITY.NODE.POSSESSION,[APQE-NODE-POSSESSION,1],N,[namespace,raw48,completeKeyRecord,currentPolicyCommit64,enrollment_nonce32]);pure-context=SYNERGY.NODE.POP.R1;ML-DSA-65|87;proof-for-each-distinct-complete-key",
  Self::NodeRoleBinding=>b"KeySet=SHA3-512(F(IDENTITY.NODE.ROLE-KEY-SET,[APQE-NODE-ROLE-BINDING,1],N,[sortedCompleteRoleKeys]));F(IDENTITY.NODE.ROLE-BINDING,[APQE-NODE-ROLE-BINDING,1],N,[namespace,raw48,policy64,keyset64,nonce32,epochU64]);pure-context=SYNERGY.NODE.ROLE-BINDING.R1;ordinary-threshold-controller-indices",
  Self::AccountPossession=>b"F(IDENTITY.ACCOUNT.POSSESSION,[APQE-ACCOUNT-POSSESSION,1],N,[namespace,raw48,completeKeyRecord,policyCommit64,enrollment_nonce32]);pure-context=SYNERGY.ACCOUNT.POP.R1;every-controller;epoch=1;transaction-nonce=0;synm-synu-threshold>=2",

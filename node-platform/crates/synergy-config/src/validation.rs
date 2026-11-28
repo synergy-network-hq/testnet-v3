@@ -108,6 +108,16 @@ impl NodeConfiguration {
             return Err(invalid("chain_id", "must be nonzero"));
         }
         require_identifier("network_id", &self.network_id)?;
+        let current_r1 = self.r1_genesis.is_some();
+        if current_r1 {
+            validate_current_r1(self)?;
+        } else if self.r1_runtime.is_some() || matches!(self.chain_id, 9969 | 469) {
+            return Err(invalid(
+                "r1_genesis",
+                "current native runtime requires its explicit complete R1 selection",
+            ));
+        }
+
         if let Some(provider) = &self.aegis_provider {
             require_absolute("aegis_provider.report_path", &provider.report_path)?;
             let digest = &provider.authenticated_report_sha256;
@@ -180,9 +190,11 @@ impl NodeConfiguration {
                 ));
             }
         }
-        require_absolute("manifest_path", &self.manifest_path)?;
-        require_absolute("public_identity_path", &self.public_identity_path)?;
-        if self.apqe_transport.is_none() {
+        if !current_r1 {
+            require_absolute("manifest_path", &self.manifest_path)?;
+            require_absolute("public_identity_path", &self.public_identity_path)?;
+        }
+        if !current_r1 && self.apqe_transport.is_none() {
             let aegis_bindings = self
                 .aegis_key_bindings_path
                 .as_deref()
@@ -278,88 +290,120 @@ impl NodeConfiguration {
                 "timeouts and catch-up bound are not internally consistent",
             ));
         }
-        match self.consensus.mode {
-            ConsensusMode::ValidateAndVote => {
-                if self.role != NodeRole::Validator {
-                    return Err(role_error(
-                        "consensus.mode",
-                        "only validator-role nodes may request voting components",
-                    ));
+        if current_r1 {
+            match self.consensus.mode {
+                ConsensusMode::ValidateAndVote => {
+                    if self.role != NodeRole::Validator || !self.etdag.enabled {
+                        return Err(role_error(
+                            "consensus.mode",
+                            "current voting requires Validator role and native ETDAG",
+                        ));
+                    }
+                    if self
+                        .r1_runtime
+                        .as_ref()
+                        .and_then(|r| r.consensus_use_receipt.as_ref())
+                        .is_none()
+                    {
+                        return Err(invalid("r1_runtime.consensus_use_receipt","current voting requires a distinct native consensus permission; path syntax is not authorization"));
+                    }
                 }
-                let binding = self.consensus.authority_binding.as_deref().ok_or_else(|| {
-                    role_error(
-                        "consensus.authority_binding",
-                        "voting requires an explicit verified authority binding",
-                    )
-                })?;
-                require_absolute("consensus.authority_binding", binding)?;
-                let trust = self
-                    .consensus
-                    .authority_trust_key_path
-                    .as_deref()
-                    .ok_or_else(|| {
+                ConsensusMode::Observe | ConsensusMode::Disabled => {
+                    if self
+                        .r1_runtime
+                        .as_ref()
+                        .is_some_and(|r| r.consensus_use_receipt.is_some())
+                    {
+                        return Err(invalid(
+                            "r1_runtime.consensus_use_receipt",
+                            "nonvoting mode cannot accept a consensus use permission",
+                        ));
+                    }
+                }
+            }
+        } else {
+            match self.consensus.mode {
+                ConsensusMode::ValidateAndVote => {
+                    if self.role != NodeRole::Validator {
+                        return Err(role_error(
+                            "consensus.mode",
+                            "only validator-role nodes may request voting components",
+                        ));
+                    }
+                    let binding = self.consensus.authority_binding.as_deref().ok_or_else(|| {
                         role_error(
-                            "consensus.authority_trust_key_path",
-                            "voting requires a pinned authority trust root",
+                            "consensus.authority_binding",
+                            "voting requires an explicit verified authority binding",
                         )
                     })?;
-                require_absolute("consensus.authority_trust_key_path", trust)?;
-                if self.apqe_transport.is_none() {
-                    let signing_key =
-                        self.consensus.signing_key_path.as_deref().ok_or_else(|| {
+                    require_absolute("consensus.authority_binding", binding)?;
+                    let trust = self
+                        .consensus
+                        .authority_trust_key_path
+                        .as_deref()
+                        .ok_or_else(|| {
                             role_error(
-                                "consensus.signing_key_path",
-                                "voting requires a provisioned consensus signing key",
+                                "consensus.authority_trust_key_path",
+                                "voting requires a pinned authority trust root",
                             )
                         })?;
-                    require_absolute("consensus.signing_key_path", signing_key)?;
+                    require_absolute("consensus.authority_trust_key_path", trust)?;
+                    if self.apqe_transport.is_none() {
+                        let signing_key =
+                            self.consensus.signing_key_path.as_deref().ok_or_else(|| {
+                                role_error(
+                                    "consensus.signing_key_path",
+                                    "voting requires a provisioned consensus signing key",
+                                )
+                            })?;
+                        require_absolute("consensus.signing_key_path", signing_key)?;
+                    }
+                    if !self.etdag.enabled {
+                        return Err(role_error(
+                            "etdag.enabled",
+                            "validator voting requires verified ETDAG proposal material",
+                        ));
+                    }
+                    if self.apqe_transport.is_none() && self.vpn.mode != VpnMode::Required {
+                        return Err(role_error(
+                            "vpn.mode",
+                            "validator voting requires the authenticated validator overlay",
+                        ));
+                    }
                 }
-                if !self.etdag.enabled {
-                    return Err(role_error(
-                        "etdag.enabled",
-                        "validator voting requires verified ETDAG proposal material",
-                    ));
-                }
-                if self.apqe_transport.is_none() && self.vpn.mode != VpnMode::Required {
-                    return Err(role_error(
-                        "vpn.mode",
-                        "validator voting requires the authenticated validator overlay",
-                    ));
-                }
-            }
-            ConsensusMode::Observe => {
-                let binding = self.consensus.authority_binding.as_deref().ok_or_else(|| {
-                    role_error(
-                        "consensus.authority_binding",
-                        "observation requires verified authority",
-                    )
-                })?;
-                let trust = self
-                    .consensus
-                    .authority_trust_key_path
-                    .as_deref()
-                    .ok_or_else(|| {
+                ConsensusMode::Observe => {
+                    let binding = self.consensus.authority_binding.as_deref().ok_or_else(|| {
                         role_error(
-                            "consensus.authority_trust_key_path",
-                            "observation requires a pinned authority trust root",
+                            "consensus.authority_binding",
+                            "observation requires verified authority",
                         )
                     })?;
-                require_absolute("consensus.authority_binding", binding)?;
-                require_absolute("consensus.authority_trust_key_path", trust)?;
-            }
-            ConsensusMode::Disabled => {
-                if self.consensus.authority_binding.is_some()
-                    || self.consensus.authority_trust_key_path.is_some()
-                    || self.consensus.signing_key_path.is_some()
-                {
-                    return Err(role_error(
-                        "consensus.authority_binding",
-                        "disabled consensus cannot accept authority material",
-                    ));
+                    let trust = self
+                        .consensus
+                        .authority_trust_key_path
+                        .as_deref()
+                        .ok_or_else(|| {
+                            role_error(
+                                "consensus.authority_trust_key_path",
+                                "observation requires a pinned authority trust root",
+                            )
+                        })?;
+                    require_absolute("consensus.authority_binding", binding)?;
+                    require_absolute("consensus.authority_trust_key_path", trust)?;
+                }
+                ConsensusMode::Disabled => {
+                    if self.consensus.authority_binding.is_some()
+                        || self.consensus.authority_trust_key_path.is_some()
+                        || self.consensus.signing_key_path.is_some()
+                    {
+                        return Err(role_error(
+                            "consensus.authority_binding",
+                            "disabled consensus cannot accept authority material",
+                        ));
+                    }
                 }
             }
         }
-
         if let Some(path) = self.etdag.ingress_kem_secret_key_path.as_deref() {
             require_absolute("etdag.ingress_kem_secret_key_path", path)?;
         }
@@ -643,3 +687,226 @@ impl fmt::Display for ConfigError {
 }
 
 impl std::error::Error for ConfigError {}
+
+fn relative_managed(field: &'static str, path: &Path) -> Result<(), ConfigError> {
+    use std::path::Component;
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|c| !matches!(c, Component::Normal(_)))
+        || path.to_str().is_none_or(|s| {
+            s.split('/')
+                .any(|p| p.is_empty() || p == "." || p == ".." || p.starts_with("._"))
+                || s.contains(['\\', ':'])
+                || s.chars().any(char::is_control)
+        })
+    {
+        return Err(invalid(
+            field,
+            "requires a confined relative managed-root path",
+        ));
+    }
+    Ok(())
+}
+fn within_root(field: &'static str, path: &Path, root: &Path) -> Result<(), ConfigError> {
+    require_absolute(field, path)?;
+    let relative = path.strip_prefix(root).map_err(|_| {
+        invalid(
+            field,
+            "must remain beneath the current managed platform root",
+        )
+    })?;
+    relative_managed(field, relative)
+}
+fn lower_nonzero_hex(field: &'static str, s: &str, bytes: usize) -> Result<(), ConfigError> {
+    if s.len() != bytes * 2
+        || !s
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        || s.bytes().all(|b| b == b'0')
+    {
+        return Err(invalid(
+            field,
+            "requires exact nonzero lowercase hex at the selected width",
+        ));
+    }
+    Ok(())
+}
+fn validate_current_r1(c: &NodeConfiguration) -> Result<(), ConfigError> {
+    let g = c
+        .r1_genesis
+        .as_ref()
+        .ok_or(invalid("r1_genesis", "missing current selection"))?;
+    let r = c.r1_runtime.as_ref().ok_or(invalid(
+        "r1_runtime",
+        "explicit native runtime policy is required; no production defaults",
+    ))?;
+    require_absolute("r1_genesis.managed_root", &g.managed_root)?;
+    if g.managed_root.parent().is_none()
+        || g.managed_root.components().any(|p| {
+            matches!(
+                p,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err(invalid(
+            "r1_genesis.managed_root",
+            "requires a concrete managed platform root",
+        ));
+    }
+    if !c.manifest_path.as_os_str().is_empty()
+        || !c.public_identity_path.as_os_str().is_empty()
+        || c.genesis_path.is_some()
+        || c.aegis_key_bindings_path.is_some()
+        || c.aegis_signing_key_path.is_some()
+        || c.apqe_transport.is_some()
+        || c.consensus.authority_binding.is_some()
+        || c.consensus.authority_trust_key_path.is_some()
+        || c.consensus.signing_key_path.is_some()
+        || c.consensus.authority_recovery_certificate_path.is_some()
+        || c.consensus.autonomous_epoch_activation.is_some()
+        || c.consensus.managed_wallet_dispatch_release.is_some()
+        || c.etdag.ingress_kem_secret_key_path.is_some()
+    {
+        return Err(invalid("r1_runtime","current selection cannot carry historical manifest/identity/authority/transport/signing material"));
+    }
+    for (name, path) in [
+        ("r1_genesis.core_path", &g.core_path),
+        ("r1_genesis.approvals_path", &g.approvals_path),
+        (
+            "r1_genesis.pinned_bootstrap_input_path",
+            &g.pinned_bootstrap_input_path,
+        ),
+        ("r1_genesis.profile_catalog_path", &g.profile_catalog_path),
+    ] {
+        relative_managed(name, path)?;
+    }
+    lower_nonzero_hex("r1_genesis.expected_nic_hex", &g.expected_nic_hex, 64)?;
+    lower_nonzero_hex(
+        "r1_genesis.expected_genesis_hex",
+        &g.expected_genesis_hex,
+        48,
+    )?;
+    lower_nonzero_hex(
+        "r1_genesis.profile_catalog_sha256",
+        &g.profile_catalog_sha256,
+        32,
+    )?;
+    lower_nonzero_hex(
+        "r1_genesis.pinned_bootstrap_input_sha256",
+        &g.pinned_bootstrap_input_sha256,
+        32,
+    )?;
+    if r.process_world_budget_bytes == 0
+        || r.process_world_budget_bytes != c.storage.world_memory_budget_bytes
+    {
+        return Err(invalid(
+            "r1_runtime.process_world_budget_bytes",
+            "requires the explicit native process capacity matching the real shared pool",
+        ));
+    }
+    for (field, path) in [
+        ("update.catalog_path", c.update.catalog_path.as_deref()),
+        (
+            "update.release_signer_public_key_path",
+            c.update.release_signer_public_key_path.as_deref(),
+        ),
+        (
+            "update.staging_directory",
+            c.update.staging_directory.as_deref(),
+        ),
+    ] {
+        if let Some(path) = path {
+            within_root(field, path, &g.managed_root)?;
+        }
+    }
+    let class = match c.role {
+        NodeRole::Validator | NodeRole::Sentry | NodeRole::Archive | NodeRole::ConsensusAudit => {
+            synergy_protocol_types::NodeClass::ConsensusAndChainIntegrity
+        }
+        NodeRole::CrossChain | NodeRole::Witness | NodeRole::Oracle | NodeRole::UmaCoordinator => {
+            synergy_protocol_types::NodeClass::Interoperability
+        }
+        NodeRole::SynqExecution
+        | NodeRole::NetworkAnalytics
+        | NodeRole::AegisCryptography
+        | NodeRole::DataAvailability => {
+            synergy_protocol_types::NodeClass::ExecutionDataAndCryptography
+        }
+        NodeRole::AiCompute
+        | NodeRole::AiCoordination
+        | NodeRole::AiData
+        | NodeRole::AiAssurance => synergy_protocol_types::NodeClass::AiAndIntelligence,
+        _ => synergy_protocol_types::NodeClass::ServiceAndAccess,
+    };
+    synergy_protocol_types::R1NodePresentation::parse(&r.local_node_identity,class).map_err(|_|invalid("r1_runtime.local_node_identity","requires a full-width current node presentation for the selected role class; syntax grants no membership"))?;
+    if r.transport_use_receipts.is_empty() || r.transport_use_receipts.len() > 4 {
+        return Err(invalid(
+            "r1_runtime.transport_use_receipts",
+            "requires bounded explicit native use receipt selections",
+        ));
+    }
+    let mut paths = BTreeSet::new();
+    for path in &r.transport_use_receipts {
+        relative_managed("r1_runtime.transport_use_receipts", path)?;
+        if !paths.insert(path) {
+            return Err(invalid(
+                "r1_runtime.transport_use_receipts",
+                "duplicate receipt path",
+            ));
+        }
+    }
+    if let Some(path) = &r.consensus_use_receipt {
+        relative_managed("r1_runtime.consensus_use_receipt", path)?;
+        if paths.contains(path) {
+            return Err(invalid(
+                "r1_runtime.consensus_use_receipt",
+                "consensus permission cannot alias a transport permission",
+            ));
+        }
+    }
+    let provider = c.aegis_provider.as_ref().ok_or(invalid(
+        "aegis_provider",
+        "current verification requires the explicit authenticated native provider report",
+    ))?;
+    within_root(
+        "aegis_provider.report_path",
+        &provider.report_path,
+        &g.managed_root,
+    )?;
+    within_root(
+        "storage.data_directory",
+        &c.storage.data_directory,
+        &g.managed_root,
+    )?;
+    within_root("admin_socket_path", &c.admin_socket_path, &g.managed_root)?;
+    if c.rpc.enabled {
+        let p = r.rpc_read_policy.as_ref().ok_or(invalid(
+            "r1_runtime.rpc_read_policy",
+            "current public RPC requires explicit native quota and protected headroom",
+        ))?;
+        if p.request_timeout_ms == 0
+            || p.maximum_hashes == 0
+            || p.maximum_response_bytes < 256
+            || p.maximum_response_bytes > 64 * 1024 * 1024 - 1024
+            || p.public_quota_bytes == 0
+            || p.protected_world_headroom_bytes == 0
+            || p.public_quota_bytes
+                .checked_add(p.protected_world_headroom_bytes)
+                .is_none_or(|n| n > c.storage.world_memory_budget_bytes)
+        {
+            return Err(invalid(
+                "r1_runtime.rpc_read_policy",
+                "invalid explicit bounded read capacity or insufficient protected process headroom",
+            ));
+        }
+    } else if r.rpc_read_policy.is_some() {
+        return Err(invalid(
+            "r1_runtime.rpc_read_policy",
+            "disabled RPC cannot carry a public read quota",
+        ));
+    }
+    Ok(())
+}
