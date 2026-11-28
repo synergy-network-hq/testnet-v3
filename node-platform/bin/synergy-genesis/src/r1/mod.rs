@@ -5,6 +5,7 @@ pub mod account;
 pub mod artifact_matrix;
 pub mod compiler;
 pub mod complete_formation;
+pub mod consensus_use;
 mod decode;
 pub mod formation;
 pub mod formation_fence;
