@@ -50,6 +50,24 @@ fn policy() -> AegisPolicy {
 }
 fn run_arguments(arguments: &[String]) -> Result<(), String> {
     match arguments {
+        [command] if command == "prepare-schema" => {
+            println!("{}", serde_json::to_string_pretty(&synergy_genesis::preparation::input_schemas()).map_err(|e| e.to_string())?);
+            return Ok(());
+        }
+        [command, genesis, roster] if command == "prepare-plan" => {
+            let plan = synergy_genesis::preparation::plan(
+                &read_bounded(genesis, MAX_GENESIS_BYTES)?,
+                &read_bounded(roster, 1024 * 1024)?,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&plan).map_err(|e| e.to_string())?);
+            return Ok(());
+        }
+        [command, ..] if matches!(command.as_str(), "prepare-plan" | "prepare-schema") => {
+            return Err("usage: synergy-genesis prepare-plan GENESIS_STAGING_JSON ROSTER_STAGING_JSON | prepare-schema; read-only stdout, no generation or output files".into());
+        }
+        _ => {}
+    }
+    match arguments {
         [command, request, output] if command == "wallet-release-transcript" => {
             return wallet_release_cli::run(request, None, output);
         }
@@ -68,6 +86,14 @@ fn run_arguments(arguments: &[String]) -> Result<(), String> {
         || matches!(arguments, [c,_,_,_] if c == "verify-binding");
     if !requires_provider && !matches!(arguments, [c,_] if c == "hash") {
         return Err(format!("usage: synergy-genesis <hash UNSIGNED|sign UNSIGNED KEY_ID SECRET_KEY TRUST_PUBLIC_KEY OUTPUT|verify SIGNED TRUST_PUBLIC_KEY|verify-binding SIGNED TRUST_PUBLIC_KEY AUTHORITY> [--apqe-report ABS --apqe-report-sha256 HEX]\n{}", wallet_release_cli::USAGE));
+    }
+    // Read only the bounded public request to identify the target. Reject 9969
+    // before provider loading, private-key inspection, signing or output writes.
+    if let [command, input, ..] = arguments {
+        if command == "sign" {
+            let unsigned: UnsignedGenesis = decode(input, MAX_GENESIS_BYTES)?;
+            synergy_genesis::preparation::require_ceremony_for_chain(unsigned.network.chain_id)?;
+        }
     }
     let engine = provider
         .map(|(report, digest)| {
@@ -210,6 +236,26 @@ mod tests {
     use super::*;
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|s| s.to_string()).collect()
+    }
+    #[test]
+    fn preparation_target_signing_refuses_before_provider_secret_or_output_access() {
+        let root=std::env::temp_dir().join(format!("synergy-preparation-guard-test-{}",std::process::id()));
+        fs::create_dir(&root).unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {fn drop(&mut self){let _=fs::remove_dir_all(&self.0);}}
+        let _cleanup=Cleanup(root.clone());
+        let input=root.join("public-empty-request.json");
+        // Target number only; all identity/key/state/commitment outputs absent.
+        let request=serde_json::json!({"format_version":2,"network":{"chain_id":9969,"network_id":"","protocol_version":"","activation_unix":0},
+            "validators":[],"etdag":{"parameters":synergy_etdag::EtdagParameters::default(),"cryptographic_profile_root":"","ingress_kem_registry_root":""},
+            "initial_state_root":"","authority_trust_key_id":""});
+        fs::write(&input,serde_json::to_vec(&request).unwrap()).unwrap();
+        let output=root.join("must-not-exist.json");
+        let error=run_arguments(&vec!["sign".into(),input.display().to_string(),"unset".into(),
+            root.join("nonexistent-secret").display().to_string(),root.join("nonexistent-public").display().to_string(),output.display().to_string(),
+            "--apqe-report".into(),root.join("nonexistent-provider").display().to_string(),"--apqe-report-sha256".into(),"invalid-digest".into()]).unwrap_err();
+        assert_eq!(error,synergy_genesis::preparation::CEREMONY_REQUIRED);
+        assert!(!output.exists());assert_eq!(fs::read_dir(&root).unwrap().count(),1);
     }
     #[test]
     fn cryptographic_cli_requires_explicit_provider_and_hash_remains_offline() {

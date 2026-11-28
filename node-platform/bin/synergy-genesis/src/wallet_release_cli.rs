@@ -45,6 +45,12 @@ enum Request {
 }
 
 impl Request {
+    fn chain_id(&self) -> u64 {
+        match self {
+            Self::Dispatch { payload, .. } | Self::NativeVerificationQualification { payload, .. } => payload.policy.chain_id,
+            Self::IssuerDelegation { origin, .. } => origin.network.chain_id,
+        }
+    }
     fn signing_input(&self) -> Result<(KeyId, SigningContext, Vec<u8>), String> {
         let (key, context, bytes) = match self {
             Self::Dispatch {
@@ -166,6 +172,7 @@ pub(super) fn run(request: &str, signature: Option<&str>, output: &str) -> Resul
         );
     }
     let request: Request = super::decode(request, MAX_REQUEST)?;
+    synergy_genesis::preparation::require_ceremony_for_chain(request.chain_id())?;
     let (key, context, preimage) = request.signing_input()?;
     let bytes = match signature {
         Some(path) => {

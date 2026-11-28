@@ -36,6 +36,7 @@ impl UnsignedGenesis {
     }
 
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, String> {
+        crate::preparation::require_ceremony_for_chain(self.network.chain_id)?;
         self.validate()?;
         serde_json::to_vec(self).map_err(|error| format!("encode genesis: {error}"))
     }

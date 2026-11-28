@@ -4389,6 +4389,7 @@ dependencies = [
  "synergy-address-engine",
  "synergy-aegis",
  "synergy-block",
+ "synergy-config",
  "synergy-etdag",
  "synergy-governance",
  "synergy-posy",

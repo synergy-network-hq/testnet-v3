@@ -19,6 +19,7 @@ pub use wallet_dispatch::{
 
 impl AuthorityPayload {
     pub fn signing_bytes(&self) -> Result<Vec<u8>, String> {
+        crate::preparation::require_ceremony_for_chain(self.chain_id)?;
         let bytes = serde_json::to_vec(self).map_err(|e| format!("encode authority: {e}"))?;
         if bytes.len() > 1024 * 1024 - AUTHORITY_SIGNING_DOMAIN.len() {
             return Err("authority transcript exceeds its bound".into());
