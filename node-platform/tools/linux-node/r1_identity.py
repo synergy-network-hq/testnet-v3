@@ -3,6 +3,8 @@
 No derivation/CBOR/crypto is duplicated here. APQE validates the full typed scope;
 this layer binds its public transport to the existing exact native request grant.
 """
+import base64
+import binascii
 import json
 import os
 import re
@@ -76,6 +78,36 @@ def run(controller,request):
         return result
 
 
+def preview(controller,request):
+    """Read exact APQE semantics using installed code, without consuming a grant."""
+    from controller import canonical,request_digest,require
+    from lifecycle import _lifecycle_lock,_sealed_receipt
+    from synergy_linux import native
+    p=request['parameters'];validate(p)
+    with _lifecycle_lock(controller.root):
+        _sealed_receipt(controller.root)
+        result=json.loads(native([controller.root/'bin/synergy-keytool',
+            'inspect-managed-r1-creation',canonical(p).decode('utf-8')]))
+        require(isinstance(result,dict) and set(result)=={'schema','inspection','runtime_authority_granted'}
+                and result['schema']=='synergy-r1-managed-creation-preview-v1'
+                and result['runtime_authority_granted'] is False,
+                'Native R1 semantic preview differs')
+        inspected=result['inspection']
+        require(isinstance(inspected,dict) and inspected.get('authority_granted') is False
+                and isinstance(inspected.get('scope'),dict)
+                and inspected['scope'].get('authority_granted') is False
+                and all(inspected.get(name)==p[name] for name in (
+                    'release_id','slot_ref','operation_nonce_hex','manifest_sha256',
+                    'provider_report_sha256','profile_catalog_commitment_hex','creation_scope_commitment_hex'))
+                and all(inspected['scope'].get(name)==p[name] for name in ('role','algorithm','key_generation')),
+                'Native R1 semantic preview correlation differs')
+        # This identifies the prospective mutation, not this read-only request.
+        # A preview never issues a grant or reserves the slot/generation.
+        result['creation_request_sha256']=request_digest(
+            {'version':1,'operation':'r1_identity_generate','parameters':p})
+        return result
+
+
 def validate_status(parameters):
     if not isinstance(parameters,dict) or set(parameters)!={'slot_ref','original_request_sha256'}:
         raise ValueError('Exact original R1 request required')
@@ -117,11 +149,142 @@ def controller_inventory(controller):
                 'Invalid attributed R1 dispatch receipt')
         request=parse_request(json.dumps(value['request'],separators=(',',':')).encode())
         key=request_digest(request)
-        require(request['operation']=='r1_identity_generate' and value['request_sha256']==key
+        require(request['operation'] in ('r1_identity_generate','r1_identity_prove','r1_identity_rebind') and value['request_sha256']==key
                 and path.name==key+'.json' and not (controller.control/'grants'/path.name).exists(),
                 'R1 dispatch receipt is not a consumed exact request')
         audit=controller.direct(controller.control/'audit.jsonl',True).read_bytes()
-        require(any(json.loads(line).get('request_sha256')==key and json.loads(line).get('operation')=='r1_identity_generate'
+        require(any(json.loads(line).get('request_sha256')==key and json.loads(line).get('operation')==request['operation']
                     for line in audit.splitlines()),'R1 receipt lacks original protected dispatch audit')
         approved.add(path.relative_to(controller.root).as_posix())
     return approved,{directory.relative_to(controller.root).as_posix()}
+
+
+# Local carrier capacity, not an identity/consensus validity rule. The central
+# APQE protected receipt admits at most2MiB; this leaves bounded receipt overhead.
+MAX_IDENTITY_OPERATION_REQUEST=1024*1024
+MAX_ORIGINAL_PUBLIC_RESULT=1024*1024
+IDENTITY_OPERATIONS={'r1_identity_prove':('prove-managed-r1-identity','read-managed-r1-identity-proof-result'),
+    'r1_identity_rebind':('rebind-managed-r1-identity','read-managed-r1-identity-rebind-result')}
+
+
+def _hex(value,width,nonzero=False):
+    return isinstance(value,str) and re.fullmatch('[a-f0-9]{'+str(width)+'}',value) is not None and (not nonzero or value!='0'*width)
+
+
+def _public_key(value):
+    if not isinstance(value,dict) or set(value)!={'role','algorithm','key_generation','full_public_key_hex'}:
+        raise ValueError('Exact public key record required')
+    if not isinstance(value['role'],str) or re.fullmatch('[!-~]{1,64}',value['role']) is None:
+        raise ValueError('Exact public role required')
+    widths={'ML-DSA-65':1952,'ML-DSA-87':2592}
+    width=widths.get(value['algorithm']) if isinstance(value['algorithm'],str) else None
+    if width is None or not _hex(value['full_public_key_hex'],width*2):
+        raise ValueError('Complete current public key required')
+    if type(value['key_generation']) is not int or not 1<=value['key_generation']<=2**64-1:
+        raise ValueError('Exact public u64 key generation required')
+
+
+def validate_proof(parameters):
+    # Public structural/resource checks only. APQE alone decodes policy/CBOR,
+    # matches the approved native scope and creates any private authorization.
+    fields={'creation','expected_journal_generation','expected_envelope_commitment_hex','public_key','proof_plan'}
+    if not isinstance(parameters,dict) or set(parameters)!=fields:
+        raise ValueError('Exact managed identity proof parameters required')
+    validate(parameters['creation']);_public_key(parameters['public_key'])
+    generation=parameters['expected_journal_generation']
+    if not isinstance(generation,str) or not re.fullmatch('[1-9][0-9]{0,19}',generation) or int(generation)>2**64-3:
+        raise ValueError('Exact bounded journal generation required')
+    if not _hex(parameters['expected_envelope_commitment_hex'],128,True):
+        raise ValueError('Exact pending envelope commitment required')
+    creation,key=parameters['creation'],parameters['public_key']
+    if (creation['role'],creation['algorithm'],creation['key_generation'])!=(key['role'],key['algorithm'],str(key['key_generation'])):
+        raise ValueError('Public key differs from original native creation scope')
+    plan=parameters['proof_plan']
+    if not isinstance(plan,dict) or set(plan)!={'namespace','expected_identity','birth_nonce_hex','enrollment_nonce_hex','birth_policy_frame_hex','current_policy_frame_hex','node'}:
+        raise ValueError('Exact public identity proof plan required')
+    namespace=plan['namespace'];identity=plan['expected_identity']
+    if not isinstance(namespace,str) or re.fullmatch('[a-z0-9]{3,6}',namespace) is None:
+        raise ValueError('Exact public namespace required')
+    if not isinstance(identity,str) or (identity!='' and re.fullmatch(re.escape(namespace)+r'\.2\.[A-Za-z0-9_-]{64}',identity) is None):
+        raise ValueError('Complete exact current identifier required')
+    for name in ('birth_nonce_hex','enrollment_nonce_hex'):
+        if not _hex(plan[name],64):raise ValueError('Complete public nonce required')
+    for name in ('birth_policy_frame_hex','current_policy_frame_hex'):
+        value=plan[name]
+        if not isinstance(value,str) or not 2<=len(value)<=MAX_IDENTITY_OPERATION_REQUEST or len(value)%2 or re.fullmatch('[a-f0-9]+',value) is None:
+            raise ValueError('Bounded complete policy bytes required')
+    node=plan['node']
+    if node is not None:
+        if not isinstance(node,dict) or set(node)!={'node_class','birth_root','role_keys'} or type(node['node_class']) is not int or not 1<=node['node_class']<=5 or namespace!='synv'+str(node['node_class']):
+            raise ValueError('Exact current node class required')
+        _public_key(node['birth_root'])
+        if not isinstance(node['role_keys'],list) or len(node['role_keys'])>64:
+            raise ValueError('Bounded public role key list required')
+        for key in node['role_keys']:_public_key(key)
+
+
+def validate_rebind(parameters):
+    if not isinstance(parameters,dict) or set(parameters)!={'pending','original_creation_request_digest_hex'}:
+        raise ValueError('Exact managed identity rebind parameters required')
+    validate_proof(parameters['pending'])
+    if not _hex(parameters['original_creation_request_digest_hex'],64,True):
+        raise ValueError('Exact original creation request digest required')
+
+
+def _original_public_result(raw):
+    # No report/approval object can stand in for Root's original durable bytes.
+    from controller import require
+    try:value=json.loads(raw)
+    except (ValueError,UnicodeError):raise __import__('controller').Refused('reconciliation_required','Original durable identity result unavailable') from None
+    if value is None:return None
+    require(isinstance(value,str) and 0<len(value)<=4*((MAX_ORIGINAL_PUBLIC_RESULT+2)//3),
+            'Original durable identity result required','reconciliation_required')
+    try:
+        public=base64.b64decode(value,validate=True)
+        require(0<len(public)<=MAX_ORIGINAL_PUBLIC_RESULT and base64.b64encode(public).decode('ascii')==value,
+                'Original durable identity result encoding differs','reconciliation_required')
+    except (ValueError,binascii.Error):
+        raise __import__('controller').Refused('reconciliation_required','Original durable identity result encoding differs') from None
+    return value
+
+
+def run_identity_operation(controller,request):
+    from controller import canonical,request_digest,require,sync_directory
+    from lifecycle import _lifecycle_lock,_sealed_receipt
+    from synergy_linux import native
+    operation=request['operation'];p=request['parameters']
+    if operation=='r1_identity_prove':validate_proof(p);pending=p
+    elif operation=='r1_identity_rebind':validate_rebind(p);pending=p['pending']
+    else:raise ValueError('Exact managed identity operation required')
+    creation=pending['creation'];key=request_digest(request);command,read_command=IDENTITY_OPERATIONS[operation]
+    maximum=4*((MAX_ORIGINAL_PUBLIC_RESULT+2)//3)+8
+    with _lifecycle_lock(controller.root):
+        installation,manifest=_sealed_receipt(controller.root)
+        require(manifest['release_id']==creation['release_id'] and installation['package_sha256']==creation['manifest_sha256']
+                and manifest['files'].get('lib/apqe/build-report.json')==creation['provider_report_sha256']
+                and 'lib/apqe/r1-profile-catalog.cbor' in manifest['files'],
+                'Identity operation differs from authenticated installed release','qualification_required')
+        # Only Root's same network/nonce/request-bound original result may satisfy
+        # a replay. A missing/ambiguous result never authorizes recomputation.
+        result=_original_public_result(native([controller.root/'bin/synergy-keytool',read_command,controller.root,
+            creation['operation_nonce_hex'],key],maximum_stdout=maximum))
+        if result is not None:return result
+        target=controller.control/'r1-creation'/(key+'.json')
+        require(not target.exists() and not target.is_symlink(),
+                'Prior identity dispatch is unresolved; reconcile original operation','reconciliation_required')
+        grant=controller.public_json(controller.control/'grants'/(key+'.json'),True)
+        expires=grant.get('expires_at')
+        controller.authorize(request)
+        directory=target.parent;directory.mkdir(mode=0o700,exist_ok=True)
+        metadata=directory.lstat()
+        require(stat.S_ISDIR(metadata.st_mode) and metadata.st_uid==os.geteuid() and stat.S_IMODE(metadata.st_mode)==0o700,
+                'Private native receipt directory required')
+        receipt={'format':'synergy-native-r1-creation-v1','root':str(controller.root),
+                 'request':request,'request_sha256':key,'expires_at_unix':expires}
+        fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'wb') as stream:
+            stream.write(canonical(receipt));stream.flush();os.fsync(stream.fileno())
+        sync_directory(directory)
+        result=_original_public_result(native([controller.root/'bin/synergy-keytool',command,controller.root,target,key],maximum_stdout=maximum))
+        require(result is not None,'Identity operation returned no durable completion','reconciliation_required')
+        return result

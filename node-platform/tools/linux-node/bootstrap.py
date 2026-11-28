@@ -23,7 +23,7 @@ import tarfile
 sys.dont_write_bytecode=True
 ROOT=Path('/opt/synergy')
 LIMIT=256*1024*1024
-ENGINE=('controller.py','synergy_linux.py','lifecycle.py','conformance.py','apqe_layout.py','vpn.py','canary_rpc_relay.py','root_guard.py')
+ENGINE=('controller.py', 'synergy_linux.py', 'lifecycle.py', 'conformance.py', 'apqe_layout.py', 'vpn.py', 'canary_rpc_relay.py', 'root_guard.py', 'guest_lifecycle.py', 'vpn_authorization.py', 'treasury_send.py', 'r1_identity.py')
 OPTIONAL_ENGINE=('guest_lifecycle.py','vpn_authorization.py','treasury_send.py','runtime_probe.py')
 STAGE_EXECUTABLES=('bin/synergy-node','bin/synergy-keytool','bin/synergy-genesis','bin/netbird')
 def engine_names(files):
@@ -1111,12 +1111,191 @@ def stage_engineering_update(stream, release_id, pin, reconcile=False):
 # Only an independently pinned isolated native build can authorize this path.
 # The document is not a public policy issuer, membership proof or credential API.
 AUTHORIZATION_PROFILE='nodenetwork-isolated-formation-authorization-v1'
+R1_AUTHORIZATION_PROFILE='nodenetwork-r1-user-validator-creation-authorization-v1'
 AUTHORIZATION_LIMIT=12*1024*1024
+R1_AUTHORIZATION_FILES={'r1/birth.json':1024*1024,'r1/profile-catalog.cbor':1024*1024,
+    'r1/nic-approvals.json':1024*1024,'r1/genesis-core.cbor':4*1024*1024,
+    'r1/genesis-approvals.json':1024*1024,'r1/release-acceptance.json':65536}
 AUTHORIZATION_FILES={'network-provisioning.json':16384,'gateway-purpose.json':16384,'commissioning-readiness.json':128*1024,'managed-guest.json':16384,'formation-context.json':4096,'vpn-ca.pem':128*1024,'vpn-provider.json':16384,'vpn-enrollment.json':16384,'vpn-server-binding.json':16384,'vpn-retirement.json':16384,'vpn-unused-cancellation.json':16384,
     'commissioning/config/node.json':1024*1024,'commissioning/config/start-authorized.json':65536,
     **{'commissioning/network/'+name:limit for name,limit in {
         'genesis.json':4*1024*1024,'authority.json':1024*1024,'authority-root.pub':8192,
         'network-manifest.json':1024*1024,'transport-registry.json':1024*1024,'transport-root.pub':8192}.items()}}
+AUTHORIZATION_FILES.update(R1_AUTHORIZATION_FILES)
+
+
+def r1_creation_selection(doc):
+    """Closed public carrier checks only; Rust owns NIC/Gen/CBOR verification."""
+    value=doc.get('r1_creation')
+    require(isinstance(value,dict) and set(value)=={'scope','context'}
+            and value['scope'] in ('initial','formation','runtime'),'Closed R1 creation selection required')
+    scope=value['scope'];context=value['context']
+    runtime=scope=='runtime'
+    common={'chain_id','purpose','allowed_roles'}
+    fields=(common|{'genesis_selection','target_namespace'} if runtime else
+            common|{'nic_selection','profile_catalog_commitment_hex','selected_slots','custody_object_refs'})
+    require(isinstance(context,dict) and (set(context)==fields if runtime else
+            set(context) in (fields,fields|{'target_namespace'})), 'Closed native R1 context required')
+    require(context['chain_id']==str(doc['chain_id']),'R1 context chain differs from selected installation')
+    def pin(value,width):
+        return isinstance(value,str) and re.fullmatch('[a-f0-9]{'+str(width)+'}',value) is not None and value!='0'*width
+    def names(values,maximum=64):
+        return isinstance(values,list) and 0<len(values)<=maximum and all(
+            isinstance(v,str) and re.fullmatch('[!-~]{1,120}',v) for v in values) and len(set(values))==len(values)
+    roles={'node_birth_root','consensus','transport/public','transport/private','transport/service'}
+    if scope=='formation':
+        require(context['purpose']=='FORMATION_AUTHENTICATION' and context.get('target_namespace') is None
+                and context['allowed_roles']==['formation_authentication'], 'User validator formation role required')
+    else:
+        require(context['purpose']==('NODE_ENROLLMENT' if runtime else 'GENESIS_NODE')
+                and context.get('target_namespace')=='synv1' and names(context['allowed_roles'],5)
+                and set(context['allowed_roles'])<=roles,'Only user validator node keys may be selected')
+    if not runtime:
+        require(pin(context['profile_catalog_commitment_hex'],128)
+                and names(context['selected_slots']) and names(context['custody_object_refs']),
+                'Exact bounded NIC-only slots, custody and catalog required')
+    selection=context['genesis_selection' if runtime else 'nic_selection']
+    selected={'managed_root','pinned_bootstrap_input_path','pinned_bootstrap_input_sha256',
+              'profile_catalog_path','profile_catalog_sha256','approvals_path','expected_nic_hex'}
+    require(isinstance(selection,dict) and set(selection)==(selected|{'core_path','expected_genesis_hex'} if runtime else selected)
+            and selection['managed_root']==str(ROOT) and pin(selection['expected_nic_hex'],128),
+            'Exact root-bound R1 public input selection required')
+    prefix='tmp/controller/authorization/inputs/'
+    paths={'pinned_bootstrap_input_path':'r1/birth.json','profile_catalog_path':'r1/profile-catalog.cbor',
+           'approvals_path':'r1/genesis-approvals.json' if runtime else 'r1/nic-approvals.json'}
+    if runtime:
+        paths['core_path']='r1/genesis-core.cbor'
+        require(pin(selection['expected_genesis_hex'],96),'Exact profile-bound R1 Genesis digest required')
+    require(all(selection[key]==prefix+name for key,name in paths.items()),'Only fixed R1 authorization input paths are permitted')
+    require(set(doc['artifacts'])==set(paths.values())|{'r1/release-acceptance.json'} and doc['genesis_pins'] is None,
+            'R1 creation needs its exact public input subset, without legacy Genesis pins')
+    require(selection['pinned_bootstrap_input_sha256']==doc['artifacts']['r1/birth.json']
+            and selection['profile_catalog_sha256']==doc['artifacts']['r1/profile-catalog.cbor'],
+            'R1 selected public file digests differ from native approval')
+    allowed_operations={'initial':{'r1_identity_generate','r1_identity_prove'},
+        'formation':{'r1_identity_generate'},
+        'runtime':{'r1_identity_generate','r1_identity_prove','r1_identity_rebind'}}[scope]
+    require(all(row['operation'] in allowed_operations for row in doc['requests'])
+            and len({row['request_sha256'] for row in doc['requests']})==len(doc['requests'])
+            and all(row['request_sha256']!='0'*64 for row in doc['requests']),
+            'Only original exact phase-scoped R1 identity requests may be granted')
+    return value,selection,paths
+
+
+def r1_creation_prior(policy,doc):
+    value,selection,_=r1_creation_selection(doc)
+    expected=globals().get('NATIVE_AUTHENTICATED_AUTHORIZATION_NIC_HEX')
+    fields={'initial':'r1_initial_creation_context','formation':'r1_formation_creation_context','runtime':'r1_creation_context'}
+    prior=[(scope,policy[field]) for scope,field in fields.items() if policy.get(field) is not None]
+    require(len(prior)<=1,'Ambiguous installed R1 creation phase')
+    network=policy.get('r1_creation_network')
+    if network is None:
+        require(not prior,'Unattributed existing R1 creation context requires reconciliation')
+        # Normal self-service bootstrap/install has no engineering lineage yet.
+        # Its first NIC is established by the independently pinned acceptance
+        # record AND genuine Rust proof review, never by this absent global.
+        require(expected is None or expected==selection['expected_nic_hex'],'First R1 native NIC approval differs')
+    else:
+        require(expected==selection['expected_nic_hex'],'No independent native approval for the exact R1 NIC')
+        require(isinstance(network,dict) and set(network)=={'chain_id','nic_hex','profile_catalog_commitment_hex'}
+                and network['chain_id']==value['context']['chain_id'] and network['nic_hex']==expected
+                and isinstance(network['profile_catalog_commitment_hex'],str)
+                and re.fullmatch('[a-f0-9]{128}',network['profile_catalog_commitment_hex'])
+                and len(prior)==1,'R1 creation network lineage differs')
+        old_scope,old_context=prior[0]
+        order={'initial':0,'formation':1,'runtime':2}
+        require(order[old_scope]<=order[value['scope']]
+                and (old_scope!=value['scope'] or old_context==value['context']),
+                'R1 creation context cannot be substituted or moved backwards')
+    return fields[value['scope']]
+
+
+def r1_creation_release_acceptance(doc,inputs):
+    """Require the SAME native release owner's independently pinned acceptance.
+
+    A document, evidence digest, engineering build or proof parser cannot approve
+    itself. With no actual native compile-pin this workflow remains unavailable.
+    """
+    from controller import Refused
+    selected=globals().get('NATIVE_AUTHENTICATED_R1_RELEASE_ACCEPTANCE_SHA256')
+    if not isinstance(selected,str) or re.fullmatch('[a-f0-9]{64}',selected) is None:
+        raise Refused('release_acceptance_unavailable','Independently recorded R1 release acceptance unavailable')
+    raw=inputs.get('r1/release-acceptance.json')
+    require(isinstance(raw,bytes) and 0<len(raw)<=65536 and hashlib.sha256(raw).hexdigest()==selected
+            and doc['artifacts']['r1/release-acceptance.json']==selected,'R1 release acceptance differs from native owner pin')
+    def unique(pairs):
+        value={}
+        for key,item in pairs:
+            require(key not in value,'Duplicate R1 release acceptance field');value[key]=item
+        return value
+    record=json.loads(raw,object_pairs_hook=unique)
+    fields={'schema','release_id','manifest_sha256','target','chain_id','nic_hex',
+        'profile_catalog_commitment_hex','bootstrap_input_sha256','catalog_sha256','allowed_scopes','qualification_evidence_sha256'}
+    require(isinstance(record,dict) and set(record)==fields
+            and record['schema']=='nodenetwork-r1-creation-release-acceptance-v1'
+            and record['release_id']==doc['release_id'] and record['manifest_sha256']==doc['manifest_sha256']
+            and record['target']=='linux-x86_64' and record['chain_id']==str(doc['chain_id']),
+            'R1 release acceptance selection differs')
+    value,selection,_=r1_creation_selection(doc)
+    require(record['nic_hex']==selection['expected_nic_hex']
+            and record['bootstrap_input_sha256']==doc['artifacts']['r1/birth.json']
+            and record['catalog_sha256']==doc['artifacts']['r1/profile-catalog.cbor']
+            and isinstance(record['profile_catalog_commitment_hex'],str)
+            and re.fullmatch('[a-f0-9]{128}',record['profile_catalog_commitment_hex'])
+            and record['profile_catalog_commitment_hex']!='0'*128,'R1 release acceptance network/catalog differs')
+    scopes=record['allowed_scopes'];evidence=record['qualification_evidence_sha256']
+    require(isinstance(scopes,list) and 0<len(scopes)<=3
+            and all(isinstance(scope,str) and scope in ('initial','formation','runtime') for scope in scopes)
+            and len(set(scopes))==len(scopes) and value['scope'] in scopes,
+            'R1 release acceptance does not qualify this creation scope')
+    require(isinstance(evidence,list) and 0<len(evidence)<=64
+            and all(isinstance(pin,str) and re.fullmatch('[a-f0-9]{64}',pin) and pin!='0'*64 for pin in evidence)
+            and len(set(evidence))==len(evidence),'Recorded R1 release qualification evidence required')
+    if value['scope']!='runtime':
+        require(record['profile_catalog_commitment_hex']==value['context']['profile_catalog_commitment_hex'],
+                'R1 release acceptance NIC catalog differs')
+    return record
+
+
+def r1_creation_review(root,replacement,policy,doc,acceptance):
+    """Genuine installed Rust review before this existing writer publishes grants."""
+    from synergy_linux import native
+    value,selection,paths=r1_creation_selection(doc)
+    field=r1_creation_prior(policy,doc)
+    staged=json.loads(json.dumps(value))
+    staged_selection=staged['context']['genesis_selection' if value['scope']=='runtime' else 'nic_selection']
+    for key,name in paths.items():
+        require(selection[key]=='tmp/controller/authorization/inputs/'+name,'R1 input path drift')
+        staged_selection[key]='tmp/controller-authorization/authorization/inputs/'+name
+    require(replacement==root/'tmp/controller-authorization','Exact existing atomic authorization stage required')
+    raw=native([root/'bin/synergy-keytool','review-managed-r1-creation-context',root,
+                json.dumps(staged,sort_keys=True,separators=(',',':'))],maximum_stdout=65536)
+    def unique(pairs):
+        result={}
+        for key,item in pairs:
+            require(key not in result,'Duplicate native R1 review field');result[key]=item
+        return result
+    review=json.loads(raw,object_pairs_hook=unique)
+    require(isinstance(review,dict) and set(review)=={'schema','scope','chain_id','nic_hex',
+            'profile_catalog_commitment_hex','genesis_digest_hex','creation_authority_granted'}
+            and review['schema']=='synergy-r1-creation-context-review-v1' and review['scope']==value['scope']
+            and review['creation_authority_granted'] is False and review['chain_id']==value['context']['chain_id']
+            and review['nic_hex']==selection['expected_nic_hex']
+            and isinstance(review['profile_catalog_commitment_hex'],str)
+            and re.fullmatch('[a-f0-9]{128}',review['profile_catalog_commitment_hex'])
+            and review['profile_catalog_commitment_hex']!='0'*128,'Native R1 proof review correlation differs')
+    require(review['profile_catalog_commitment_hex']==acceptance['profile_catalog_commitment_hex'],
+            'Native proof review differs from independently accepted R1 release catalog')
+    require((value['scope']=='runtime' and review['genesis_digest_hex']==selection['expected_genesis_hex'])
+            or (value['scope']!='runtime' and review['genesis_digest_hex'] is None
+                and review['profile_catalog_commitment_hex']==value['context']['profile_catalog_commitment_hex']),
+            'Native R1 phase/catalog/Genesis review differs')
+    network={key:review[key] for key in ('chain_id','nic_hex','profile_catalog_commitment_hex')}
+    require(policy.get('r1_creation_network') in (None,network),'Cannot replace authenticated R1 creation network')
+    for old in ('r1_initial_creation_context','r1_formation_creation_context','r1_creation_context'):
+        policy.pop(old,None)
+    policy[field]=value['context']
+    policy['r1_creation_network']=network
 
 
 def guest_target_binding(guest):
@@ -1160,8 +1339,10 @@ def authorization_document(raw,authenticated_pin,now):
     doc=json.loads(raw,object_pairs_hook=unique)
     fields={'version','profile','target','release_id','manifest_sha256','network_id','chain_id','node_name',
             'sequence','expires_at','artifacts','requests','genesis_pins'}
-    require(isinstance(doc,dict) and set(doc)==fields and type(doc['version']) is int and doc['version']==1
-            and doc['profile']==AUTHORIZATION_PROFILE,'Unsupported engineering authorization')
+    r1=isinstance(doc,dict) and doc.get('profile')==R1_AUTHORIZATION_PROFILE
+    require(isinstance(doc,dict) and set(doc)==(fields|{'r1_creation'} if r1 else fields)
+            and type(doc['version']) is int and doc['version']==1
+            and doc['profile'] in (AUTHORIZATION_PROFILE,R1_AUTHORIZATION_PROFILE),'Unsupported engineering authorization')
     target=doc['target']
     base_target={'kind','host','port','root','host_key','machine_id_sha256'}
     require(isinstance(target,dict) and set(target) in (base_target,base_target|{'guest'})
@@ -1191,7 +1372,8 @@ def authorization_document(raw,authenticated_pin,now):
             'Invalid selected installation context')
     require(type(doc['sequence']) is int and 0<doc['sequence']<2**53
             and type(doc['expires_at']) is int and now<doc['expires_at']<=now+3600,'Authorization expired or exceeds lifetime')
-    require(isinstance(doc['artifacts'],dict) and set(doc['artifacts'])<=set(AUTHORIZATION_FILES)
+    allowed=set(R1_AUTHORIZATION_FILES) if r1 else set(AUTHORIZATION_FILES)-set(R1_AUTHORIZATION_FILES)
+    require(isinstance(doc['artifacts'],dict) and set(doc['artifacts'])<=allowed
             and all(isinstance(pin,str) and re.fullmatch('[a-f0-9]{64}',pin) for pin in doc['artifacts'].values()),
             'Only fixed, digest-bound authorization artifacts are allowed')
     pins=doc['genesis_pins']
@@ -1203,6 +1385,7 @@ def authorization_document(raw,authenticated_pin,now):
                 and isinstance(r['operation'],str) and isinstance(r['request_sha256'],str)\
                 and re.fullmatch('[a-f0-9]{64}',r['request_sha256']) for r in doc['requests']),
             'Exact controller operation and request digests required')
+    if r1:r1_creation_selection(doc)
     return doc
 
 
@@ -1551,6 +1734,14 @@ def stage_engineering_authorization(stream, *, prepare_gateway_stage=False, repa
             prepare_existing_gateway_stage(Controller(ROOT),policy,doc,pin)
             return {**reconciled,'gateway_stage_prepared':True}
         if reconciled is not None:
+            original=json.loads(wire['authorization'])
+            if original.get('profile')==R1_AUTHORIZATION_PROFILE:
+                # Expiry cannot recreate a consumed grant; reconcile only the
+                # exact already-installed context and independently bound NIC.
+                doc=authorization_document(wire['authorization'],pin,original['expires_at']-1)
+                field=r1_creation_prior(policy,doc)
+                require(policy.get(field)==doc['r1_creation']['context']
+                        and policy.get('r1_creation_network') is not None,'Applied R1 context differs')
             if replacement.exists() or replacement.is_symlink():
                 require(replacement.is_dir() and not replacement.is_symlink()
                         and authorization_tree_digest(replacement)==policy.get('authorization_predecessor_sha256'),
@@ -1558,6 +1749,12 @@ def stage_engineering_authorization(stream, *, prepare_gateway_stage=False, repa
                 shutil.rmtree(replacement);sync_directory(ROOT/'tmp')
             return reconciled
         doc=authorization_document(wire['authorization'],pin,int(time.time()))
+        r1=doc['profile']==R1_AUTHORIZATION_PROFILE
+        if r1:
+            require(not prepare_gateway_stage and not repair_gateway_controller,'User validator R1 creation cannot manage infrastructure')
+            r1_creation_prior(policy,doc)
+            require(getattr(__import__('controller'),'R1_AUTHORIZATION_FILES',None)==R1_AUTHORIZATION_FILES,
+                    'Installed controller does not support the qualified R1 input inventory')
         initial=globals().get('NATIVE_AUTHENTICATED_AUTHORIZATION_INITIAL_SHA256')
         continuation=initial is not None
         if continuation:
@@ -1569,8 +1766,9 @@ def stage_engineering_authorization(stream, *, prepare_gateway_stage=False, repa
             require(all(doc[key]==effective_engineering_selection(ROOT,policy).get(key) for key in
                         ('release_id','manifest_sha256','network_id','chain_id','node_name')),
                     'Continuation changes the approved master or network')
-            require(globals().get('NATIVE_AUTHENTICATED_AUTHORIZATION_FORMATION_SHA256')==policy.get('validator_formation_sha256')
-                    and isinstance(policy.get('validator_formation_sha256'),str),'Continuation changes the approved formation')
+            if not r1:
+                require(globals().get('NATIVE_AUTHENTICATED_AUTHORIZATION_FORMATION_SHA256')==policy.get('validator_formation_sha256')
+                        and isinstance(policy.get('validator_formation_sha256'),str),'Continuation changes the approved formation')
         else:
             require(previous is None,'An enrolled engineering authorization requires a bound continuation')
         if 'guest' in doc['target']:
@@ -1579,6 +1777,7 @@ def stage_engineering_authorization(stream, *, prepare_gateway_stage=False, repa
             machine=Path('/etc/machine-id').read_bytes()
             require(0<len(machine)<=128 and hashlib.sha256(machine).hexdigest()==doc['target']['machine_id_sha256'],'Local machine identity differs')
         inputs=authorization_inputs(doc,wire['artifacts'])
+        acceptance=r1_creation_release_acceptance(doc,inputs) if r1 else None
         require(doc['sequence']==(previous['sequence']+1 if previous else 1),'Authorization sequence must advance exactly once')
         require(not replacement.exists() and not replacement.is_symlink(),'Interrupted authorization requires reconciliation')
         consumed=set()
@@ -1606,11 +1805,14 @@ def stage_engineering_authorization(stream, *, prepare_gateway_stage=False, repa
         require(selected and selected.get('manifest_sha256')==doc['manifest_sha256'] and selected.get('inventory_authenticated') is True
                 and selected.get('networks',{}).get(doc['network_id'])==doc['chain_id'],'Authorization differs from approved master/network')
         receipt_path=ROOT/'installation.json'
+        if r1:require(receipt_path.is_file() and not receipt_path.is_symlink(),'R1 creation requires already installed qualified validator software')
         if receipt_path.exists():
             from lifecycle import _sealed_receipt
             receipt,_=_sealed_receipt(ROOT)
             require(all(receipt[key]==doc[key] for key in ('network_id','chain_id','node_name'))
                     and receipt['package_sha256']==doc['manifest_sha256'],'Installed selection differs')
+            if r1:
+                require(receipt.get('role')=='validator','Only the installed user validator role may create R1 keys')
         status=_unit_state('synergy-node.service')
         active=status.get('MainPID','0') not in ('','0') or status.get('ActiveState') not in ('inactive','failed')
         pure_lifecycle=(continuation and not inputs and doc['genesis_pins'] in (None,policy.get('validator_identity_network'))
@@ -1698,6 +1900,7 @@ def stage_engineering_authorization(stream, *, prepare_gateway_stage=False, repa
                         path.unlink();save(path,data)
                     else:require(path.read_bytes()==data,'Existing authorization input differs')
                 else:save(path,data)
+            if r1:r1_creation_review(ROOT,replacement,policy,doc,acceptance)
             policy['qualified_operations']=sorted({request['operation'] for request,_ in requests})
             if not continuation:policy['engineering_selection']={key:doc[key] for key in ('release_id','manifest_sha256','network_id','chain_id','node_name')}
             policy['engineering_initial_authorization_sha256']=initial if continuation else pin

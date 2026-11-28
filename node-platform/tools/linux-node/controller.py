@@ -36,8 +36,9 @@ READS = frozenset(('gateway_vpn_preflight','upgrade_native_preflight','gateway_i
 MUTATIONS = frozenset(('gateway_install','gateway_target_generate','gateway_target_commission','gateway_admission_prepare','gateway_admission_sign','treasury_send_prepare','treasury_send_submit','treasury_prepare','network_transport_prepare','network_transport_sign','guest_create','guest_stop','guest_resume','guest_remove','install','commission','register','vpn_enroll','vpn_bind','vpn_retire','vpn_cancel_unused','vpn_stop','vpn_resume','boot_policy','start','stop','restart','upgrade','uninstall','identity_generate',
                        'formation_prepare','genesis_stage','genesis_bind','network_formation_prepare','network_formation_sign'))
 FORMATION_CONTEXT = 'tmp/formation-context.json'
-MUTATIONS = MUTATIONS | {'r1_identity_generate'}
+MUTATIONS = MUTATIONS | {'r1_identity_generate','r1_identity_prove','r1_identity_rebind'}
 READS = READS | {'r1_identity_status'}
+READS = READS | {'r1_identity_preview'}
 FORMATION_CUSTODY = 'tmp/pre-genesis-validator'
 FORMATION_INTENT = 'tmp/formation-prepare-request.json'
 GENESIS_BIND_INTENT = 'tmp/genesis-bind-request.json'
@@ -154,8 +155,14 @@ def parse_request(raw):
     operation, parameters = value['operation'], value['parameters']
     require(isinstance(operation,str) and operation in READS | MUTATIONS
             and isinstance(parameters,dict), 'Unsupported operation', 'invalid_request')
-    require(operation=='genesis_stage' or operation in ('network_formation_prepare','network_transport_prepare','treasury_send_prepare','gateway_admission_prepare','gateway_admission_preflight','gateway_target_commission','gateway_target_commission_preflight') and len(raw)<=2*1024*1024 or len(raw)<=MAX_REQUEST,'Request exceeds operation limit','invalid_request')
-    if operation=='r1_identity_generate':
+    require(operation in ('r1_identity_prove','r1_identity_rebind') and len(raw)<=1024*1024 or operation=='genesis_stage' or operation in ('network_formation_prepare','network_transport_prepare','treasury_send_prepare','gateway_admission_prepare','gateway_admission_preflight','gateway_target_commission','gateway_target_commission_preflight') and len(raw)<=2*1024*1024 or len(raw)<=MAX_REQUEST,'Request exceeds operation limit','invalid_request')
+    if operation in ('r1_identity_prove','r1_identity_rebind'):
+        from r1_identity import validate_proof,validate_rebind,MAX_IDENTITY_OPERATION_REQUEST
+        require(len(raw)<=MAX_IDENTITY_OPERATION_REQUEST,'Request exceeds identity operation capacity','invalid_request')
+        try:(validate_proof if operation=='r1_identity_prove' else validate_rebind)(parameters)
+        except (ValueError,KeyError,TypeError):raise Refused('invalid_request','Exact managed identity operation required') from None
+        return value
+    if operation in ('r1_identity_generate','r1_identity_preview'):
         from r1_identity import validate
         try: validate(parameters)
         except (ValueError,KeyError,TypeError): raise Refused('invalid_request','Exact current R1 creation request required') from None
@@ -433,6 +440,7 @@ class Controller:
         # fresh operator grant, never blind resubmission or replay.
         self.audit(request)
         grant_path.unlink()
+        sync_directory(grant_path.parent)
         return key
 
     def authorize_guest_resume(self,request,pin):
@@ -1899,19 +1907,39 @@ class Controller:
             return gateway_admission(self,request)
         if op=='authorization_status':
             control_inventory(self.root)
-            record=self.policy().get('engineering_authorization')
+            policy=self.policy()
+            record=policy.get('engineering_authorization')
+            r1_network=policy.get('r1_creation_network')
+            r1_scopes=[scope for scope,field in (('initial','r1_initial_creation_context'),
+                ('formation','r1_formation_creation_context'),('runtime','r1_creation_context')) if policy.get(field) is not None]
+            require((r1_network is None and not r1_scopes) or isinstance(r1_network,dict)
+                    and set(r1_network)=={'chain_id','nic_hex','profile_catalog_commitment_hex'} and len(r1_scopes)==1
+                    and isinstance(r1_network['chain_id'],str) and re.fullmatch('[1-9][0-9]{0,19}',r1_network['chain_id'])
+                    and int(r1_network['chain_id'])<2**64 and all(isinstance(r1_network[key],str)
+                        and re.fullmatch('[a-f0-9]{128}',r1_network[key]) and r1_network[key]!='0'*128
+                        for key in ('nic_hex','profile_catalog_commitment_hex')),
+                    'R1 creation lineage is absent, ambiguous or malformed','reconciliation_required')
             provider_report=None
+            installed_role=None
+            installed_selection=None
             if self.exists('installation.json'):
-                _,sealed=life._sealed_receipt(self.root)
+                installed,sealed=life._sealed_receipt(self.root)
                 provider_report=sealed['files'].get('lib/apqe/build-report.json')
+                installed_role=installed.get('role')
+                require(isinstance(installed_role,str) and re.fullmatch('[a-z][a-z0-9_]{0,63}',installed_role),
+                        'Installed role is malformed','reconciliation_required')
+                installed_selection={'release_id':sealed['release_id'],'manifest_sha256':installed['package_sha256'],
+                    **{key:installed[key] for key in ('network_id','chain_id','node_name')}}
             return {'schema':'nodenetwork-engineering-authorization-status-v1','authorization':record,
-                    'initial_sha256':self.policy().get('engineering_initial_authorization_sha256'),
-                    'selection':engineering_effective_selection(self.root,self.policy()),
-                    'initial_selection':self.policy().get('engineering_selection'),
-                    'update':self.policy().get('engineering_update'), 'target':self.policy().get('engineering_target'),
-                    'formation_sha256':self.policy().get('validator_formation_sha256'),
-                    'genesis_pins':self.policy().get('validator_identity_network'),
-                    'commissioning_file_sha256':self.policy().get('validator_commissioning_files'),
+                    'initial_sha256':policy.get('engineering_initial_authorization_sha256'),
+                    'selection':engineering_effective_selection(self.root,policy),
+                    'initial_selection':policy.get('engineering_selection'),
+                    'update':policy.get('engineering_update'), 'target':policy.get('engineering_target'),
+                    'formation_sha256':policy.get('validator_formation_sha256'),
+                    'genesis_pins':policy.get('validator_identity_network'),
+                    'commissioning_file_sha256':policy.get('validator_commissioning_files'),
+                    'r1_creation_network':r1_network,'r1_creation_scope':r1_scopes[0] if r1_scopes else None,
+                    'installed_role':installed_role,'installed_selection':installed_selection,
                     'provider_report_sha256':provider_report,
                     'pending_grants':[path.stem for path in (self.control/'grants').iterdir() if self.public_json(path,True).get('expires_at',0)>time.time()]}
         if op in ('install','install_preflight','upgrade','upgrade_preflight'):
@@ -1987,9 +2015,15 @@ class Controller:
         if op=='identity_preflight': return self.identity_preflight()[0]
         if op=='identity_status': return self.identity_status()
         if op=='identity_generate': return self.identity_generate(request)
+        if op in ('r1_identity_prove','r1_identity_rebind'):
+            from r1_identity import run_identity_operation
+            return run_identity_operation(self,request)
         if op=='r1_identity_generate':
             from r1_identity import run
             return run(self,request)
+        if op=='r1_identity_preview':
+            from r1_identity import preview
+            return preview(self,request)
         if op=='r1_identity_status':
             from r1_identity import status
             return status(self,request)
@@ -2056,6 +2090,11 @@ class Controller:
         raise Refused('invalid_request','Unsupported operation')
 
 
+R1_AUTHORIZATION_FILES={'r1/birth.json':1024*1024,'r1/profile-catalog.cbor':1024*1024,
+    'r1/nic-approvals.json':1024*1024,'r1/genesis-core.cbor':4*1024*1024,
+    'r1/genesis-approvals.json':1024*1024,'r1/release-acceptance.json':65536}
+
+
 def control_inventory(root):
     """Exact host-enrolled namespace. No input grants its own authority."""
     c=Controller(root); policy=c.policy()
@@ -2107,6 +2146,7 @@ def control_inventory(root):
         **{'commissioning/network/'+name:limit for name,limit in {
             'genesis.json':4*1024*1024,'authority.json':1024*1024,'authority-root.pub':8192,
             'network-manifest.json':1024*1024,'transport-registry.json':1024*1024,'transport-root.pub':8192}.items()}}
+    AUTHORIZATION_FILES.update(R1_AUTHORIZATION_FILES)
     require(set(authorization)<=set(AUTHORIZATION_FILES)-{VPN_ENROLLMENT},'Unexpected authorization input')
     for name,pin in authorization.items():
         path=c.direct(c.control/'authorization/inputs'/name,True,AUTHORIZATION_FILES[name])
