@@ -15,6 +15,7 @@ mod transition;
 pub mod world_history;
 pub mod world_resources;
 pub mod r1;
+pub mod r1_fees;
 pub mod r1_smt;
 pub mod r1_finalized;
 pub mod r1_receipts;

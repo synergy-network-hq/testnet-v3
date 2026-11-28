@@ -4,6 +4,8 @@
 //! transition application and receipts. PoSy alone owns agreement and finality.
 
 pub mod r1_payload;
+pub mod r1_fees;
+pub mod r1_native;
 
 mod candidate;
 mod candidate_store;
@@ -41,6 +43,7 @@ pub use dispatcher::{
 };
 pub use executor::DeterministicExecutor;
 pub use fees::{FeeSchedule, FeeSettlement};
+pub use fees::cumulative;
 pub use processing_candidate::{
     ProcessingNativeWalletActions,
     processing_payload_root, verify_processing_payload, ProcessingCandidateContext,

@@ -392,17 +392,20 @@ impl R1StateMap {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+    /// Exact validated key/value wire bytes, excluding local allocation overhead.
+    pub fn canonical_storage_bytes(&self) -> usize {
+        self.encoded_bytes
+    }
     pub fn get(&self, key: &R1StateKey) -> Option<&R1StateValue> {
         self.entries.get(key)
     }
     pub fn entries(&self) -> impl Iterator<Item = (&R1StateKey, &R1StateValue)> {
         self.entries.iter()
     }
-    pub fn insert(
-        &mut self,
-        key: R1StateKey,
-        value: R1StateValue,
-    ) -> Result<Option<R1StateValue>, R1StateError> {
+    fn validated_record_size(
+        key: &R1StateKey,
+        value: &R1StateValue,
+    ) -> Result<usize, R1StateError> {
         key.validate()?;
         let new_size = key
             .canonical_bytes()?
@@ -410,7 +413,7 @@ impl R1StateMap {
             .checked_add(value.canonical_bytes()?.len())
             .ok_or(R1StateError::Overflow)?;
         let compatible = matches!(
-            (&key.domain, &value),
+            (&key.domain, value),
             (
                 R1StateDomain::NativeBalance,
                 R1StateValue::NativeBalance { .. }
@@ -427,7 +430,7 @@ impl R1StateMap {
                 R1StateDomain::SystemSettlement,
                 R1StateValue::RestrictedBalance { .. } | R1StateValue::ValidatorFunding { .. }
             )
-        ) || matches!(&value, R1StateValue::ProtocolRecord { .. })
+        ) || matches!(value, R1StateValue::ProtocolRecord { .. })
             && !matches!(
                 key.domain,
                 R1StateDomain::NativeBalance
@@ -439,7 +442,7 @@ impl R1StateMap {
             return Err(R1StateError::InvalidValue);
         }
         if matches!(
-            (&key.owner, &value),
+            (&key.owner, value),
             (
                 R1StateOwner::Restricted { .. },
                 R1StateValue::ValidatorFunding { .. }
@@ -450,6 +453,14 @@ impl R1StateMap {
         ) {
             return Err(R1StateError::InvalidValue);
         }
+        Ok(new_size)
+    }
+    pub fn insert(
+        &mut self,
+        key: R1StateKey,
+        value: R1StateValue,
+    ) -> Result<Option<R1StateValue>, R1StateError> {
+        let new_size = Self::validated_record_size(&key, &value)?;
         if self.entries.len() >= MAX_STATE_ENTRIES && !self.entries.contains_key(&key) {
             return Err(R1StateError::ResourceLimit);
         }
@@ -467,6 +478,65 @@ impl R1StateMap {
         }
         self.encoded_bytes = next;
         Ok(self.entries.insert(key, value))
+    }
+    /// Atomically apply a bounded in-memory delta. Validate every key/value and
+    /// the FINAL aggregate limits before changing any entry; rejected batches
+    /// preserve balances, nonces, policy and accounting together. No persistence
+    /// or execution authority follows from applying public data.
+    pub fn apply_batch(
+        &mut self,
+        changes: &[(R1StateKey, Option<R1StateValue>)],
+    ) -> Result<(), R1StateError> {
+        if changes.len() > MAX_STATE_ENTRIES {
+            return Err(R1StateError::ResourceLimit);
+        }
+        let mut seen = BTreeSet::new();
+        let (mut removed_bytes, mut added_bytes, mut removed_count, mut added_count) =
+            (0usize, 0usize, 0usize, 0usize);
+        for (key, value) in changes {
+            key.validate()?;
+            if !seen.insert(key) {
+                return Err(R1StateError::Duplicate);
+            }
+            if let Some(old) = self.entries.get(key) {
+                removed_bytes = removed_bytes
+                    .checked_add(Self::validated_record_size(key, old)?)
+                    .ok_or(R1StateError::Overflow)?;
+                removed_count += 1;
+            }
+            if let Some(new) = value {
+                added_bytes = added_bytes
+                    .checked_add(Self::validated_record_size(key, new)?)
+                    .ok_or(R1StateError::Overflow)?;
+                added_count += 1;
+            }
+        }
+        let next_bytes = self
+            .encoded_bytes
+            .checked_sub(removed_bytes)
+            .and_then(|n| n.checked_add(added_bytes))
+            .ok_or(R1StateError::Overflow)?;
+        let next_count = self
+            .entries
+            .len()
+            .checked_sub(removed_count)
+            .and_then(|n| n.checked_add(added_count))
+            .ok_or(R1StateError::Overflow)?;
+        if next_bytes > MAX_TOTAL_STATE_BYTES || next_count > MAX_STATE_ENTRIES {
+            return Err(R1StateError::ResourceLimit);
+        }
+        for (key, value) in changes {
+            match value {
+                Some(v) => {
+                    self.entries.insert(key.clone(), v.clone());
+                }
+                None => {
+                    self.entries.remove(key);
+                }
+            }
+        }
+        self.encoded_bytes = next_bytes;
+        Ok(())
     }
     pub fn remove(&mut self, key: &R1StateKey) -> Option<R1StateValue> {
         let removed = self.entries.remove(key)?;
@@ -728,6 +798,76 @@ pub fn recompute_received_genesis_state(
 #[cfg(test)]
 mod bounds_tests {
     use super::*;
+    #[test]
+    fn execution_delta_rejection_preserves_all_balances_and_replay_together() {
+        let owner = NativeIdentityPresentation::from_raw("syns", [41; 48])
+            .unwrap()
+            .to_text();
+        let balance = R1StateKey::native(R1StateDomain::NativeBalance, &owner).unwrap();
+        let nonce = R1StateKey::native(R1StateDomain::ReplayCoordinate, &owner).unwrap();
+        let mut state = R1StateMap::new();
+        state
+            .insert(
+                balance.clone(),
+                R1StateValue::NativeBalance { amount_nwei: 10 },
+            )
+            .unwrap();
+        state
+            .insert(nonce.clone(), R1StateValue::ReplayNonce { nonce: 0 })
+            .unwrap();
+        let before = state.clone();
+        // A valid debit must not survive a later invalid replay-coordinate value.
+        assert!(state
+            .apply_batch(&[
+                (
+                    balance.clone(),
+                    Some(R1StateValue::NativeBalance { amount_nwei: 1 })
+                ),
+                (
+                    nonce.clone(),
+                    Some(R1StateValue::NativeBalance { amount_nwei: 9 })
+                )
+            ])
+            .is_err());
+        assert_eq!(state, before);
+        assert_eq!(
+            state.apply_batch(&[
+                (balance.clone(), None),
+                (
+                    balance.clone(),
+                    Some(R1StateValue::NativeBalance { amount_nwei: 1 })
+                )
+            ]),
+            Err(R1StateError::Duplicate)
+        );
+        assert_eq!(state, before);
+        state
+            .apply_batch(&[
+                (
+                    balance.clone(),
+                    Some(R1StateValue::NativeBalance { amount_nwei: 1 }),
+                ),
+                (nonce.clone(), Some(R1StateValue::ReplayNonce { nonce: 1 })),
+            ])
+            .unwrap();
+        let mut serial = before;
+        serial
+            .insert(
+                balance.clone(),
+                R1StateValue::NativeBalance { amount_nwei: 1 },
+            )
+            .unwrap();
+        serial
+            .insert(nonce.clone(), R1StateValue::ReplayNonce { nonce: 1 })
+            .unwrap();
+        assert_eq!(state, serial);
+        assert_eq!(state.root().unwrap(), serial.root().unwrap());
+        state
+            .apply_batch(&[(balance, None), (nonce, None)])
+            .unwrap();
+        assert!(state.is_empty());
+        assert_eq!(state.encoded_bytes, 0);
+    }
     #[test]
     fn received_public_validation_is_separate_from_actual_ceremony_construction() {
         // Invalid supplied actual-chain metadata must reach read-only semantic

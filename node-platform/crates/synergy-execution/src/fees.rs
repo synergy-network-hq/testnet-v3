@@ -3,6 +3,10 @@ use synergy_transaction::SignedTransaction;
 
 use crate::BlockExecutionError;
 
+/// Cumulative allocation planner; activation requires authenticated
+/// restricted-bucket bindings and atomic integration by the execution owner.
+pub mod cumulative;
+
 /// Network-selected execution fee schedule. The fee cap remains signed by the
 /// sender; this schedule selects the deterministic price actually charged.
 #[derive(Debug, Clone, PartialEq, Eq)]
