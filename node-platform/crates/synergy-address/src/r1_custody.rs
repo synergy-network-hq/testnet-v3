@@ -20,6 +20,9 @@ mod formation_use;
 mod rebind;
 #[path = "r1_custody_results.rs"]
 mod results;
+#[path = "r1_custody_root_approval.rs"]
+mod root_approval;
+pub use root_approval::{CompletedRootApproval, CustodyRootApprovalLease};
 #[path = "r1_custody_runtime.rs"]
 mod runtime_use;
 pub use rebind::{CompletedIdentityRebind, CustodyRebindLease};
@@ -34,6 +37,7 @@ pub enum CustodyJournalError {
     AmbiguousGeneration,
     AmbiguousProof,
     AmbiguousRebind,
+    AmbiguousRootApproval,
     InvalidStage,
     InvalidSeal,
     Storage,
@@ -52,6 +56,7 @@ pub enum CustodyStage {
     Generating,
     Proving,
     Rebinding,
+    RootApproving,
     SealedPending,
     Retired,
 }
@@ -180,6 +185,8 @@ struct Record {
     proof_reservation: Option<ProofReservation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     rebind_reservation: Option<rebind::RebindReservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    root_approval_reservation: Option<root_approval::RootApprovalReservation>,
 }
 impl Record {
     fn intent(&self) -> Result<CustodyCreationIntent, CustodyJournalError> {
@@ -252,6 +259,22 @@ impl Record {
         } else if self.rebind_reservation.is_some() {
             return Err(CustodyJournalError::Corrupt);
         }
+        if self.stage == CustodyStage::RootApproving {
+            let r = self
+                .root_approval_reservation
+                .as_ref()
+                .ok_or(CustodyJournalError::Corrupt)?;
+            r.validate()?;
+            if network.is_some()
+                || self.algorithm != "ML-DSA-87"
+                || self.envelope_commitment.as_ref() != Some(&r.expected_envelope_commitment)
+                || r.source_journal_generation.checked_add(1) != Some(self.journal_generation)
+            {
+                return Err(CustodyJournalError::Corrupt);
+            }
+        } else if self.root_approval_reservation.is_some() {
+            return Err(CustodyJournalError::Corrupt);
+        }
         match self.stage {
             CustodyStage::Reserved | CustodyStage::Generating => {
                 if self.full_binding_aad.is_some()
@@ -262,7 +285,10 @@ impl Record {
                     return Err(CustodyJournalError::Corrupt);
                 }
             }
-            CustodyStage::SealedPending | CustodyStage::Proving | CustodyStage::Rebinding => {
+            CustodyStage::SealedPending
+            | CustodyStage::Proving
+            | CustodyStage::Rebinding
+            | CustodyStage::RootApproving => {
                 let key = self
                     .public_key
                     .as_ref()
@@ -498,6 +524,9 @@ impl NativeCustodyJournal {
                         CustodyStage::Generating => Err(CustodyJournalError::AmbiguousGeneration),
                         CustodyStage::Proving => Err(CustodyJournalError::AmbiguousProof),
                         CustodyStage::Rebinding => Err(CustodyJournalError::AmbiguousRebind),
+                        CustodyStage::RootApproving => {
+                            Err(CustodyJournalError::AmbiguousRootApproval)
+                        }
                         _ => Err(CustodyJournalError::InvalidStage),
                     }
                 },
@@ -710,6 +739,7 @@ impl NativeCustodyJournal {
                     CustodyStage::Generating => Err(CustodyJournalError::AmbiguousGeneration),
                     CustodyStage::Proving => Err(CustodyJournalError::AmbiguousProof),
                     CustodyStage::Rebinding => Err(CustodyJournalError::AmbiguousRebind),
+                    CustodyStage::RootApproving => Err(CustodyJournalError::AmbiguousRootApproval),
                     CustodyStage::Retired => Err(CustodyJournalError::Conflict),
                 };
             }
@@ -745,6 +775,7 @@ impl NativeCustodyJournal {
             birth_plan_commitment: None,
             proof_reservation: None,
             rebind_reservation: None,
+            root_approval_reservation: None,
         };
         let bytes = encode(&r)?;
         let mut tx =
@@ -1501,6 +1532,7 @@ mod tests {
             5
         );
         rebind::test_public_storage_transition(&mut restarted, &i.slot_ref);
+        root_approval::test_public_storage_transition(&mut restarted, &i.slot_ref);
     }
     fn reserve(
         j: &mut NativeCustodyJournal,
