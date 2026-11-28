@@ -182,13 +182,53 @@ impl R1Header {
         h.validate_shape()?;
         Ok(h)
     }
+
+    /// Engineering candidate for the initial no-pass ordinary prefix only.
+    /// Native authority must independently check the genuine Genesis schedule.
+    /// This commits an opportunity; it never creates proposer authority.
+    pub fn initial_ordinary_opportunity_digest(&self) -> Result<Digest48> {
+        self.validate_shape()?;
+        if self.epoch != 1 || !(1..=1000).contains(&self.height) || self.round != self.height {
+            return Err(R1ProofError::Profile);
+        }
+        if self.height == 1 && self.ledger_parent != self.coordinate.genesis.digest {
+            return Err(R1ProofError::Parent);
+        }
+        if let R1Parent::Ordinary { round, .. } = &self.consensus_parent {
+            if round.checked_add(1) != Some(self.round) {
+                return Err(R1ProofError::Parent);
+            }
+        }
+        let segment_first = ((self.height - 1) / 10) * 10 + 1;
+        let segment_last = segment_first + 9;
+        let mut w = Writer::new(2048);
+        w.coordinate(&self.coordinate)?;
+        w.fixed(&self.protocol_profile)?;
+        w.fixed(&self.authority)?;
+        w.fixed(&self.schedule)?;
+        w.u64(self.epoch)?;
+        w.u64(self.height)?;
+        w.u64(self.round)?;
+        w.fixed(&self.proposer)?;
+        self.consensus_parent.encode(&mut w)?;
+        w.u64(segment_first)?;
+        w.u64(segment_last)?;
+        framed_digest(b"POSY/OPPORTUNITY/INITIAL/R1", &w.bytes)
+    }
+
     pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
         let mut w = Writer::new(4096);
         self.encode(&mut w)?;
         Ok(w.bytes)
     }
     pub fn block_digest(&self) -> Result<Digest48> {
-        framed_digest(b"POSY/BLOCK/R1", &self.canonical_bytes()?)
+        let frame = synergy_posy_approval::block_commitment_frame(&self.canonical_bytes()?)
+            .map_err(|_| R1ProofError::Bounds)?;
+        Primitives
+            .hash(HashAlgorithm::Sha3384, &frame)
+            .map_err(|_| R1ProofError::Profile)?
+            .try_into()
+            .map_err(|_| R1ProofError::Encoding)
     }
     pub fn parent_subject(&self) -> Result<R1Parent> {
         Ok(R1Parent::Ordinary {

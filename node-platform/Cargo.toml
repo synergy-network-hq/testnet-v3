@@ -27,6 +27,7 @@ members = [
     "crates/synergy-health",
     "crates/synergy-telemetry",
     "crates/synergy-posy",
+    "crates/synergy-posy-approval",
     "crates/synergy-etdag",
     "crates/synergy-transaction",
     "crates/synergy-tx-ingress",

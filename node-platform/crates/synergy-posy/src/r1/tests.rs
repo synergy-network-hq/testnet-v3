@@ -367,6 +367,52 @@ fn collector_preserves_originals_and_signer_subsets_do_not_change_block_identity
 }
 
 #[test]
+fn invalid_original_signature_never_reaches_execution() {
+    struct Counted {
+        inner: Synthetic,
+        executions: std::cell::Cell<usize>,
+    }
+    impl R1ConsensusVerifier for Counted {
+        fn authenticate_authority(&self, h: &R1Header) -> Result<Vec<R1AuthorityMember>> {
+            self.inner.authenticate_authority(h)
+        }
+        fn verify_approval(
+            &self,
+            m: &R1AuthorityMember,
+            message: &[u8],
+            signature: &[u8],
+        ) -> Result<()> {
+            self.inner.verify_approval(m, message, signature)
+        }
+        fn verify_proposal_and_execution(&self, h: &R1Header) -> Result<()> {
+            self.executions.set(self.executions.get() + 1);
+            self.inner.verify_proposal_and_execution(h)
+        }
+        fn verify_finalized_extension(
+            &self,
+            n: &R1NetworkCoordinate,
+            height: u64,
+            block: &Digest48,
+            h: &R1Header,
+        ) -> Result<()> {
+            self.inner.verify_finalized_extension(n, height, block, h)
+        }
+    }
+    let v = Counted {
+        inner: Synthetic::good(),
+        executions: std::cell::Cell::new(0),
+    };
+    let valid = sign(first(), &v.inner, &[0, 1, 2]);
+    let mut bad = valid.clone();
+    // Last approval invalid: the earlier valid originals cannot admit execution.
+    bad.approvals.last_mut().unwrap().signature[0] ^= 1;
+    assert_eq!(bad.verify(&v), Err(R1ProofError::Signature));
+    assert_eq!(v.executions.get(), 0);
+    valid.verify(&v).unwrap();
+    assert_eq!(v.executions.get(), 1);
+}
+
+#[test]
 fn collector_rejects_duplicate_unknown_bad_signature_and_insufficient_quorum() {
     let v = Synthetic::good();
     let q = sign(first(), &v, &[0, 1, 2]);
@@ -418,4 +464,173 @@ fn frozen_authority_digest_binds_interval_schedule_keys_weights_and_full_network
     assert_ne!(a, digest(&members, 1000, [77; 48]).unwrap());
     members.swap(0, 1);
     assert!(digest(&members, 1000, [77; 48]).is_err());
+}
+
+struct SyntheticClient(Synthetic);
+impl R1ClientFinalityVerifier for SyntheticClient{
+ fn authenticate_authority(&self,h:&R1Header)->Result<Vec<R1AuthorityMember>>{self.0.authenticate_authority(h)}
+ fn verify_certified_header(&self,h:&R1Header)->Result<()>{h.validate_shape()}
+ fn verify_approval(&self,m:&R1AuthorityMember,b:&[u8],s:&[u8])->Result<()>{self.0.verify_approval(m,b,s)}
+ fn verify_finalized_extension(&self,c:&R1NetworkCoordinate,h:u64,b:&Digest48,t:&R1Header)->Result<()>{self.0.verify_finalized_extension(c,h,b,t)}
+}
+#[test]fn client_anchor_preserves_original_certification_without_claiming_execution(){
+ let p=proof();let bytes=p.canonical_bytes().unwrap();let mut v=Synthetic::good();v.bad_payload=true;
+ assert!(verify(&p,&v).is_err());
+ let client=R1ThreeQcProof::verify_client_original(&bytes,&coordinate(),0,&coordinate().genesis.digest,&SyntheticClient(v)).unwrap();
+ assert_eq!(client.height(),1);assert_eq!(client.original_proof(),bytes);
+ assert_eq!(client.block_digest(),&p.certificates[0].header.block_digest().unwrap());
+ assert_eq!(client.state_root(),&p.certificates[0].header.execution.post_state);
+}
+#[test]fn client_certification_never_skips_original_signatures_quorum_or_cursor(){
+ for kind in 0..4{
+  let mut p=proof();let mut v=Synthetic::good();
+  match kind{
+   0=>p.certificates[0].approvals[0].signature[0]^=1,
+   1=>{p.certificates[0].approvals.pop();},
+   2=>v.bad_ancestry=true,
+   _=>p.certificates[2].header.coordinate.network.nic[63]^=1,
+  }
+  assert!(R1ThreeQcProof::verify_client_original(&p.canonical_bytes().unwrap(),&coordinate(),0,&coordinate().genesis.digest,&SyntheticClient(v)).is_err());
+ }
+ let mut bytes=proof().canonical_bytes().unwrap();bytes.push(0);
+ assert!(R1ThreeQcProof::verify_client_original(&bytes,&coordinate(),0,&coordinate().genesis.digest,&SyntheticClient(Synthetic::good())).is_err());
+}
+
+#[test]
+fn collector_counts_original_signers_once_and_emits_sorted_verified_qc() {
+    let verifier = Synthetic::good();
+    let qc = sign(first(), &verifier, &[0, 1, 2]);
+    let mut collector = R1ApprovalCollector::new(qc.header.clone(), &verifier).unwrap();
+    for index in [2, 2, 0] {
+        assert!(collector.accept(qc.approvals[index].clone(), &verifier).unwrap().is_none());
+    }
+    assert_eq!(collector.approval_count(), 2);
+    let checked = collector.accept(qc.approvals[1].clone(), &verifier).unwrap().unwrap();
+    assert_eq!(checked.certificate(), &qc);
+    assert_eq!(collector.approval_count(), 3);
+}
+#[test]
+fn collector_rejects_bad_signatures_without_consuming_a_signer() {
+    let verifier = Synthetic::good();
+    let qc = sign(first(), &verifier, &[0, 1, 2]);
+    let mut collector = R1ApprovalCollector::new(qc.header.clone(), &verifier).unwrap();
+    let mut corrupt = qc.approvals[0].clone();
+    corrupt.signature[0] ^= 1;
+    assert!(matches!(collector.accept(corrupt, &verifier), Err(R1ProofError::Signature)));
+    assert_eq!(collector.approval_count(), 0);
+    let mut changed = qc.approvals[0].clone();
+    changed.key_version += 1;
+    assert!(matches!(collector.accept(changed, &verifier), Err(R1ProofError::Signature)));
+    assert_eq!(collector.approval_count(), 0);
+    assert!(collector.accept(qc.approvals[0].clone(), &verifier).unwrap().is_none());
+}
+#[test]
+fn collector_never_combines_count_and_weight_subsets_or_reuses_changed_authority() {
+    let verifier = Synthetic { weights: vec![1,1,1,7], ..Synthetic::good() };
+    let qc = sign(first(), &verifier, &[0,1,2,3]);
+    let mut collector = R1ApprovalCollector::new(qc.header.clone(), &verifier).unwrap();
+    for approval in &qc.approvals[..3] {
+        assert!(collector.accept(approval.clone(), &verifier).unwrap().is_none());
+    }
+    let changed = Synthetic::good();
+    assert!(matches!(collector.accept(qc.approvals[3].clone(), &changed), Err(R1ProofError::Authority)));
+    assert_eq!(collector.approval_count(),3);
+    assert!(collector.accept(qc.approvals[3].clone(), &verifier).unwrap().is_some());
+}
+#[test]
+fn collector_rechecks_payload_before_emitting_and_never_creates_signing_authority() {
+    let verifier = Synthetic::good();
+    let qc = sign(first(), &verifier, &[0,1,2]);
+    let invalid = Synthetic { bad_payload: true, ..Synthetic::good() };
+    assert!(matches!(R1ApprovalCollector::new(qc.header.clone(), &invalid), Err(R1ProofError::Payload)));
+    let mut collector = R1ApprovalCollector::new(qc.header.clone(), &verifier).unwrap();
+    collector.accept(qc.approvals[0].clone(), &verifier).unwrap();
+    collector.accept(qc.approvals[1].clone(), &verifier).unwrap();
+    assert!(matches!(collector.accept(qc.approvals[2].clone(), &invalid), Err(R1ProofError::Payload)));
+    assert!(collector.accept(qc.approvals[2].clone(), &verifier).unwrap().is_some());
+}
+
+#[test]
+fn lock_requires_direct_verified_pair_and_preserves_both_original_certificates() {
+    let v = Synthetic::good();
+    let p = proof();
+    let a = p.certificates[0].clone().into_verified(&v).unwrap();
+    let b = p.certificates[1].clone().into_verified(&v).unwrap();
+    let expected = a.canonical_qc_bytes().to_vec();
+    let lock = R1CertifiedLock::from_verified_pair(a,b).unwrap();
+    assert_eq!(lock.header(), &p.certificates[0].header);
+    assert_eq!(lock.certificates()[0].canonical_qc_bytes(), expected);
+}
+#[test]
+fn lock_rejects_certified_unrelated_round_and_execution_ancestry() {
+    let v = Synthetic::good();
+    let p = proof();
+    for change in 0..3 {
+        let a = p.certificates[0].clone().into_verified(&v).unwrap();
+        let mut h = p.certificates[1].header.clone();
+        match change {
+            0 => h.round += 1,
+            1 => h.execution.pre_state[47] ^= 1,
+            _ => h.execution_profile[47] ^= 1,
+        }
+        let accept = Synthetic::good();
+        // A different execution profile is not accepted by this trusted fixture.
+        // Its rejection already occurs before a verified QC can exist.
+        if change == 2 {
+            let mut wrong_profile = p.certificates[1].clone();
+            wrong_profile.header = h;
+            assert!(wrong_profile.into_verified(&accept).is_err());
+            continue;
+        }
+        let b = sign(h,&accept,&[0,1,2]).into_verified(&accept).unwrap();
+        assert!(R1CertifiedLock::from_verified_pair(a,b).is_err());
+    }
+}
+
+fn initial_ordinary_header() -> R1Header {
+    let mut h=first(); h.epoch=1; h.round=1; h
+}
+#[test]
+fn initial_opportunity_has_independent_sha3_vector_and_no_current_block_cycle() {
+    let mut h=initial_ordinary_header();
+    let digest=h.initial_ordinary_opportunity_digest().unwrap();
+    let hex=digest.iter().map(|b|format!("{b:02x}")).collect::<String>();
+    // Independent Python struct/hashlib, complete synthetic coordinate/raw48.
+    assert_eq!(hex,"2ece238a2fb6c7c8024249eff62b4aebd274824d439e7e35359828e4b5e45fdbd90b7f84eed6f63c9c843ae08943693c");
+    h.opportunity=digest;
+    h.execution.payload[47]^=1;
+    assert_eq!(h.initial_ordinary_opportunity_digest().unwrap(),digest);
+}
+#[test]
+fn initial_opportunity_binds_full_coordinate_authority_schedule_and_proposer() {
+    let h=initial_ordinary_header();
+    let expected=h.initial_ordinary_opportunity_digest().unwrap();
+    for field in 0..7 {
+        let mut other=h.clone();
+        match field {
+            0=>other.coordinate.network.nic[63]^=1,
+            1=>{other.coordinate.genesis.digest[47]^=1;
+                other.ledger_parent=other.coordinate.genesis.digest;
+                other.consensus_parent=R1Parent::Genesis{commitment:other.coordinate.genesis.digest};},
+            2=>other.coordinate.activated_profiles.commitment[63]^=1,
+            3=>other.protocol_profile[47]^=1,
+            4=>other.authority[47]^=1,
+            5=>other.schedule[47]^=1,
+            _=>other.proposer[47]^=1,
+        }
+        assert_ne!(other.initial_ordinary_opportunity_digest().unwrap(),expected);
+    }
+}
+#[test]
+fn initial_opportunity_never_fabricates_pass_recovery_or_epoch_handoff() {
+    let h=initial_ordinary_header();
+    let mut next=child(&h);
+    next.epoch=1;
+    assert!(next.initial_ordinary_opportunity_digest().is_ok());
+    next.round+=1;
+    assert!(next.initial_ordinary_opportunity_digest().is_err());
+    next=child(&h);next.epoch=2;
+    assert!(next.initial_ordinary_opportunity_digest().is_err());
+    let mut late=h;late.height=1001;late.round=1001;
+    assert!(late.initial_ordinary_opportunity_digest().is_err());
 }

@@ -130,3 +130,51 @@ impl R1ThreeQcProof {
         })
     }
 }
+
+/// A lock justified by an exact direct two-certificate chain. It carries no
+/// signing permission; the safe-vote predicate must also establish that the
+/// candidate extends this lock or has a strictly higher verified parent QC.
+#[derive(Clone, Debug)]
+pub struct R1CertifiedLock {
+    certificates: [super::VerifiedR1QuorumCertificate; 2],
+}
+impl R1CertifiedLock {
+    /// Preserve both original verified QCs after checking the complete direct
+    /// ordinary ancestry. A single QC, height, round or caller flag cannot make a lock.
+    pub fn from_verified_pair(
+        parent: super::VerifiedR1QuorumCertificate,
+        child: super::VerifiedR1QuorumCertificate,
+    ) -> Result<Self> {
+        let a = &parent.certificate().header;
+        let b = &child.certificate().header;
+        b.coordinate
+            .ensure_matches(&a.coordinate)
+            .map_err(|_| R1ProofError::Context)?;
+        if a.epoch != b.epoch
+            || a.authority != b.authority
+            || a.protocol_profile != b.protocol_profile
+            || a.execution_profile != b.execution_profile
+        {
+            return Err(R1ProofError::Context);
+        }
+        if a.height.checked_add(1) != Some(b.height)
+            || a.round.checked_add(1) != Some(b.round)
+            || b.consensus_parent != a.parent_subject()?
+            || b.ledger_parent != a.block_digest()?
+            || b.execution.pre_state != a.execution.post_state
+        {
+            return Err(R1ProofError::Parent);
+        }
+        Ok(Self {
+            certificates: [parent, child],
+        })
+    }
+    /// The certified ancestor on which this chain justifies a lock.
+    pub fn header(&self) -> &super::R1Header {
+        &self.certificates[0].certificate().header
+    }
+    /// Original verified evidence, retained across journal/recovery boundaries.
+    pub fn certificates(&self) -> &[super::VerifiedR1QuorumCertificate; 2] {
+        &self.certificates
+    }
+}

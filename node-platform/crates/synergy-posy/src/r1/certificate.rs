@@ -114,6 +114,33 @@ pub trait R1ConsensusVerifier {
         target: &R1Header,
     ) -> Result<()>;
 }
+pub(super) fn authenticated_members(
+    header: &R1Header,
+    verifier: &impl R1ConsensusVerifier,
+) -> Result<Vec<R1AuthorityMember>> {
+    let members = verifier.authenticate_authority(header)?;
+    if members.is_empty() || members.len() > MAX_VALIDATORS {
+        return Err(R1ProofError::Authority);
+    }
+    let mut last_identity = None;
+    let mut keys = std::collections::BTreeSet::new();
+    let mut total = 0u128;
+    for m in &members {
+        if m.weight == 0
+            || m.key_version == 0
+            || m.signature_bytes == 0
+            || m.signature_bytes > MAX_SIGNATURE_BYTES
+            || last_identity.is_some_and(|id| id >= m.identity)
+            || !keys.insert(m.key_id)
+        {
+            return Err(R1ProofError::Authority);
+        }
+        total = total.checked_add(m.weight).ok_or(R1ProofError::Authority)?;
+        last_identity = Some(m.identity);
+    }
+    Ok(members)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct R1Approval {
     pub member_index: u32,
@@ -230,51 +257,59 @@ impl R1QuorumCertificate {
         Ok(Self { header, approvals })
     }
     pub fn approval_message(&self, member: &R1AuthorityMember) -> Result<Vec<u8>> {
+        use synergy_posy_approval::{ApprovalMessage, Coordinate, Parent, ProfileRef};
         let h = &self.header;
-        let mut w = Writer::new(8192);
-        w.variable(b"POSY/APPROVAL/V1", 128)?;
-        w.u16(1)?;
-        w.coordinate(&h.coordinate)?;
-        w.fixed(&h.protocol_profile)?;
-        w.fixed(&h.authority)?;
-        w.u64(h.epoch)?;
-        w.u16(0)?; // ordinary ledger block, never boundary/readiness/pass
-        w.u64(h.round)?;
-        w.u64(h.height)?;
-        w.fixed(&h.block_digest()?)?;
-        h.consensus_parent.encode(&mut w)?;
-        w.fixed(&h.opportunity)?;
-        w.fixed(&h.execution_profile)?;
-        w.fixed(&h.execution.payload)?;
-        w.fixed(&h.execution.post_state)?;
-        w.fixed(&h.execution.receipts)?;
-        w.fixed(&member.identity)?;
-        w.fixed(&member.key_id)?;
-        w.u64(member.key_version)?;
-        Ok(w.bytes)
+        let profile = |p: &synergy_protocol_types::R1ProfileRef| ProfileRef {
+            name: p.name.clone(),
+            revision: p.revision,
+        };
+        ApprovalMessage {
+            coordinate: Coordinate {
+                chain_id: h.coordinate.network.chain_id,
+                nic: h.coordinate.network.nic,
+                genesis_profile: profile(&h.coordinate.genesis.profile),
+                genesis: h.coordinate.genesis.digest,
+                profiles_profile: profile(&h.coordinate.activated_profiles.profile),
+                profiles: h.coordinate.activated_profiles.commitment,
+            },
+            protocol_profile: h.protocol_profile,
+            authority: h.authority,
+            epoch: h.epoch,
+            round: h.round,
+            height: h.height,
+            block: h.block_digest()?,
+            parent: match &h.consensus_parent {
+                super::R1Parent::Genesis { commitment } => Parent::Genesis {
+                    commitment: *commitment,
+                },
+                super::R1Parent::Ordinary { epoch, height, round, block, authority } => Parent::Ordinary {
+                    epoch: *epoch, height: *height, round: *round,
+                    block: *block, authority: *authority,
+                },
+            },
+            opportunity: h.opportunity,
+            execution_profile: h.execution_profile,
+            payload: h.execution.payload,
+            post_state: h.execution.post_state,
+            receipts: h.execution.receipts,
+            identity: member.identity,
+            key_id: member.key_id,
+            key_generation: member.key_version,
+        }
+        .encode()
+        .map_err(|error| match error {
+            synergy_posy_approval::Error::Bounds => R1ProofError::Bounds,
+            synergy_posy_approval::Error::Context => R1ProofError::Context,
+            synergy_posy_approval::Error::Profile => R1ProofError::Profile,
+            synergy_posy_approval::Error::Encoding => R1ProofError::Encoding,
+        })
     }
     pub fn verify(&self, verifier: &impl R1ConsensusVerifier) -> Result<()> {
         self.header.validate_shape()?;
         if self.approvals.is_empty() || self.approvals.len() > MAX_VALIDATORS {
             return Err(R1ProofError::Bounds);
         }
-        let members = verifier.authenticate_authority(&self.header)?;
-        if members.is_empty() || members.len() > MAX_VALIDATORS {
-            return Err(R1ProofError::Authority);
-        }
-        let mut last_identity = None;
-        let mut keys = std::collections::BTreeSet::new();
-        for m in &members {
-            if m.weight == 0
-                || m.signature_bytes == 0
-                || m.signature_bytes > MAX_SIGNATURE_BYTES
-                || last_identity.is_some_and(|id| id >= m.identity)
-                || !keys.insert(m.key_id)
-            {
-                return Err(R1ProofError::Authority);
-            }
-            last_identity = Some(m.identity);
-        }
+        let members = authenticated_members(&self.header, verifier)?;
         let mut previous = None;
         let mut signers = Vec::with_capacity(self.approvals.len());
         for a in &self.approvals {
@@ -300,11 +335,13 @@ impl R1QuorumCertificate {
             })
             .collect();
         crate::verify_strict_dual_quorum(&frozen, &signers).map_err(|_| R1ProofError::Quorum)?;
-        verifier.verify_proposal_and_execution(&self.header)?;
         for a in &self.approvals {
             let m = &members[a.member_index as usize];
             verifier.verify_approval(m, &self.approval_message(m)?, &a.signature)?;
         }
+        // A structurally quorum-sized unauthenticated message must not cause
+        // payload/state execution. Authenticate every original approval first.
+        verifier.verify_proposal_and_execution(&self.header)?;
         Ok(())
     }
 }

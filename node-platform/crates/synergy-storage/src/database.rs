@@ -84,6 +84,34 @@ pub struct AtomicStoreReader<'a> {
     maximum_bytes: usize,
 }
 
+/// Nonconstructible, non-Clone view of the SAME canonical store while its
+/// cross-process writer lock is held. No protocol/signing authority is supplied.
+/// Readers and guarded commits below never reacquire that lock.
+pub struct AtomicStoreWriter<'a> {
+    store: &'a AtomicStore,
+}
+impl AtomicStoreWriter<'_> {
+    pub fn root(&self) -> &Path {
+        &self.store.root
+    }
+    pub fn reader(&self) -> AtomicStoreReader<'_> {
+        AtomicStoreReader { store: self.store, maximum_bytes: self.store.max_record_bytes }
+    }
+    pub fn read_optional_bounded(&self, relative: impl AsRef<Path>) -> Result<Option<Vec<u8>>, StorageError> {
+        self.reader().read_optional_bounded(relative)
+    }
+}
+impl TransactionBackend for AtomicStoreWriter<'_> {
+    fn commit_atomic(&mut self, writes: &[StorageWrite]) -> Result<(), StorageError> {
+        self.store.commit_writes_locked(&writes.iter().collect::<Vec<_>>())
+    }
+}
+impl GuardedTransactionBackend for AtomicStoreWriter<'_> {
+    fn commit_atomic_if(&mut self, preconditions: &[StoragePrecondition], writes: &[StorageWrite]) -> Result<(), StorageError> {
+        self.store.commit_if_locked(preconditions, writes)
+    }
+}
+
 impl AtomicStoreReader<'_> {
     /// Narrows record allocations without changing the transaction recovery limit.
     pub fn with_maximum_bytes(&self, maximum_bytes: usize) -> AtomicStoreReader<'_> {
@@ -132,6 +160,23 @@ impl AtomicStoreReader<'_> {
 }
 
 impl AtomicStore {
+    /// Retain one real writer lock through read, reservation, native effect and
+    /// completion. Protocol owners validate their own records and native grants.
+    /// Callbacks must use this view, never reopen/relock the same store. An error
+    /// or panic releases the RAII lock; already committed reservations remain.
+    pub fn with_exclusive_writer<T>(&mut self, effect: impl FnOnce(&mut AtomicStoreWriter<'_>) -> T) -> Result<T, StorageError> {
+        #[cfg(not(unix))]
+        {
+            let _ = effect;
+            Err(StorageError::Io("retained writer locking is not qualified on this platform".into()))
+        }
+        #[cfg(unix)]
+        {
+            let _lock = self.exclusive_lock()?;
+            self.recover_transactions_locked()?;
+            Ok(effect(&mut AtomicStoreWriter { store: self }))
+        }
+    }
     /// Inspect an already initialized store without creating roots/lock files or
     /// replaying WAL. A producer owns recovery; an RPC reader reports unavailable
     /// while recovery is pending instead of mutating canonical state during a read.
@@ -1003,10 +1048,15 @@ impl GuardedTransactionBackend for AtomicStore {
         preconditions: &[StoragePrecondition],
         writes: &[StorageWrite],
     ) -> Result<(), StorageError> {
+        let _lock = self.exclusive_lock()?;
+        self.commit_if_locked(preconditions, writes)
+    }
+}
+impl AtomicStore {
+    fn commit_if_locked(&self, preconditions: &[StoragePrecondition], writes: &[StorageWrite]) -> Result<(), StorageError> {
         if preconditions.is_empty() {
             return Err(StorageError::InvalidPath);
         }
-        let _lock = self.exclusive_lock()?;
         self.recover_transactions_locked()?;
         let mut paths = BTreeSet::new();
         for precondition in preconditions {
@@ -1179,6 +1229,60 @@ mod tests {
             std::process::id(),
             TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_writer_keeps_reservation_effect_and_completion_under_one_lock() {
+        use std::{sync::mpsc, time::Duration};
+        let root = root("retained-writer");
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup { fn drop(&mut self) { let _=fs::remove_dir_all(&self.0); } }
+        let _cleanup=Cleanup(root.clone());
+        let mut store=AtomicStore::new(&root,1024).unwrap();
+        let contender=store.clone();
+        let (started_tx,started_rx)=mpsc::channel();
+        let (done_tx,done_rx)=mpsc::channel();
+        let thread=store.with_exclusive_writer(|writer| {
+            writer.commit_atomic_if(&[StoragePrecondition{relative_path:"slot".into(),required:RequiredRecord::Missing}],&[StorageWrite{relative_path:"slot".into(),bytes:b"reserved-public-subject".to_vec()}]).unwrap();
+            let thread=std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                contender.write_atomic("fence",b"closed").unwrap();
+                done_tx.send(()).unwrap();
+            });
+            started_rx.recv().unwrap();
+            assert!(matches!(done_rx.recv_timeout(Duration::from_millis(50)),Err(mpsc::RecvTimeoutError::Timeout)));
+            assert_eq!(writer.read_optional_bounded("fence").unwrap(),None);
+            assert_eq!(writer.read_optional_bounded("slot").unwrap().unwrap(),b"reserved-public-subject");
+            // A failed compare cannot publish a partial effect or release record.
+            assert_eq!(writer.commit_atomic_if(&[StoragePrecondition{relative_path:"slot".into(),required:RequiredRecord::Exact(b"foreign".to_vec())}],&[StorageWrite{relative_path:"outbox".into(),bytes:b"forbidden".to_vec()}]),Err(StorageError::ConflictingWrite));
+            assert_eq!(writer.read_optional_bounded("outbox").unwrap(),None);
+            writer.commit_atomic_if(&[StoragePrecondition{relative_path:"slot".into(),required:RequiredRecord::Exact(b"reserved-public-subject".to_vec())}],&[StorageWrite{relative_path:"slot".into(),bytes:b"completed-original".to_vec()},StorageWrite{relative_path:"outbox".into(),bytes:b"original-public-result".to_vec()}]).unwrap();
+            thread
+        }).unwrap();
+        thread.join().unwrap();
+        done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(store.read_bounded("fence").unwrap(),b"closed");
+        assert_eq!(store.read_bounded("outbox").unwrap(),b"original-public-result");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn retained_writer_panic_releases_lock_without_erasing_durable_reservation() {
+        let root=root("retained-writer-unwind");
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {fn drop(&mut self){let _=fs::remove_dir_all(&self.0);}}
+        let _cleanup=Cleanup(root.clone());
+        let mut store=AtomicStore::new(&root,1024).unwrap();
+        let failure=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.with_exclusive_writer(|writer| {
+                writer.commit_atomic(&[StorageWrite{relative_path:"slot".into(),bytes:b"reserved-before-failure".to_vec()}]).unwrap();
+                panic!("isolated public fixture failure after reservation");
+            }).unwrap();
+        }));
+        assert!(failure.is_err());
+        assert_eq!(store.read_bounded("slot").unwrap(),b"reserved-before-failure");
+        store.write_atomic("after",b"lock released").unwrap();
+        assert_eq!(store.read_bounded("after").unwrap(),b"lock released");
     }
 
     #[test]
