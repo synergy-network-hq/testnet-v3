@@ -134,3 +134,5 @@ pub fn verify_binding_with_verifier(
         )
         .map_err(|e| e.to_string())
 }
+
+pub mod r1;

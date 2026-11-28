@@ -21,6 +21,7 @@ synergy-state = { path = "../../crates/synergy-state" }
 synergy-block = { path = "../../crates/synergy-block" }
 synergy-protocol-types = { path = "../../crates/synergy-protocol-types" }
 
+synergy-address-engine = { version = "=2.0.0", path = "../../../../21-Aegis-Engine/synergy-address-engine" }
+
 [dev-dependencies]
 synergy-config = { path = "../../crates/synergy-config" }
-synergy-address-engine = { version = "=2.0.0", path = "../../../../21-Aegis-Engine/synergy-address-engine" }

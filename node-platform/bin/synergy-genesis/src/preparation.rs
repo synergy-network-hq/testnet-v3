@@ -734,7 +734,7 @@ mod tests {
         for class in 1..=5 {
             let presentation = format!("synv{class}.2.{}", "A".repeat(64));
             assert_eq!(presentation.len(), 72);
-            assert!(synergy_protocol_types::NodeAddress::parse(presentation).is_err());
+            assert!(synergy_protocol_types::NodeAddress::parse_historical(presentation).is_err());
         }
     }
     #[test]

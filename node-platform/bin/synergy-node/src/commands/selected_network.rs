@@ -49,8 +49,21 @@ pub(crate) fn verified_genesis(configuration: &NodeConfiguration) -> Result<Sign
     verified_selection(configuration).map(|(genesis, _)| genesis)
 }
 
-fn verified_selection(configuration: &NodeConfiguration) -> Result<(SignedGenesis,
-    synergy_address_engine::validator_provisioning::NetworkBinding), String> {
+fn verified_selection(
+    configuration: &NodeConfiguration,
+) -> Result<
+    (
+        SignedGenesis,
+        synergy_address_engine::validator_provisioning::NetworkBinding,
+    ),
+    String,
+> {
+    // Native R1 networks cannot enter the historical JSON32/single-65 trust
+    // path. The current typed verifier below is the separate admission seam;
+    // actual commissioning remains closed pending native workflow authority.
+    if matches!(configuration.chain_id, 9969 | 469) {
+        return Err("current native network startup requires authenticated R1 Genesis and separately authorized commissioning; historical JSON32 Genesis cannot supply current authority".into());
+    }
     let genesis_path = configuration
         .genesis_path
         .as_deref()
@@ -127,4 +140,28 @@ fn verified_selection(configuration: &NodeConfiguration) -> Result<(SignedGenesi
             genesis_sha256: digest,
         },
     ))
+}
+
+/// Read-only current-profile authentication before keys, databases, listeners or
+/// services. Complete input bytes are decoded/recomputed by the native owner.
+/// This result alone never starts a chain or authorizes a ceremony.
+pub(crate) fn verify_current_r1(
+    bytes: &[u8],
+    expected_catalog: &synergy_genesis::r1::profiles::ProfileCatalog,
+    authority: &synergy_address_engine::apqe::bootstrap_approvals_r1::PinnedBootstrapAuthority,
+    nic_approvals: &[synergy_address_engine::apqe::bootstrap_approvals_r1::IndexedRootApproval<
+        '_,
+    >],
+    genesis_approvals: &[synergy_address_engine::apqe::bootstrap_approvals_r1::IndexedRootApproval<'_>],
+    engine: &synergy_address_engine::apqe::crypto_engine::CryptoEngine,
+) -> Result<synergy_genesis::r1::VerifiedR1Genesis, String> {
+    synergy_genesis::r1::verify_bytes(
+        bytes,
+        expected_catalog,
+        authority,
+        nic_approvals,
+        genesis_approvals,
+        engine,
+    )
+    .map_err(|e| e.to_string())
 }
