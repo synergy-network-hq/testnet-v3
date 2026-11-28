@@ -273,3 +273,19 @@ fn original_finality_page_requires_complete_pinned_continuation_and_bounded_cano
     let mut other=request(base);other["network"]["network_incarnation_commitment"]["value"]=json!("00".repeat(64));
     assert_eq!(r1_read::decode::<FinalityProofPageArgs>(other,&expected()).unwrap_err().code,-32010);
 }
+
+#[test]
+fn transaction_index_reads_pin_the_exact_selector_and_preserve_u64_without_narrowing() {
+    let number="synergy_getTransactionByBlockNumberAndIndex";
+    let hash="synergy_getTransactionByBlockHashAndIndex";
+    let commitment=json!({"profile":{"name":"POSY-BLOCK-R1","revision":1},"algorithm":"SHA3-384","encoding":"lowercase-hex","value":"44".repeat(48)});
+    for index in ["0","1","18446744073709551615"] {
+        assert!(r1_read::preflight(number,request(json!({"height":"0","index":index})),&expected()).is_ok());
+        assert!(r1_read::preflight(hash,request(json!({"block_commitment":commitment,"index":index})),&expected()).is_ok());
+    }
+    assert!(r1_read::preflight(number,request(json!({"block_commitment":commitment,"index":"0"})),&expected()).is_err());
+    assert!(r1_read::preflight(hash,request(json!({"height":"0","index":"0"})),&expected()).is_err());
+    for index in [json!("01"),json!("1\n"),json!("18446744073709551616"),json!(-1),json!(1)] {
+        assert!(r1_read::preflight(number,request(json!({"height":"0","index":index})),&expected()).is_err());
+    }
+}

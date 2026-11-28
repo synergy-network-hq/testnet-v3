@@ -88,6 +88,8 @@ mod tests {
             .unwrap()
             .to_text();
         let args = match method {
+            "synergy_getTransactionByBlockHashAndIndex"=>json!({"index":"0","block_commitment":{"profile":{"name":"POSY-BLOCK-R1","revision":1},"algorithm":"SHA3-384","encoding":"lowercase-hex","value":"44".repeat(48)}}),
+            "synergy_getTransactionByBlockNumberAndIndex"=>json!({"height":"0","index":"0"}),
             "synergy_getFinalizedProofPageV1"=>json!({"kind":"finality","height":"0","offset":"0","limit":"65536"}),
             "synergy_getAccount"
             | "synergy_getProof"
@@ -122,7 +124,7 @@ mod tests {
         serde_json::to_vec(v).unwrap()
     }
     #[test]
-    fn exact_38_current_aliases_use_shared_typed_preflight_without_changing_legacy_access() {
+    fn exact_40_current_aliases_use_shared_typed_preflight_without_changing_legacy_access() {
         let c = context();
         let mut differs = false;
         for method in synergy_rpc::r1_read::METHODS {

@@ -953,6 +953,149 @@
       ],
       "additionalProperties": false
     },
+    "TransactionByBlockHashAndIndexRequest": {
+      "type": "object",
+      "properties": {
+        "api_version": {
+          "const": 1
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[\\x21-\\x7e]+$(?![\\s\\S])"
+        },
+        "caller_scope": {
+          "const": "public_read"
+        },
+        "network": {
+          "$ref": "#/definitions/NetworkCoordinate"
+        },
+        "args": {
+          "type": "object",
+          "properties": {
+            "height": {
+              "type": "null"
+            },
+            "block_commitment": {
+              "type": "object",
+              "properties": {
+                "profile": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "pattern": "^[\\x21-\\x7e]+$(?![\\s\\S])"
+                    },
+                    "revision": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 4294967295
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "revision"
+                  ],
+                  "additionalProperties": false
+                },
+                "algorithm": {
+                  "const": "SHA3-384"
+                },
+                "encoding": {
+                  "const": "lowercase-hex"
+                },
+                "value": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{96}$(?![\\s\\S])"
+                }
+              },
+              "required": [
+                "profile",
+                "algorithm",
+                "encoding",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            "index": {
+              "type": "string",
+              "pattern": "^(?:0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]{1}|1844674407370955161[0-4]|18446744073709551615)$(?![\\s\\S])",
+              "minLength": 1,
+              "maxLength": 20
+            }
+          },
+          "required": [
+            "block_commitment",
+            "index"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "caller_scope",
+        "network",
+        "args"
+      ],
+      "additionalProperties": false
+    },
+    "TransactionByBlockNumberAndIndexRequest": {
+      "type": "object",
+      "properties": {
+        "api_version": {
+          "const": 1
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[\\x21-\\x7e]+$(?![\\s\\S])"
+        },
+        "caller_scope": {
+          "const": "public_read"
+        },
+        "network": {
+          "$ref": "#/definitions/NetworkCoordinate"
+        },
+        "args": {
+          "type": "object",
+          "properties": {
+            "height": {
+              "type": "string",
+              "pattern": "^(?:0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]{1}|1844674407370955161[0-4]|18446744073709551615)$(?![\\s\\S])",
+              "minLength": 1,
+              "maxLength": 20
+            },
+            "block_commitment": {
+              "type": "null"
+            },
+            "index": {
+              "type": "string",
+              "pattern": "^(?:0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]{1}|1844674407370955161[0-4]|18446744073709551615)$(?![\\s\\S])",
+              "minLength": 1,
+              "maxLength": 20
+            }
+          },
+          "required": [
+            "height",
+            "index"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "caller_scope",
+        "network",
+        "args"
+      ],
+      "additionalProperties": false
+    },
     "StoredReadAnchor": {
       "type": "object",
       "properties": {
@@ -2858,6 +3001,90 @@
       ],
       "additionalProperties": false
     },
+    "GetTransactionByBlockHashAndIndexResponse": {
+      "type": "object",
+      "properties": {
+        "api_version": {
+          "const": 1
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[\\x21-\\x7e]+$(?![\\s\\S])"
+        },
+        "network": {
+          "$ref": "#/definitions/NetworkCoordinate"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TransactionProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "proof_profile_status": {
+          "const": "STORED_PROJECTION_REQUIRES_INDEPENDENT_POSY_VERIFICATION"
+        },
+        "finality_verified_by_rpc": {
+          "const": false
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "network",
+        "result",
+        "proof_profile_status",
+        "finality_verified_by_rpc"
+      ],
+      "additionalProperties": false
+    },
+    "GetTransactionByBlockNumberAndIndexResponse": {
+      "type": "object",
+      "properties": {
+        "api_version": {
+          "const": 1
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[\\x21-\\x7e]+$(?![\\s\\S])"
+        },
+        "network": {
+          "$ref": "#/definitions/NetworkCoordinate"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TransactionProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "proof_profile_status": {
+          "const": "STORED_PROJECTION_REQUIRES_INDEPENDENT_POSY_VERIFICATION"
+        },
+        "finality_verified_by_rpc": {
+          "const": false
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "network",
+        "result",
+        "proof_profile_status",
+        "finality_verified_by_rpc"
+      ],
+      "additionalProperties": false
+    },
     "GetTransactionStatusResponse": {
       "type": "object",
       "properties": {
@@ -3896,6 +4123,12 @@
     },
     {
       "$ref": "#/definitions/FinalityProofPageRequest"
+    },
+    {
+      "$ref": "#/definitions/TransactionByBlockHashAndIndexRequest"
+    },
+    {
+      "$ref": "#/definitions/TransactionByBlockNumberAndIndexRequest"
     }
   ],
   "x-method-contracts": {
@@ -3914,6 +4147,8 @@
     "synergy_getBlockTransactionCount": "#/definitions/BlockRequest",
     "synergy_getTransactionsInBlock": "#/definitions/BlockRequest",
     "synergy_getBlockReceipts": "#/definitions/BlockRequest",
+    "synergy_getTransactionByBlockHashAndIndex": "#/definitions/TransactionByBlockHashAndIndexRequest",
+    "synergy_getTransactionByBlockNumberAndIndex": "#/definitions/TransactionByBlockNumberAndIndexRequest",
     "synergy_getFinalizedProofPageV1": "#/definitions/FinalityProofPageRequest",
     "synergy_getBlockByHash": "#/definitions/BlockByHashRequest",
     "synergy_getBlockByNumber": "#/definitions/BlockByNumberRequest",
@@ -3950,6 +4185,8 @@
     "synergy_getTransactionByHash": "#/definitions/GetTransactionByHashResponse",
     "synergy_getTransactionReceipt": "#/definitions/GetTransactionReceiptResponse",
     "synergy_getReceipt": "#/definitions/GetReceiptResponse",
+    "synergy_getTransactionByBlockHashAndIndex": "#/definitions/GetTransactionByBlockHashAndIndexResponse",
+    "synergy_getTransactionByBlockNumberAndIndex": "#/definitions/GetTransactionByBlockNumberAndIndexResponse",
     "synergy_getTransactionStatus": "#/definitions/GetTransactionStatusResponse",
     "synergy_getTransactionFees": "#/definitions/GetTransactionFeesResponse",
     "synergy_getBlock": "#/definitions/GetBlockResponse",
@@ -4007,6 +4244,8 @@
       "synergy_getReadiness",
       "synergy_getReceipt",
       "synergy_getTransaction",
+      "synergy_getTransactionByBlockHashAndIndex",
+      "synergy_getTransactionByBlockNumberAndIndex",
       "synergy_getTransactionByHash",
       "synergy_getTransactionFees",
       "synergy_getTransactionReceipt",

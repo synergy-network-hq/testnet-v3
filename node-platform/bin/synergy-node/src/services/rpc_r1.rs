@@ -18,7 +18,7 @@ use synergy_rpc::{
         CanonicalReadProvider, FinalizedAccountView, FinalizedBlockView, FinalizedTransactionView,
         ReadContract,
     },
-    r1_read::{self, AccountArgs, BlockArgs, BlockRead, EmptyArgs, FinalityProofPageArgs, TransactionArgs},
+    r1_read::{self, AccountArgs, BlockArgs, BlockRead, EmptyArgs, FinalityProofPageArgs, TransactionArgs, TransactionInBlockArgs},
     RpcError,
 };
 use synergy_state::r1_finalized::{
@@ -179,6 +179,13 @@ impl CanonicalR1QueryStore {
             "proof_profile_status":"STORED_PROJECTION_REQUIRES_INDEPENDENT_POSY_VERIFICATION",
             "finality_verified_by_rpc":false})
     }
+    fn transaction_value(&self,read:&synergy_state::r1_finalized::R1TransactionRead)->Result<Value,RpcError> {
+        let status=match read.status { R1TransactionStatus::Applied=>"applied",R1TransactionStatus::Reverted=>"reverted",R1TransactionStatus::ResourceExhausted=>"resource_exhausted" };
+        Ok(json!({"stored_anchor":self.anchor(&read.anchor)?,"transaction_id":read.transaction_id,"status":status,
+            "gas_used":read.gas_used.to_string(),"fee_paid_nwei":read.fee_paid_nwei.to_string(),
+            "receipt_profile":profile(self.genesis.receipt_profile()),
+            "events_commitment":{"encoding":"lowercase-hex","value":hex(&read.events_commitment)},"error_code":read.error_code}))
+    }
     fn block_value(&self, read: &StoredBlockRead) -> Result<Value, RpcError> {
         if &read.block_profile != self.genesis.block_profile()
             || &read.receipt_profile != self.genesis.receipt_profile()
@@ -257,6 +264,12 @@ impl CanonicalReadProvider for CanonicalR1QueryStore {
                 }
             }
         }
+        if matches!(method,"synergy_getTransactionByBlockHashAndIndex"|"synergy_getTransactionByBlockNumberAndIndex") {
+            let query=r1_read::decode::<TransactionInBlockArgs>(params.clone(),expected)?;
+            if let BlockRead::Commitment{profile,..}=query.args.block {
+                if &profile!=self.genesis.block_profile() { return Err(RpcError::invalid_params("block profile mismatch")); }
+            }
+        }
         if method=="synergy_getFinalizedProofPageV1" {
             let query=r1_read::decode::<FinalityProofPageArgs>(params.clone(),expected)?;
             if let BlockRead::Commitment {profile,..}=query.args.block {
@@ -283,6 +296,32 @@ impl CanonicalReadProvider for CanonicalR1QueryStore {
     fn r1_read(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         let expected = self.genesis.coordinate();
         match method {
+            "synergy_getTransactionByBlockHashAndIndex"|"synergy_getTransactionByBlockNumberAndIndex"=>{
+                // Direct calls receive the same method-specific selector checks
+                // as prepared native/HTTP batches, before storage I/O.
+                self.preflight_current_read(method,&params)?;
+                let query=r1_read::decode::<TransactionInBlockArgs>(params,expected)?;
+                let store=self.store()?;
+                let block=match query.args.block {
+                    BlockRead::Height(height)=>store.block(height),
+                    BlockRead::Commitment{digest,..}=>store.block_by_digest(digest),
+                }.map_err(fault)?;
+                let result=if let Some(block)=block {
+                    if &block.block_profile!=self.genesis.block_profile() { return Err(fault("stored block profile mismatch")); }
+                    if let Some(id)=usize::try_from(query.args.index).ok().and_then(|i|block.transactions.get(i)) {
+                        // Governed transaction IDs remain distinct; a compact
+                        // native receipt projection is not an invented SXCP DTO.
+                        if !id.starts_with("syntxn") { return Err(fault("governed transaction projection unavailable")); }
+                        let id=synergy_address::r1_public::TransactionIdentifierPresentation::parse(id).map_err(fault)?;
+                        let read=store.transaction(&id).map_err(fault)?.ok_or_else(||fault("stored transaction projection unavailable"))?;
+                        if read.transaction_id!=id.to_text() || read.anchor!=block.anchor {
+                            return Err(fault("stored transaction block mismatch"));
+                        }
+                        self.transaction_value(&read)?
+                    }else{Value::Null}
+                }else{Value::Null};
+                Ok(self.response(query.request_id,result))
+            }
             "synergy_getFinalizedProofPageV1" => {
                 let query=r1_read::decode::<FinalityProofPageArgs>(params,expected)?;
                 if let BlockRead::Commitment {profile,..}=&query.args.block {
@@ -495,10 +534,7 @@ impl CanonicalReadProvider for CanonicalR1QueryStore {
                     } else if method=="synergy_getTransactionFees" {
                         json!({"stored_anchor":self.anchor(&read.anchor)?,"transaction_id":read.transaction_id,"fee_paid_nwei":read.fee_paid_nwei.to_string()})
                     } else {
-                        json!({"stored_anchor":self.anchor(&read.anchor)?,"transaction_id":read.transaction_id,"status":status,
-                            "gas_used":read.gas_used.to_string(),"fee_paid_nwei":read.fee_paid_nwei.to_string(),
-                            "receipt_profile":profile(self.genesis.receipt_profile()),
-                            "events_commitment":{"encoding":"lowercase-hex","value":hex(&read.events_commitment)},"error_code":read.error_code})
+                        self.transaction_value(&read)?
                     })
                 }).transpose()?.unwrap_or(Value::Null);
                 Ok(self.response(query.request_id, result))

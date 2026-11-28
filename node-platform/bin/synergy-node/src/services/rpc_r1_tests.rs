@@ -272,6 +272,8 @@ fn actual_private_genesis_context_drives_all_registered_typed_read_adapters() {
     let server = native_server(&provider);
     for method in r1_read::METHODS {
         let args = match *method {
+            "synergy_getTransactionByBlockHashAndIndex"=>json!({"index":"0","block_commitment":commitment(genesis.block_profile(),&block.anchor.block_digest)}),
+            "synergy_getTransactionByBlockNumberAndIndex"=>json!({"height":"0","index":"0"}),
             "synergy_getFinalizedProofPageV1"=>json!({"kind":"finality","height":"0","offset":"0","limit":"65536"}),
             "synergy_getAccount"
             | "synergy_getProof"
@@ -447,7 +449,7 @@ fn actual_private_genesis_context_drives_all_registered_typed_read_adapters() {
                 assert_eq!(response["result"]["nonce"], "0");
                 assert_eq!(response["result"]["policy_epoch"], "1");
             }
-            "synergy_getTransactionReceipt" => {
+            "synergy_getTransactionReceipt"|"synergy_getTransactionByBlockHashAndIndex"|"synergy_getTransactionByBlockNumberAndIndex" => {
                 assert_eq!(response["result"]["transaction_id"], tx_id);
                 assert_eq!(response["result"]["status"], "resource_exhausted");
                 assert_eq!(response["result"]["gas_used"], "7");
@@ -469,6 +471,22 @@ fn actual_private_genesis_context_drives_all_registered_typed_read_adapters() {
             }
             _ => {}
         }
+    }
+    for method in ["synergy_getTransactionByBlockHashAndIndex","synergy_getTransactionByBlockNumberAndIndex"] {
+        let selector=if method=="synergy_getTransactionByBlockHashAndIndex" {json!({"block_commitment":commitment(genesis.block_profile(),&block.anchor.block_digest)})}
+            else {json!({"height":"0"})};
+        for index in ["1","18446744073709551615"] {
+            let mut args=selector.clone();args["index"]=json!(index);
+            let response=provider.r1_read(method,params(&genesis,args)).unwrap();
+            assert_eq!(response["result"],Value::Null);assert_eq!(response["finality_verified_by_rpc"],false);
+        }
+        for bad in [json!("01"),json!("1\n"),json!("18446744073709551616"),json!(1)] {
+            let mut args=selector.clone();args["index"]=bad;
+            assert_eq!(provider.r1_read(method,params(&genesis,args)).unwrap_err().code,-32602);
+        }
+        let wrong=if method=="synergy_getTransactionByBlockHashAndIndex" {json!({"height":"0","index":"0"})}
+            else{json!({"block_commitment":commitment(genesis.block_profile(),&block.anchor.block_digest),"index":"0"})};
+        assert_eq!(provider.r1_read(method,params(&genesis,wrong)).unwrap_err().code,-32602);
     }
     // Reassemble every original byte through the actual registered RpcServer;
     // a checksum detects page mix-up but supplies no PoSy verification authority.

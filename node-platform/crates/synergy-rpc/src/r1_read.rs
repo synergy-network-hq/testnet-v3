@@ -23,6 +23,8 @@ pub const METHODS: &[&str] = &[
     "synergy_getBlock",
     "synergy_getBlockReceipts",
     "synergy_getTransaction",
+    "synergy_getTransactionByBlockHashAndIndex",
+    "synergy_getTransactionByBlockNumberAndIndex",
     "synergy_getBalance",
     "synergy_getAccountNonce",
     "synergy_getBlockNumber",
@@ -69,6 +71,10 @@ pub fn preflight(
     expected: &R1NetworkCoordinate,
 ) -> Result<(), RpcError> {
     match method {
+        "synergy_getTransactionByBlockHashAndIndex"|"synergy_getTransactionByBlockNumberAndIndex"=>{
+            let query=decode::<TransactionInBlockArgs>(params,expected)?;
+            if (method=="synergy_getTransactionByBlockHashAndIndex")!=matches!(query.args.block,BlockRead::Commitment{..}) { return Err(invalid()); }
+        }
         "synergy_getFinalizedProofPageV1" => { decode::<FinalityProofPageArgs>(params, expected)?; }
         "synergy_getAccount"
         | "synergy_getProof"
@@ -450,5 +456,21 @@ impl ReadArguments for FinalityProofPageArgs {
             return Err(invalid());
         }
         Ok(FinalityProofPageRead { block,offset,limit,expected_total_bytes:total,expected_transport_digest:digest })
+    }
+}
+
+#[derive(Debug,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransactionInBlockArgs {
+    pub height:Option<String>,
+    pub block_commitment:Option<ProfileCommitmentWire>,
+    pub index:String,
+}
+#[derive(Debug)]
+pub struct TransactionInBlockRead { pub block:BlockRead,pub index:u64 }
+impl ReadArguments for TransactionInBlockArgs {
+    type Parsed=TransactionInBlockRead;
+    fn parse(self)->Result<Self::Parsed,RpcError> {
+        Ok(TransactionInBlockRead {block:BlockArgs{height:self.height,block_commitment:self.block_commitment}.parse()?,index:decimal(&self.index)?})
     }
 }
