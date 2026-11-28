@@ -36,7 +36,7 @@ READS = frozenset(('gateway_vpn_preflight','upgrade_native_preflight','gateway_i
 MUTATIONS = frozenset(('gateway_install','gateway_target_generate','gateway_target_commission','gateway_admission_prepare','gateway_admission_sign','treasury_send_prepare','treasury_send_submit','treasury_prepare','network_transport_prepare','network_transport_sign','guest_create','guest_stop','guest_resume','guest_remove','install','commission','register','vpn_enroll','vpn_bind','vpn_retire','vpn_cancel_unused','vpn_stop','vpn_resume','boot_policy','start','stop','restart','upgrade','uninstall','identity_generate',
                        'formation_prepare','genesis_stage','genesis_bind','network_formation_prepare','network_formation_sign'))
 FORMATION_CONTEXT = 'tmp/formation-context.json'
-MUTATIONS = MUTATIONS | {'r1_identity_generate','r1_identity_prove','r1_identity_rebind'}
+MUTATIONS = MUTATIONS | {'r1_identity_generate','r1_identity_prove','r1_identity_rebind','r1_root_approval_use'}
 READS = READS | {'r1_identity_status'}
 READS = READS | {'r1_identity_preview'}
 FORMATION_CUSTODY = 'tmp/pre-genesis-validator'
@@ -155,11 +155,11 @@ def parse_request(raw):
     operation, parameters = value['operation'], value['parameters']
     require(isinstance(operation,str) and operation in READS | MUTATIONS
             and isinstance(parameters,dict), 'Unsupported operation', 'invalid_request')
-    require(operation in ('r1_identity_prove','r1_identity_rebind') and len(raw)<=1024*1024 or operation=='genesis_stage' or operation in ('network_formation_prepare','network_transport_prepare','treasury_send_prepare','gateway_admission_prepare','gateway_admission_preflight','gateway_target_commission','gateway_target_commission_preflight') and len(raw)<=2*1024*1024 or len(raw)<=MAX_REQUEST,'Request exceeds operation limit','invalid_request')
-    if operation in ('r1_identity_prove','r1_identity_rebind'):
-        from r1_identity import validate_proof,validate_rebind,MAX_IDENTITY_OPERATION_REQUEST
+    require(operation in ('r1_identity_prove','r1_identity_rebind','r1_root_approval_use') and len(raw)<=1024*1024 or operation=='genesis_stage' or operation in ('network_formation_prepare','network_transport_prepare','treasury_send_prepare','gateway_admission_prepare','gateway_admission_preflight','gateway_target_commission','gateway_target_commission_preflight') and len(raw)<=2*1024*1024 or len(raw)<=MAX_REQUEST,'Request exceeds operation limit','invalid_request')
+    if operation in ('r1_identity_prove','r1_identity_rebind','r1_root_approval_use'):
+        from r1_identity import validate_proof,validate_rebind,validate_root_approval,MAX_IDENTITY_OPERATION_REQUEST
         require(len(raw)<=MAX_IDENTITY_OPERATION_REQUEST,'Request exceeds identity operation capacity','invalid_request')
-        try:(validate_proof if operation=='r1_identity_prove' else validate_rebind)(parameters)
+        try:{'r1_identity_prove':validate_proof,'r1_identity_rebind':validate_rebind,'r1_root_approval_use':validate_root_approval}[operation](parameters)
         except (ValueError,KeyError,TypeError):raise Refused('invalid_request','Exact managed identity operation required') from None
         return value
     if operation in ('r1_identity_generate','r1_identity_preview'):
@@ -2015,7 +2015,7 @@ class Controller:
         if op=='identity_preflight': return self.identity_preflight()[0]
         if op=='identity_status': return self.identity_status()
         if op=='identity_generate': return self.identity_generate(request)
-        if op in ('r1_identity_prove','r1_identity_rebind'):
+        if op in ('r1_identity_prove','r1_identity_rebind','r1_root_approval_use'):
             from r1_identity import run_identity_operation
             return run_identity_operation(self,request)
         if op=='r1_identity_generate':
@@ -2092,7 +2092,8 @@ class Controller:
 
 R1_AUTHORIZATION_FILES={'r1/birth.json':1024*1024,'r1/profile-catalog.cbor':1024*1024,
     'r1/nic-approvals.json':1024*1024,'r1/genesis-core.cbor':4*1024*1024,
-    'r1/genesis-approvals.json':1024*1024,'r1/release-acceptance.json':65536}
+    'r1/genesis-approvals.json':1024*1024,'r1/release-acceptance.json':65536,
+    'r1/formation-registrations.json':4*1024*1024,'r1/root-approval-release-acceptance.json':65536}
 
 
 def control_inventory(root):

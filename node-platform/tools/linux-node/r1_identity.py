@@ -149,7 +149,7 @@ def controller_inventory(controller):
                 'Invalid attributed R1 dispatch receipt')
         request=parse_request(json.dumps(value['request'],separators=(',',':')).encode())
         key=request_digest(request)
-        require(request['operation'] in ('r1_identity_generate','r1_identity_prove','r1_identity_rebind') and value['request_sha256']==key
+        require(request['operation'] in ('r1_identity_generate','r1_identity_prove','r1_identity_rebind','r1_root_approval_use') and value['request_sha256']==key
                 and path.name==key+'.json' and not (controller.control/'grants'/path.name).exists(),
                 'R1 dispatch receipt is not a consumed exact request')
         audit=controller.direct(controller.control/'audit.jsonl',True).read_bytes()
@@ -164,7 +164,8 @@ def controller_inventory(controller):
 MAX_IDENTITY_OPERATION_REQUEST=1024*1024
 MAX_ORIGINAL_PUBLIC_RESULT=1024*1024
 IDENTITY_OPERATIONS={'r1_identity_prove':('prove-managed-r1-identity','read-managed-r1-identity-proof-result'),
-    'r1_identity_rebind':('rebind-managed-r1-identity','read-managed-r1-identity-rebind-result')}
+    'r1_identity_rebind':('rebind-managed-r1-identity','read-managed-r1-identity-rebind-result'),
+    'r1_root_approval_use':('use-managed-r1-root-approval','read-managed-r1-root-approval-result')}
 
 
 def _hex(value,width,nonzero=False):
@@ -231,6 +232,44 @@ def validate_rebind(parameters):
         raise ValueError('Exact original creation request digest required')
 
 
+def validate_root_approval(parameters):
+    """Public carrier bounds only; the sole APQE owner validates scope/authority."""
+    fields={'creation','root_index','public_key','stage','expected_journal_generation',
+        'expected_envelope_commitment_hex','full_binding_aad_hex',
+        'original_creation_request_digest_hex','operation_nonce_hex','lifetime_seconds'}
+    if not isinstance(parameters,dict) or set(parameters)!=fields:
+        raise ValueError('Exact managed root approval parameters required')
+    validate(parameters['creation']);_public_key(parameters['public_key'])
+    creation,key=parameters['creation'],parameters['public_key']
+    if (creation['role'],creation['algorithm'],creation['key_generation'])!=(key['role'],key['algorithm'],str(key['key_generation'])) or key['algorithm']!='ML-DSA-87':
+        raise ValueError('Exact original BootstrapRoot public key required')
+    if type(parameters['root_index']) is not int or not 0<=parameters['root_index']<32:
+        raise ValueError('Bounded canonical root index required')
+    for field,maximum in [('expected_journal_generation',2**64-3),('lifetime_seconds',300)]:
+        value=parameters[field]
+        if not isinstance(value,str) or re.fullmatch('[1-9][0-9]{0,19}',value) is None or int(value)>maximum:
+            raise ValueError('Canonical bounded root approval generation/lifetime required')
+    for field,width in [('expected_envelope_commitment_hex',128),
+        ('original_creation_request_digest_hex',64),('operation_nonce_hex',64)]:
+        if not _hex(parameters[field],width,True):
+            raise ValueError('Complete root approval pin/nonce required')
+    aad=parameters['full_binding_aad_hex']
+    if not isinstance(aad,str) or not 2<=len(aad)<=MAX_IDENTITY_OPERATION_REQUEST or len(aad)%2 or re.fullmatch('[a-f0-9]+',aad) is None:
+        raise ValueError('Bounded complete original public binding AAD required')
+    stage=parameters['stage']
+    if not isinstance(stage,dict):raise ValueError('Exact root approval stage required')
+    kind=stage.get('kind')
+    if kind=='NIC':
+        if set(stage)!={'kind'}:raise ValueError('NIC approval has no later stage fields')
+    elif kind=='FORMATION':
+        if set(stage)!={'kind','registry_commitment_hex','input_commitment_hex'} or not all(_hex(stage.get(k),128,True) for k in ('registry_commitment_hex','input_commitment_hex')):
+            raise ValueError('Complete formation subject required')
+    elif kind=='GENESIS':
+        if set(stage)!={'kind','genesis_digest_hex'} or not _hex(stage.get('genesis_digest_hex'),96,True):
+            raise ValueError('Complete schema2 Genesis subject required')
+    else:raise ValueError('Closed root approval purpose required')
+
+
 def _original_public_result(raw):
     # No report/approval object can stand in for Root's original durable bytes.
     from controller import require
@@ -255,8 +294,10 @@ def run_identity_operation(controller,request):
     operation=request['operation'];p=request['parameters']
     if operation=='r1_identity_prove':validate_proof(p);pending=p
     elif operation=='r1_identity_rebind':validate_rebind(p);pending=p['pending']
+    elif operation=='r1_root_approval_use':validate_root_approval(p);pending=p
     else:raise ValueError('Exact managed identity operation required')
     creation=pending['creation'];key=request_digest(request);command,read_command=IDENTITY_OPERATIONS[operation]
+    operation_nonce=p['operation_nonce_hex'] if operation=='r1_root_approval_use' else creation['operation_nonce_hex']
     maximum=4*((MAX_ORIGINAL_PUBLIC_RESULT+2)//3)+8
     with _lifecycle_lock(controller.root):
         installation,manifest=_sealed_receipt(controller.root)
@@ -267,7 +308,7 @@ def run_identity_operation(controller,request):
         # Only Root's same network/nonce/request-bound original result may satisfy
         # a replay. A missing/ambiguous result never authorizes recomputation.
         result=_original_public_result(native([controller.root/'bin/synergy-keytool',read_command,controller.root,
-            creation['operation_nonce_hex'],key],maximum_stdout=maximum))
+            operation_nonce,key],maximum_stdout=maximum))
         if result is not None:return result
         target=controller.control/'r1-creation'/(key+'.json')
         require(not target.exists() and not target.is_symlink(),

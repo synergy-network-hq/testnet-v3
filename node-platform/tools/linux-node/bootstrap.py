@@ -1112,6 +1112,7 @@ def stage_engineering_update(stream, release_id, pin, reconcile=False):
 # The document is not a public policy issuer, membership proof or credential API.
 AUTHORIZATION_PROFILE='nodenetwork-isolated-formation-authorization-v1'
 R1_AUTHORIZATION_PROFILE='nodenetwork-r1-user-validator-creation-authorization-v1'
+INTERNAL_R1_APPROVAL_PROFILE='synergy-internal-r1-root-approval-authorization-v1'
 AUTHORIZATION_LIMIT=12*1024*1024
 R1_AUTHORIZATION_FILES={'r1/birth.json':1024*1024,'r1/profile-catalog.cbor':1024*1024,
     'r1/nic-approvals.json':1024*1024,'r1/genesis-core.cbor':4*1024*1024,
@@ -1122,6 +1123,11 @@ AUTHORIZATION_FILES={'network-provisioning.json':16384,'gateway-purpose.json':16
         'genesis.json':4*1024*1024,'authority.json':1024*1024,'authority-root.pub':8192,
         'network-manifest.json':1024*1024,'transport-registry.json':1024*1024,'transport-root.pub':8192}.items()}}
 AUTHORIZATION_FILES.update(R1_AUTHORIZATION_FILES)
+INTERNAL_R1_APPROVAL_FILES={key:value for key,value in R1_AUTHORIZATION_FILES.items() if key in
+    ('r1/birth.json','r1/profile-catalog.cbor','r1/nic-approvals.json','r1/genesis-core.cbor')}
+INTERNAL_R1_APPROVAL_FILES.update({'r1/formation-registrations.json':4*1024*1024,
+    'r1/root-approval-release-acceptance.json':65536})
+AUTHORIZATION_FILES.update(INTERNAL_R1_APPROVAL_FILES)
 
 
 def r1_creation_selection(doc):
@@ -1326,6 +1332,126 @@ def verify_guest_local_ssh(guest):
             'Managed guest local SSH identity differs from its authenticated physical-host receipt')
 
 
+def internal_r1_approval_selection(doc):
+    """Internal ceremony carrier only. No user NodeNetwork scope or authority."""
+    value=doc.get('r1_root_approval')
+    require(isinstance(value,dict) and set(value)=={'review','context'},'Exact internal RootApproval selection required')
+    review=value['review'];context=value['context']
+    require(isinstance(review,dict) and set(review)=={'chain_id','nic_selection','root_index','stage','source'}
+            and review['chain_id']==str(doc['chain_id']) and isinstance(context,dict),
+            'Exact native RootApproval review required')
+    selection=review['nic_selection']
+    fields={'managed_root','pinned_bootstrap_input_path','pinned_bootstrap_input_sha256',
+        'profile_catalog_path','profile_catalog_sha256','approvals_path','expected_nic_hex'}
+    require(isinstance(selection,dict) and set(selection)==fields and selection['managed_root']==str(ROOT),
+            'Internal RootApproval managed root differs')
+    paths={'pinned_bootstrap_input_path':'r1/birth.json','profile_catalog_path':'r1/profile-catalog.cbor',
+           'approvals_path':'r1/nic-approvals.json'}
+    for key,name in paths.items():
+        require(selection[key]=='tmp/controller/authorization/inputs/'+name,'Internal RootApproval input path differs')
+    for key,name in [('pinned_bootstrap_input_sha256','r1/birth.json'),('profile_catalog_sha256','r1/profile-catalog.cbor')]:
+        require(selection[key]==doc['artifacts'].get(name),'Internal RootApproval public pin differs')
+    require(type(review['root_index']) is int and 0<=review['root_index']<32
+            and isinstance(selection['expected_nic_hex'],str) and re.fullmatch('[a-f0-9]{128}',selection['expected_nic_hex'])
+            and selection['expected_nic_hex']!='0'*128,'Exact prospective RootApproval subject required')
+    stage=review['stage'];source=review['source']
+    require(isinstance(stage,dict),'Exact RootApproval stage required')
+    kind=stage.get('kind');required={'r1/birth.json','r1/profile-catalog.cbor','r1/root-approval-release-acceptance.json'}
+    if kind=='NIC':
+        require(set(stage)=={'kind'} and source is None,'NIC cannot depend on its own future approvals')
+    elif kind in ('FORMATION','GENESIS'):
+        fields={'kind','registry_commitment_hex','input_commitment_hex'} if kind=='FORMATION' else {'kind','genesis_digest_hex'}
+        require(set(stage)==fields,'Closed actual RootApproval stage required')
+        for key in fields-{'kind'}:
+            width=96 if key=='genesis_digest_hex' else 128
+            require(isinstance(stage[key],str) and re.fullmatch('[a-f0-9]{'+str(width)+'}',stage[key])
+                    and stage[key]!='0'*width,'Exact RootApproval commitment required')
+        name='r1/formation-registrations.json' if kind=='FORMATION' else 'r1/genesis-core.cbor'
+        require(isinstance(source,dict) and set(source)=={'path','sha256'}
+                and source['path']=='tmp/controller/authorization/inputs/'+name
+                and source['sha256']==doc['artifacts'].get(name),'Exact actual RootApproval source required')
+        required|={'r1/nic-approvals.json',name}
+    else:require(False,'Unsupported RootApproval stage')
+    require(set(doc['artifacts'])==required and doc['genesis_pins'] is None and 'guest' not in doc['target']
+            and len(doc['requests'])==1 and doc['requests'][0]['operation']=='r1_root_approval_use',
+            'RootApproval cannot provision nodes, activate Genesis or grant unrelated operations')
+    expected={'managed_root','chain_id','nic_selection','pinned_birth_frame_hex','pinned_root_threshold',
+        'profile_catalog_commitment_hex','root_index','public_key','stage','stage_source','approval_plan_commitment_hex',
+        'slot_ref','creation_scope_commitment_hex','original_creation_request_digest_hex',
+        'expected_journal_generation','expected_envelope_commitment_hex','full_binding_aad_hex','max_lifetime_seconds'}
+    require(set(context)==expected and context['managed_root']==str(ROOT)
+            and context['chain_id']==review['chain_id'] and context['nic_selection']==selection
+            and context['root_index']==review['root_index'] and context['stage']==stage
+            and isinstance(context['max_lifetime_seconds'],str)
+            and re.fullmatch('[1-9][0-9]{0,2}',context['max_lifetime_seconds'])
+            and int(context['max_lifetime_seconds'])<=300,'Closed protected RootApproval context required')
+    return value,selection,paths
+
+
+def internal_r1_approval_release_acceptance(doc,inputs):
+    # Independent native-owner pin is deliberately absent until actual profile,
+    # provider, custody and internal workflow qualification has been accepted.
+    from controller import Refused
+    pin=globals().get('NATIVE_AUTHENTICATED_INTERNAL_R1_ROOT_APPROVAL_RELEASE_SHA256')
+    if not isinstance(pin,str) or re.fullmatch('[a-f0-9]{64}',pin) is None:
+        raise Refused('release_acceptance_unavailable','Internal RootApproval native release acceptance unavailable')
+    raw=inputs.get('r1/root-approval-release-acceptance.json')
+    require(isinstance(raw,bytes) and hashlib.sha256(raw).hexdigest()==pin
+            and doc['artifacts'].get('r1/root-approval-release-acceptance.json')==pin,
+            'Internal RootApproval acceptance differs from independent native pin')
+    record=json.loads(raw)
+    fields={'schema','scope','release_id','manifest_sha256','target','chain_id','nic_hex',
+        'profile_catalog_commitment_hex','bootstrap_input_sha256','catalog_sha256','allowed_stages','qualification_evidence_sha256'}
+    _,selection,_=internal_r1_approval_selection(doc)
+    require(isinstance(record,dict) and set(record)==fields
+            and record['schema']=='synergy-internal-r1-root-approval-release-acceptance-v1'
+            and record['scope']=='INTERNAL_NETWORK_CEREMONY' and record['target']=='linux-x86_64'
+            and record['release_id']==doc['release_id'] and record['manifest_sha256']==doc['manifest_sha256']
+            and record['chain_id']==str(doc['chain_id']) and record['nic_hex']==selection['expected_nic_hex']
+            and record['bootstrap_input_sha256']==selection['pinned_bootstrap_input_sha256']
+            and record['catalog_sha256']==selection['profile_catalog_sha256']
+            and record['profile_catalog_commitment_hex']==doc['r1_root_approval']['context']['profile_catalog_commitment_hex'],
+            'Internal RootApproval release/context selection differs')
+    stages=record['allowed_stages'];evidence=record['qualification_evidence_sha256']
+    require(isinstance(stages,list) and 0<len(stages)<=3 and len(set(stages))==len(stages)
+            and all(stage in ('NIC','FORMATION','GENESIS') for stage in stages)
+            and doc['r1_root_approval']['review']['stage']['kind'] in stages
+            and isinstance(evidence,list) and 0<len(evidence)<=64
+            and all(isinstance(p,str) and re.fullmatch('[a-f0-9]{64}',p) and p!='0'*64 for p in evidence)
+            and len(set(evidence))==len(evidence),'Actual native RootApproval qualification required')
+    return record
+
+
+def internal_r1_approval_review(root,replacement,policy,doc,acceptance):
+    from synergy_linux import native
+    value,selection,paths=internal_r1_approval_selection(doc)
+    require(replacement==root/'tmp/controller-authorization' and policy.get('community_enrollment') is False,
+            'Internal RootApproval requires existing controlled native operator workflow')
+    staged=json.loads(json.dumps(value['review']))
+    for key,name in paths.items():
+        staged['nic_selection'][key]='tmp/controller-authorization/authorization/inputs/'+name
+    if staged['source'] is not None:
+        staged['source']['path']=staged['source']['path'].replace('tmp/controller/','tmp/controller-authorization/',1)
+    result=json.loads(native([root/'bin/synergy-keytool','review-managed-r1-root-approval-context',root,
+        json.dumps(staged,sort_keys=True,separators=(',',':'))],maximum_stdout=1024*1024))
+    fields={'schema','authority_granted','chain_id','nic_hex','pinned_birth_frame_hex','pinned_root_threshold',
+        'profile_catalog_commitment_hex','root_index','public_key','stage','stage_source','approval_plan_commitment_hex'}
+    require(isinstance(result,dict) and set(result)==fields
+            and result['schema']=='synergy-r1-root-approval-context-review-v1' and result['authority_granted'] is False
+            and result['chain_id']==str(doc['chain_id']) and result['nic_hex']==selection['expected_nic_hex']
+            and result['profile_catalog_commitment_hex']==acceptance['profile_catalog_commitment_hex'],
+            'Actual installed RootApproval review differs')
+    context=value['context']
+    for key in fields-{'schema','authority_granted','nic_hex'}:
+        require(result[key]==context[key],'Protected RootApproval subject differs from actual review')
+    network={key:result[key] for key in ('chain_id','nic_hex','profile_catalog_commitment_hex')}
+    require(policy.get('r1_root_approval_network') in (None,network),'Cannot replace authenticated RootApproval incarnation')
+    # Existing writer publishes this exact context atomically with its one-use
+    # native grant. SDK later rechecks the complete policy snapshot and expiry.
+    policy['r1_root_approval_network']=network
+    policy['r1_root_approval_use_context']=context
+
+
 def authorization_document(raw,authenticated_pin,now):
     import base64
     def unique(pairs):
@@ -1333,16 +1459,18 @@ def authorization_document(raw,authenticated_pin,now):
         for key,item in pairs:
             require(key not in value,'Duplicate authorization field');value[key]=item
         return value
-    require(isinstance(raw,str) and 0<len(raw.encode())<=65536 and
+    require(isinstance(raw,str) and 0<len(raw.encode())<=2*1024*1024 and
             hashlib.sha256(raw.encode()).hexdigest()==authenticated_pin,
             'Authorization differs from independent native approval')
     doc=json.loads(raw,object_pairs_hook=unique)
     fields={'version','profile','target','release_id','manifest_sha256','network_id','chain_id','node_name',
             'sequence','expires_at','artifacts','requests','genesis_pins'}
     r1=isinstance(doc,dict) and doc.get('profile')==R1_AUTHORIZATION_PROFILE
-    require(isinstance(doc,dict) and set(doc)==(fields|{'r1_creation'} if r1 else fields)
+    internal=isinstance(doc,dict) and doc.get('profile')==INTERNAL_R1_APPROVAL_PROFILE
+    require(isinstance(doc,dict) and set(doc)==(fields|{'r1_creation'} if r1 else fields|{'r1_root_approval'} if internal else fields)
             and type(doc['version']) is int and doc['version']==1
-            and doc['profile'] in (AUTHORIZATION_PROFILE,R1_AUTHORIZATION_PROFILE),'Unsupported engineering authorization')
+            and doc['profile'] in (AUTHORIZATION_PROFILE,R1_AUTHORIZATION_PROFILE,INTERNAL_R1_APPROVAL_PROFILE),'Unsupported engineering authorization')
+    require(internal or len(raw.encode())<=65536,'Authorization exceeds existing profile capacity')
     target=doc['target']
     base_target={'kind','host','port','root','host_key','machine_id_sha256'}
     require(isinstance(target,dict) and set(target) in (base_target,base_target|{'guest'})
@@ -1372,7 +1500,7 @@ def authorization_document(raw,authenticated_pin,now):
             'Invalid selected installation context')
     require(type(doc['sequence']) is int and 0<doc['sequence']<2**53
             and type(doc['expires_at']) is int and now<doc['expires_at']<=now+3600,'Authorization expired or exceeds lifetime')
-    allowed=set(R1_AUTHORIZATION_FILES) if r1 else set(AUTHORIZATION_FILES)-set(R1_AUTHORIZATION_FILES)
+    allowed=set(R1_AUTHORIZATION_FILES) if r1 else set(INTERNAL_R1_APPROVAL_FILES) if internal else set(AUTHORIZATION_FILES)-set(R1_AUTHORIZATION_FILES)-set(INTERNAL_R1_APPROVAL_FILES)
     require(isinstance(doc['artifacts'],dict) and set(doc['artifacts'])<=allowed
             and all(isinstance(pin,str) and re.fullmatch('[a-f0-9]{64}',pin) for pin in doc['artifacts'].values()),
             'Only fixed, digest-bound authorization artifacts are allowed')
@@ -1386,6 +1514,7 @@ def authorization_document(raw,authenticated_pin,now):
                 and re.fullmatch('[a-f0-9]{64}',r['request_sha256']) for r in doc['requests']),
             'Exact controller operation and request digests required')
     if r1:r1_creation_selection(doc)
+    elif internal:internal_r1_approval_selection(doc)
     return doc
 
 
@@ -1742,6 +1871,11 @@ def stage_engineering_authorization(stream, *, prepare_gateway_stage=False, repa
                 field=r1_creation_prior(policy,doc)
                 require(policy.get(field)==doc['r1_creation']['context']
                         and policy.get('r1_creation_network') is not None,'Applied R1 context differs')
+            elif original.get('profile')==INTERNAL_R1_APPROVAL_PROFILE:
+                doc=authorization_document(wire['authorization'],pin,original['expires_at']-1)
+                internal_r1_approval_selection(doc)
+                require(policy.get('r1_root_approval_use_context')==doc['r1_root_approval']['context']
+                        and policy.get('r1_root_approval_network') is not None,'Applied internal RootApproval context differs')
             if replacement.exists() or replacement.is_symlink():
                 require(replacement.is_dir() and not replacement.is_symlink()
                         and authorization_tree_digest(replacement)==policy.get('authorization_predecessor_sha256'),
@@ -1750,10 +1884,18 @@ def stage_engineering_authorization(stream, *, prepare_gateway_stage=False, repa
             return reconciled
         doc=authorization_document(wire['authorization'],pin,int(time.time()))
         r1=doc['profile']==R1_AUTHORIZATION_PROFILE
+        internal_r1=doc['profile']==INTERNAL_R1_APPROVAL_PROFILE
+        if internal_r1:
+            require(not prepare_gateway_stage and not repair_gateway_controller,'Internal ceremony cannot manage infrastructure')
+            internal_r1_approval_selection(doc)
+            require(getattr(__import__('controller'),'R1_AUTHORIZATION_FILES',None)==
+                    {**R1_AUTHORIZATION_FILES,**INTERNAL_R1_APPROVAL_FILES},
+                    'Installed controller does not support exact internal RootApproval inputs')
         if r1:
             require(not prepare_gateway_stage and not repair_gateway_controller,'User validator R1 creation cannot manage infrastructure')
             r1_creation_prior(policy,doc)
-            require(getattr(__import__('controller'),'R1_AUTHORIZATION_FILES',None)==R1_AUTHORIZATION_FILES,
+            require(getattr(__import__('controller'),'R1_AUTHORIZATION_FILES',None) in
+                    (R1_AUTHORIZATION_FILES,{**R1_AUTHORIZATION_FILES,**INTERNAL_R1_APPROVAL_FILES}),
                     'Installed controller does not support the qualified R1 input inventory')
         initial=globals().get('NATIVE_AUTHENTICATED_AUTHORIZATION_INITIAL_SHA256')
         continuation=initial is not None
@@ -1766,7 +1908,7 @@ def stage_engineering_authorization(stream, *, prepare_gateway_stage=False, repa
             require(all(doc[key]==effective_engineering_selection(ROOT,policy).get(key) for key in
                         ('release_id','manifest_sha256','network_id','chain_id','node_name')),
                     'Continuation changes the approved master or network')
-            if not r1:
+            if not r1 and not internal_r1:
                 require(globals().get('NATIVE_AUTHENTICATED_AUTHORIZATION_FORMATION_SHA256')==policy.get('validator_formation_sha256')
                         and isinstance(policy.get('validator_formation_sha256'),str),'Continuation changes the approved formation')
         else:
@@ -1777,7 +1919,7 @@ def stage_engineering_authorization(stream, *, prepare_gateway_stage=False, repa
             machine=Path('/etc/machine-id').read_bytes()
             require(0<len(machine)<=128 and hashlib.sha256(machine).hexdigest()==doc['target']['machine_id_sha256'],'Local machine identity differs')
         inputs=authorization_inputs(doc,wire['artifacts'])
-        acceptance=r1_creation_release_acceptance(doc,inputs) if r1 else None
+        acceptance=r1_creation_release_acceptance(doc,inputs) if r1 else internal_r1_approval_release_acceptance(doc,inputs) if internal_r1 else None
         require(doc['sequence']==(previous['sequence']+1 if previous else 1),'Authorization sequence must advance exactly once')
         require(not replacement.exists() and not replacement.is_symlink(),'Interrupted authorization requires reconciliation')
         consumed=set()
@@ -1805,7 +1947,7 @@ def stage_engineering_authorization(stream, *, prepare_gateway_stage=False, repa
         require(selected and selected.get('manifest_sha256')==doc['manifest_sha256'] and selected.get('inventory_authenticated') is True
                 and selected.get('networks',{}).get(doc['network_id'])==doc['chain_id'],'Authorization differs from approved master/network')
         receipt_path=ROOT/'installation.json'
-        if r1:require(receipt_path.is_file() and not receipt_path.is_symlink(),'R1 creation requires already installed qualified validator software')
+        if r1 or internal_r1:require(receipt_path.is_file() and not receipt_path.is_symlink(),'R1 creation requires already installed qualified validator software')
         if receipt_path.exists():
             from lifecycle import _sealed_receipt
             receipt,_=_sealed_receipt(ROOT)
@@ -1901,6 +2043,7 @@ def stage_engineering_authorization(stream, *, prepare_gateway_stage=False, repa
                     else:require(path.read_bytes()==data,'Existing authorization input differs')
                 else:save(path,data)
             if r1:r1_creation_review(ROOT,replacement,policy,doc,acceptance)
+            elif internal_r1:internal_r1_approval_review(ROOT,replacement,policy,doc,acceptance)
             policy['qualified_operations']=sorted({request['operation'] for request,_ in requests})
             if not continuation:policy['engineering_selection']={key:doc[key] for key in ('release_id','manifest_sha256','network_id','chain_id','node_name')}
             policy['engineering_initial_authorization_sha256']=initial if continuation else pin

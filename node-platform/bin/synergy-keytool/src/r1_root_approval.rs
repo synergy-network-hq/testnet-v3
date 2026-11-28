@@ -255,4 +255,13 @@ mod tests {
         );
         assert_eq!(std::fs::read(path).unwrap(), before);
     }
+
+    #[test]
+    fn missing_absolute_platform_root_is_not_verified_original_absence() {
+        let root = "/PUBLIC-SYNTHETIC-NONEXISTENT-ROOT";
+        assert!(!Path::new(root).exists());
+        let args = [READ_COMMAND.into(), root.into(), "02".repeat(32), "01".repeat(32)];
+        assert!(dispatch(&args).is_err());
+        assert!(!Path::new(root).exists());
+    }
 }

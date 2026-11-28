@@ -35,7 +35,9 @@ pub(super) fn inspect<T>(
         synergy_address_engine::apqe::managed_creation::managed_journal_relative_root(network),
     );
     match fs::symlink_metadata(&root) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(CustodyJournalError::Storage)
+        }
         Err(_) => return Err(CustodyJournalError::Storage),
         Ok(_) => {}
     }
@@ -89,8 +91,7 @@ fn inspect_existing<T>(
         read(reader)
     })
     .map_err(|_| CustodyJournalError::Storage)?
-    .transpose()
-    .map(Option::flatten)
+    .ok_or(CustodyJournalError::Storage)?
 }
 #[cfg(test)]
 mod tests {
@@ -101,7 +102,12 @@ mod tests {
             "no-native-proof-result-root-{}",
             std::process::id()
         ));
-        assert!(NativeCustodyJournal::inspect_managed_completed_root_approval(&root, &[1;32], &[2;32]).unwrap().is_none());
+        assert!(
+            NativeCustodyJournal::inspect_managed_completed_root_approval(
+                &root, &[1; 32], &[2; 32]
+            )
+            .is_err()
+        );
         assert!(!root.exists());
         let n = NetworkRef {
             chain_id: u64::MAX - 1,
@@ -111,15 +117,13 @@ mod tests {
             NativeCustodyJournal::inspect_managed_completed_proof_in_network(
                 &root, n, &[1; 32], &[2; 32]
             )
-            .unwrap()
-            .is_none()
+            .is_err()
         );
         assert!(
             NativeCustodyJournal::inspect_managed_completed_rebind_in_network(
                 &root, n, &[1; 32], &[2; 32]
             )
-            .unwrap()
-            .is_none()
+            .is_err()
         );
         assert!(!root.exists());
         assert!(
@@ -177,9 +181,12 @@ mod tests {
             ),
             Err(CustodyJournalError::Conflict)
         ));
-        assert!(matches!(inspect_existing(&temp.0, None,
-            |r| super::super::root_approval::read_completed_root_approval(r, &[1;32], &[2;32])),
-            Err(CustodyJournalError::Conflict)));
+        assert!(matches!(
+            inspect_existing(&temp.0, None, |r| {
+                super::super::root_approval::read_completed_root_approval(r, &[1; 32], &[2; 32])
+            }),
+            Err(CustodyJournalError::Conflict)
+        ));
         let mut tx = StorageTransaction::new(MAX_RECORD).unwrap();
         tx.put(
             format!("proof-operations/{}.json", hex(&[1; 32])),
