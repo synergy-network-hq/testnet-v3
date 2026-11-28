@@ -293,10 +293,28 @@ impl NativeCustodyJournal {
         slot: &str,
         original_request: &[u8; 32],
     ) -> Result<Option<SealedPendingCustody>, CustodyJournalError> {
+        Self::inspect_managed_pending_in_network(platform_root, slot, original_request, None)
+    }
+    /// Exact read-only context selection. None means pre-NIC bootstrap, never a
+    /// wildcard. A runtime caller obtains Some(N) from its authenticated bundle.
+    /// Matching these data supplies no generation, unlock or role authority.
+    pub fn inspect_managed_pending_in_network(
+        platform_root: &Path,
+        slot: &str,
+        original_request: &[u8; 32],
+        expected_network: Option<NetworkRef>,
+    ) -> Result<Option<SealedPendingCustody>, CustodyJournalError> {
         if !text(slot) || slot.len() > 120 || !platform_root.is_absolute() {
             return Err(CustodyJournalError::InvalidIntent);
         }
-        let root = platform_root.join("keys/apqe/r1/journal");
+        if expected_network.is_some_and(|n| n.chain_id == 0) {
+            return Err(CustodyJournalError::InvalidIntent);
+        }
+        let root = platform_root.join(
+            synergy_address_engine::apqe::managed_creation::managed_journal_relative_root(
+                expected_network,
+            ),
+        );
         match fs::symlink_metadata(&root) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(_) => return Err(CustodyJournalError::Storage),
@@ -332,7 +350,7 @@ impl NativeCustodyJournal {
                     let expected = encode(&(
                         1u16,
                         "NATIVE-MANAGED-CUSTODY-JOURNAL",
-                        None::<(u64, Vec<u8>)>,
+                        expected_network.map(|n| (n.chain_id, n.nic.to_vec())),
                     ))?;
                     if reader
                         .with_maximum_bytes(4096)
@@ -350,7 +368,7 @@ impl NativeCustodyJournal {
                         return Ok(None);
                     };
                     let record = decode(&bytes)?;
-                    record.validate(None)?;
+                    record.validate(expected_network)?;
                     if record.slot_ref != slot
                         || record.native_request_digest.as_slice() != original_request
                     {
@@ -384,8 +402,15 @@ impl NativeCustodyJournal {
         #[cfg(unix)]
         {
             use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+            let selected = auth.journal_root();
+            let relative = selected
+                .strip_prefix(auth.platform_root())
+                .map_err(|_| CustodyJournalError::Storage)?;
             let mut root = auth.platform_root().to_path_buf();
-            for leaf in ["keys", "apqe", "r1", "journal"] {
+            for leaf in relative.components() {
+                let std::path::Component::Normal(leaf) = leaf else {
+                    return Err(CustodyJournalError::Storage);
+                };
                 root.push(leaf);
                 match fs::symlink_metadata(&root) {
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -832,6 +857,46 @@ mod tests {
             native_request_digest: [22; 32],
             creation_scope_commitment: [23; 64],
         }
+    }
+    #[test]
+    fn pre_nic_and_distinct_network_journals_keep_independent_durable_fences() {
+        use synergy_address_engine::apqe::managed_creation::managed_journal_relative_root;
+        let temp = Temp::new();
+        let boot = temp.0.join(managed_journal_relative_root(None));
+        assert_eq!(boot, temp.0.join("keys/apqe/r1/journal"));
+        let n = network();
+        let mut other = n;
+        other.nic[63] ^= 1;
+        let runtime = temp.0.join(managed_journal_relative_root(Some(n)));
+        let different = temp.0.join(managed_journal_relative_root(Some(other)));
+        assert_ne!(boot, runtime);
+        assert_ne!(runtime, different);
+        fs::create_dir_all(boot.parent().unwrap()).unwrap();
+        let mut bootstrap = NativeCustodyJournal::for_public_bootstrap_fixture(&boot).unwrap();
+        let i = intent();
+        let reserved = reserve(&mut bootstrap, &i, 0);
+        bootstrap.begin_generation(&reserved).unwrap();
+        fs::create_dir_all(runtime.parent().unwrap()).unwrap();
+        let mut current = NativeCustodyJournal::for_nonproduction(&runtime, n).unwrap();
+        let reserved = reserve(&mut current, &i, 0);
+        current.begin_generation(&reserved).unwrap();
+        NativeCustodyJournal::for_nonproduction(&different, other).unwrap();
+        // Reopening either exact context retains its original ambiguity fence;
+        // creating another incarnation never resets or imports that history.
+        let mut bootstrap = NativeCustodyJournal::for_public_bootstrap_fixture(&boot).unwrap();
+        assert!(matches!(
+            bootstrap.reserve(&i, 0),
+            Err(CustodyJournalError::AmbiguousGeneration)
+        ));
+        let mut current = NativeCustodyJournal::for_nonproduction(&runtime, n).unwrap();
+        assert!(matches!(
+            current.reserve(&i, 0),
+            Err(CustodyJournalError::AmbiguousGeneration)
+        ));
+        assert!(matches!(
+            NativeCustodyJournal::for_nonproduction(&runtime, other),
+            Err(CustodyJournalError::Conflict)
+        ));
     }
     #[test]
     fn genuine_public_native_v5_fixture_is_sealed_atomically_and_resumes_without_rng() {
