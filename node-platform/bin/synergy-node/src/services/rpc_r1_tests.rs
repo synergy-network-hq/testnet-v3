@@ -247,6 +247,27 @@ fn actual_private_genesis_context_drives_all_29_typed_read_adapters() {
         let outer: Value = serde_json::from_slice(&wire).unwrap();
         assert!(outer.get("error").is_none(), "{method}: {outer}");
         assert_eq!(outer["id"], "public-synthetic-read-only");
+        // Opt-in ephemeral cross-language qualification: only this test's
+        // asserted public synthetic network, never a production endpoint/key.
+        if std::env::var_os("SYNERGY_R1_PUBLIC_CONSUMER_FIXTURE").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+            && matches!(
+                *method,
+                "synergy_getAccount"
+                    | "synergy_getBalance"
+                    | "synergy_getAccountNonce"
+                    | "synergy_getNonce"
+            )
+        {
+            println!(
+                "R1_PUBLIC_ACCOUNT_FIXTURE {}",
+                json!({
+                    "purpose":"PUBLIC_SYNTHETIC_CONSUMER_QUALIFICATION_ONLY","production_import_permitted":false,
+                    "request":serde_json::from_slice::<Value>(&body).unwrap(),"response":outer,
+                    "expected_profiles":{"block_profile":profile(genesis.block_profile()),"state_profile":profile(genesis.state_profile())},
+                })
+            );
+        }
         drop(wire);
         drop(permit);
         let response = &outer["result"];
