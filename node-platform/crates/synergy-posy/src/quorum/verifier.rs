@@ -61,11 +61,11 @@ pub fn verify_strict_dual_quorum(
             total: validators.len(),
         });
     }
-    if signed
-        .checked_mul(3)
-        .zip(total.checked_mul(2))
-        .is_none_or(|(a, b)| a <= b)
-    {
+    // PoSy v0.5 p21: qW=floor(2W/3)+1. Decompose before multiplying so
+    // representable frozen totals do not lose liveness through comparison
+    // overflow. Actual signed/total accumulation above remains checked.
+    let floor_two_thirds = (total / 3) * 2 + ((total % 3) * 2) / 3;
+    if signed <= floor_two_thirds {
         return Err(QuorumError::StrictFrozenWeight { signed, total });
     }
     Ok(())
@@ -105,6 +105,18 @@ mod tests {
             verify_strict_dual_quorum(&validators, &signers(&[1, 2, 3, 4])),
             Err(QuorumError::StrictFrozenWeight { .. })
         ));
+    }
+    #[test]
+    fn representable_large_weights_use_exact_strict_comparison_without_overflow() {
+        let unit = u128::MAX / 6;
+        let equal = validators(&[unit; 6]);
+        assert!(verify_strict_dual_quorum(&equal, &signers(&[0, 1, 2, 3, 4])).is_ok());
+        assert!(verify_strict_dual_quorum(&equal, &signers(&[0, 1, 2, 3, 4, 5])).is_ok());
+        assert!(verify_strict_dual_quorum(&equal, &signers(&[0, 1, 2, 3])).is_err());
+        let skewed = validators(&[u128::MAX - 5, 1, 1, 1, 1, 1]);
+        assert!(verify_strict_dual_quorum(&skewed, &signers(&[0, 1, 2, 3, 4])).is_ok());
+        assert!(matches!(verify_strict_dual_quorum(&skewed, &signers(&[1, 2, 3, 4, 5])),
+            Err(QuorumError::StrictFrozenWeight { .. })));
     }
     #[test]
     fn dynamic_frozen_denominators_and_weight_overflow_fail_closed() {
