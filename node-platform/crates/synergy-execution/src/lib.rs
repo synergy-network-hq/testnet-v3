@@ -4,6 +4,7 @@
 //! transition application and receipts. PoSy alone owns agreement and finality.
 
 pub mod r1_payload;
+pub mod r1_header_commitments;
 pub mod r1_fees;
 pub mod r1_native;
 pub mod r1_enrollment;
