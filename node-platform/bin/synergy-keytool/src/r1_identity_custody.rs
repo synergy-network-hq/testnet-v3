@@ -206,7 +206,7 @@ pub fn create(
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
-fn original_request_digest(value: &str) -> Result<[u8; 32], String> {
+pub(crate) fn original_request_digest(value: &str) -> Result<[u8; 32], String> {
     if value.len() != 64
         || !value
             .bytes()

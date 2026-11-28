@@ -20,6 +20,8 @@ mod prepare_authority;
 mod provider;
 mod r1_identity_custody;
 mod r1_identity_context;
+mod r1_root_approval;
+mod r1_root_approval_review;
 mod release;
 mod rotation;
 mod validator_custody;
@@ -43,6 +45,12 @@ fn main() {
 fn run() -> Result<(), String> {
     let supplied = std::env::args().skip(1).collect::<Vec<_>>();
     let (arguments, engine) = selected_arguments(&supplied)?;
+    if let Some(completed) = r1_root_approval::dispatch(arguments)? {
+        use base64::Engine as _;
+        let original = completed.canonical_public_bytes().map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes));
+        println!("{}", serde_json::to_string(&original).map_err(|_| "Durable root receipt encoding failed")?);
+        return Ok(());
+    }
     if let Some(completed)=r1_identity_custody::proof_rebind::dispatch(arguments)? {
         use base64::Engine as _;
         // Only Root's committed original public receipt. No generated report,
@@ -52,6 +60,11 @@ fn run() -> Result<(), String> {
         return Ok(())
     }
     match arguments {
+        [command, root, parameters] if command == "review-managed-r1-root-approval-context" => {
+            let result = r1_root_approval_review::review(Path::new(root), parameters)?;
+            println!("{}", serde_json::to_string(&result).map_err(|_| "Root review encoding failed")?);
+            return Ok(());
+        }
         [command,root,parameters] if command=="review-managed-r1-creation-context" => {
             let result=r1_identity_context::review(Path::new(root),parameters)?;
             println!("{}",serde_json::to_string(&result).map_err(|e|e.to_string())?);
@@ -837,7 +850,9 @@ fn selected_arguments(
     }
     if matches!(
         command,
-        r1_identity_custody::proof_rebind::READ_PROOF_COMMAND
+        r1_root_approval::COMMAND
+            | r1_root_approval::READ_COMMAND
+            | r1_identity_custody::proof_rebind::READ_PROOF_COMMAND
             | r1_identity_custody::proof_rebind::READ_REBIND_COMMAND
             | r1_identity_custody::proof_rebind::PROVE_COMMAND
             | r1_identity_custody::proof_rebind::REBIND_COMMAND
@@ -846,6 +861,7 @@ fn selected_arguments(
             | "inspect-managed-r1-key"
             | "inspect-managed-r1-creation"
             | "review-managed-r1-creation-context"
+            | "review-managed-r1-root-approval-context"
             | "inspect"
             | "prepare-fresh-authority"
             | "prepare-fresh-genesis"
@@ -928,6 +944,21 @@ fn selected_arguments(
 #[cfg(test)]
 mod native_policy_tests {
     use super::*;
+    #[test]
+    fn root_approval_routes_to_protected_receipt_before_provider_selection() {
+        for command in [r1_root_approval::COMMAND, r1_root_approval::READ_COMMAND] {
+            let arguments = vec![command.into(), "PUBLIC-NONEXISTENT-ROOT".into(),
+                "01".repeat(32), "01".repeat(32)];
+            let (selected, engine) = selected_arguments(&arguments).unwrap();
+            assert!(engine.is_none());
+            assert!(r1_root_approval::dispatch(selected).is_err());
+            let injected = [arguments, vec!["--apqe-report".into(), "must-not-load".into(),
+                "--apqe-report-sha256".into(), "01".repeat(32)]].concat();
+            let (selected, engine) = selected_arguments(&injected).unwrap();
+            assert!(engine.is_none());
+            assert!(r1_root_approval::dispatch(selected).is_err());
+        }
+    }
     #[test]
     fn identity_proof_and_rebind_route_to_protected_receipt_before_any_provider_selection() {
         for command in [r1_identity_custody::proof_rebind::PROVE_COMMAND,r1_identity_custody::proof_rebind::REBIND_COMMAND,r1_identity_custody::proof_rebind::READ_PROOF_COMMAND,r1_identity_custody::proof_rebind::READ_REBIND_COMMAND] {

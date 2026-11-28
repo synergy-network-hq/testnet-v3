@@ -13,6 +13,7 @@ pqrust-traits = { path = "../../crates/aegis-pqvm/vendor/pqcrypto-traits" }
 serde.workspace = true
 serde_json.workspace = true
 base64.workspace = true
+hex = "0.4.3"
 sha3.workspace = true
 synergy-aegis = { path = "../../crates/synergy-aegis" }
 synergy-aivm = { path = "../../crates/synergy-aivm" }
@@ -31,3 +32,4 @@ chrono = { version = "=0.4.44", default-features = false, features = ["std"] }
 synergy-address-engine = { version = "=2.0.0", path = "../../../../21-Aegis-Engine/synergy-address-engine" }
 
 synergy-config = { path = "../../crates/synergy-config" }
+synergy-protocol-types = { path = "../../crates/synergy-protocol-types" }

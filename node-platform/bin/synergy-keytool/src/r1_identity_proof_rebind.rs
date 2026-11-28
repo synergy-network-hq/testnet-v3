@@ -286,13 +286,13 @@ pub(crate) fn rebind(_: &Path, _: &Path, _: &str) -> Result<CompletedIdentityReb
 }
 
 #[cfg(unix)]
-struct HeldUnlockFactor {
+pub(crate) struct HeldUnlockFactor {
     _file: File,
     bytes: SecretBytes,
 }
 #[cfg(unix)]
 impl HeldUnlockFactor {
-    fn passphrase(&self) -> Result<&str, String> {
+    pub(crate) fn passphrase(&self) -> Result<&str, String> {
         std::str::from_utf8(self.bytes.as_bytes())
             .map_err(|_| "Native unlock factor encoding differs".into())
     }
@@ -315,7 +315,7 @@ fn read_factor_bytes(reader: &mut impl Read) -> Result<SecretBytes, String> {
     Ok(bytes)
 }
 #[cfg(unix)]
-fn unlock_factor(
+pub(crate) fn unlock_factor(
     root: &Path,
     scope: &[u8; 64],
     generation: u64,
