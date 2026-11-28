@@ -9,14 +9,16 @@ pub mod methods;
 pub mod middleware;
 pub mod provider;
 pub mod rate_limit;
+pub mod r1_read;
 pub mod server;
+mod strict_json;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RpcRequest {
     pub jsonrpc: String,
     pub id: Value,
     pub method: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "strict_json::deserialize")]
     pub params: Value,
 }
 

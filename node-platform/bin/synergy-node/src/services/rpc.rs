@@ -26,7 +26,7 @@ use synergy_rpc::{
         PROCESSING_CONTEXT_V1, PROCESSING_TRANSACTION_SUBMIT_V1, PROTECTED_ADMISSION_CONTEXT,
         PROTECTED_ADMISSION_CONTEXT_V2, PROTECTED_ADMISSION_RECEIPT, PROTECTED_ADMISSION_STATS,
         PROTECTED_TRANSACTION_SUBMIT, SYNC_STATUS, SYNID_RESOLVE, SYNID_REVERSE, SYSTEM_VERSION,
-        TRANSACTION_GET,
+        TRANSACTION_GET, ValidatedReadQuery,
     },
     middleware::RpcLimits,
     provider::{
@@ -1264,11 +1264,11 @@ impl RpcDispatcher for RuntimeDispatcher {
             ETDAG_STATUS => self.service("etdag"),
             BLOCK_GET => encode_query_result(
                 self.query_store
-                    .block(&decode_params::<BlockQuery>(params)?)?,
+                    .block(&BlockQuery::from_params(params)?)?,
             ),
             TRANSACTION_GET => encode_query_result(
                 self.query_store
-                    .transaction(&decode_params::<TransactionQuery>(params)?)?,
+                    .transaction(&TransactionQuery::from_params(params)?)?,
             ),
             SYNID_RESOLVE | SYNID_REVERSE => {
                 #[derive(serde::Deserialize)]
@@ -1282,7 +1282,7 @@ impl RpcDispatcher for RuntimeDispatcher {
             }
             ACCOUNT_GET => encode_query_result(
                 self.query_store
-                    .account(&decode_params::<AccountQuery>(params)?)?,
+                    .account(&AccountQuery::from_params(params)?)?,
             ),
             _ => Err(RpcError::method_not_found()),
         }
@@ -2049,6 +2049,52 @@ fn server_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
 mod nonblocking_http_tests {
     use super::*;
     use synergy_execution::{CandidateStore, ExecutionCandidate};
+
+    #[test]
+    fn dispatcher_rejects_invalid_read_queries_before_any_provider_access() {
+        struct NoReads;
+        impl CanonicalReadProvider for NoReads {
+            fn latest_finalized_height(&self) -> Result<Option<u64>, RpcError> {
+                panic!("invalid request reached provider")
+            }
+            fn block(&self, _: &BlockQuery) -> Result<Option<FinalizedBlockView>, RpcError> {
+                panic!("invalid block request reached provider")
+            }
+            fn transaction(&self, _: &TransactionQuery) -> Result<Option<FinalizedTransactionView>, RpcError> {
+                panic!("invalid transaction request reached provider")
+            }
+            fn account(&self, _: &AccountQuery) -> Result<Option<FinalizedAccountView>, RpcError> {
+                panic!("invalid account request reached provider")
+            }
+        }
+        let dispatcher = RuntimeDispatcher {
+            runtime: Arc::new(RwLock::new(synergy_node_core::RuntimeSnapshot {
+                node_name: "nonproduction-read-validation-test".into(),
+                role: "observer".into(),
+                chain_id: 1266,
+                lifecycle: synergy_node_core::NodeLifecycleState::Starting,
+                services: vec![],
+            })),
+            query_store: Arc::new(NoReads),
+            admission: None,
+            preparation: None,
+            network_identity: None,
+            telemetry_samples: Mutex::new(TelemetrySamples::default()),
+            proof_throttle: Mutex::new(proofs::ProofThrottle::default()),
+        };
+        for (method, params) in [
+            (ACCOUNT_GET, json!({"address":""})),
+            (ACCOUNT_GET, json!({"address":"valid","network_coordinate":{"chain_id":9969}})),
+            (BLOCK_GET, json!({"hash":"malformed"})),
+            (BLOCK_GET, json!({"height":1,"hash":"a".repeat(64)})),
+            (TRANSACTION_GET, json!({"transaction_id":"syntxnAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"})),
+            (TRANSACTION_GET, json!({"transaction_id":"a".repeat(64),"authority":"PRIVATE_SENTINEL"})),
+        ] {
+            let error = dispatcher.dispatch(method, params).unwrap_err();
+            assert_eq!(error.code, -32602);
+            assert!(!error.message.contains("PRIVATE_SENTINEL"));
+        }
+    }
 
     #[test]
     fn finality_transport_requires_execution_coverage_and_exact_retained_anchor() {

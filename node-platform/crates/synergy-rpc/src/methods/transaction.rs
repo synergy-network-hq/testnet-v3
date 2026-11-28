@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 pub const TRANSACTION_GET: &str = "synergy_getTransaction";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TransactionQuery {
     pub transaction_id: String,
 }

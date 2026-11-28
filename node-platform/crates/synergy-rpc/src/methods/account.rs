@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 pub const ACCOUNT_GET: &str = "synergy_getAccount";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AccountQuery {
     pub address: String,
     pub at_height: Option<u64>,
