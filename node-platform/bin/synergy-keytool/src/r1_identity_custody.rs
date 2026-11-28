@@ -1,5 +1,30 @@
 //! Existing native controller → protected receipt → durable R1 custody owner.
 //! No renderer secrets, direct CLI approval boolean or independent issuer.
+#[path="r1_identity_proof_rebind.rs"]
+pub(crate) mod proof_rebind;
+/// Public semantic inspection only. This command cannot open a platform root,
+/// consume a grant, load a provider or reserve a generation.
+pub fn inspect_parameters(parameters: &str) -> Result<serde_json::Value, String> {
+    if parameters.is_empty() || parameters.len() > 16 * 1024 {
+        return Err("Bounded current R1 creation parameters required".into());
+    }
+    use synergy_address_engine::apqe::managed_creation::{
+        inspect_creation_parameters, ManagedCreationParameters,
+    };
+    let parameters: ManagedCreationParameters = serde_json::from_str(parameters)
+        .map_err(|_| "Exact current R1 creation parameters required")?;
+    if parameters.creation_scope_frame_hex.len() > 8192 {
+        return Err("Bounded current R1 creation scope required".into());
+    }
+    let inspection = inspect_creation_parameters(&parameters)
+        .map_err(|_| "Canonical current R1 creation scope differs")?;
+    Ok(serde_json::json!({
+        "schema":"synergy-r1-managed-creation-preview-v1",
+        "inspection":inspection,
+        "runtime_authority_granted":false
+    }))
+}
+
 #[cfg(unix)]
 pub fn create(
     root: &std::path::Path,
@@ -8,21 +33,66 @@ pub fn create(
 ) -> Result<serde_json::Value, String> {
     use std::{
         fs::{File, OpenOptions},
-        io::Write,
+        io::{Seek, Write},
         os::unix::fs::OpenOptionsExt,
     };
     use synergy_address::r1_custody::{CustodyReservationResult, NativeCustodyJournal};
     use synergy_address_engine::apqe::{
         managed_creation::VerifiedManagedCreationAuthorization, Primitives, SecretBytes,
     };
-    let receipt_fd = OpenOptions::new()
+    let expected_request = original_request_digest(request_sha256)?;
+    let mut receipt_fd = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
         .open(receipt)
         .map_err(|_| "Protected native receipt unavailable")?;
-    let cap =
-        VerifiedManagedCreationAuthorization::from_controller_receipt(root, receipt, receipt_fd)
-            .map_err(|_| "Native R1 creation authorization refused")?;
+    synergy_address_engine::apqe::managed_creation::preflight_controller_receipt(
+        root,
+        receipt,
+        receipt_fd
+            .try_clone()
+            .map_err(|_| "Protected native receipt unavailable")?,
+        expected_request,
+    )
+    .map_err(|_| "Native R1 receipt preflight refused")?;
+    // APQE owns the receipt parser. Its by-value cloned descriptor shares this
+    // open-file offset; restore it before final independent recheck/consumption.
+    receipt_fd
+        .rewind()
+        .map_err(|_| "Native receipt offset unavailable")?;
+    use crate::r1_identity_context::NativeContext;
+    let context = crate::r1_identity_context::load(root)?;
+    let cap = match &context {
+        NativeContext::Runtime(genesis) => {
+            VerifiedManagedCreationAuthorization::from_controller_receipt_for_runtime(
+                root,
+                receipt,
+                receipt_fd,
+                genesis.nic_approvals(),
+                genesis.genesis_approvals(),
+            )
+        }
+        NativeContext::Initial(nic) => {
+            VerifiedManagedCreationAuthorization::from_controller_receipt_for_initial(
+                root,
+                receipt,
+                receipt_fd,
+                nic.approvals(),
+            )
+        }
+        NativeContext::Formation(nic) => {
+            VerifiedManagedCreationAuthorization::from_controller_receipt_for_formation(
+                root,
+                receipt,
+                receipt_fd,
+                nic.approvals(),
+            )
+        }
+        NativeContext::Bootstrap => {
+            VerifiedManagedCreationAuthorization::from_controller_receipt(root, receipt, receipt_fd)
+        }
+    }
+    .map_err(|_| "Native R1 creation authorization refused")?;
     if hex(&cap.native_request_digest()) != request_sha256 {
         return Err("Original native request differs".into());
     }
@@ -72,7 +142,13 @@ pub fn create(
             if !m.is_dir() || m.uid() != 0 || m.mode() & 0o777 != 0o700 {
                 return Err("Native unlock protection differs".into());
             }
-            let path = directory.join(format!("{}-{}.factor", hex(slot.as_bytes()), generation));
+            // The full APQE scope binds the incarnation and avoids both slot
+            // aliases across networks and NAME_MAX overflow for 120-byte slots.
+            let path = directory.join(format!(
+                "{}-{}.factor",
+                hex(&cap.creation_scope_commitment()),
+                generation
+            ));
             let mut output = OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -81,13 +157,20 @@ pub fn create(
                 .open(path)
                 .map_err(|_| "Prior native factor requires reconciliation")?;
             // First entropy occurs only after consumed native grant+durable CAS.
-            let mut entropy = [0u8; 32];
-            Primitives
-                .random_bytes(&mut entropy)
-                .map_err(|_| "Native secure randomness unavailable")?;
-            let factor = SecretBytes::from_bytes(hex(&entropy).into_bytes());
-            // Wipe the stack seed as soon as its zeroizing representation exists.
-            entropy.fill(0);
+            let mut entropy = vec![0u8; 32];
+            let random = Primitives.random_bytes(&mut entropy);
+            // Transfer ownership before checking the RNG result, so even a
+            // partially filled failure buffer is wiped by the secret owner.
+            let entropy = SecretBytes::from_bytes(entropy);
+            random.map_err(|_| "Native secure randomness unavailable")?;
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let factor = SecretBytes::from_bytes(
+                entropy
+                    .as_bytes()
+                    .iter()
+                    .flat_map(|byte| [HEX[(byte >> 4) as usize], HEX[(byte & 15) as usize]])
+                    .collect(),
+            );
             output
                 .write_all(factor.as_bytes())
                 .and_then(|_| output.sync_all())
@@ -123,15 +206,90 @@ pub fn create(
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
+fn original_request_digest(value: &str) -> Result<[u8; 32], String> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err("Exact original native request SHA256 required".into());
+    }
+    let mut out = [0; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&value[2 * i..2 * i + 2], 16)
+            .map_err(|_| "Request digest differs")?;
+    }
+    Ok(out)
+}
 
 #[cfg(test)]
 mod tests {
     #[test]
+    fn semantic_preview_uses_apqe_decoder_and_never_grants_authority() {
+        use synergy_address_engine::apqe::{
+            custody_binding_r1::{
+                CustodyCreationBinding, CustodyScope, RuntimeIdentityCreationPurpose,
+            },
+            network_birth_r1::ProfileRef,
+            r1_framing::NetworkRef,
+        };
+        let binding = CustodyCreationBinding {
+            scope: CustodyScope::RuntimeIdentityCreation {
+                network: NetworkRef {
+                    chain_id: synergy_address_engine::apqe::preparation::SYNTHETIC_CHAIN,
+                    nic: [1; 64],
+                },
+                genesis_profile: ProfileRef {
+                    name: "SYNERGY-GENESIS-R1",
+                    revision: 1,
+                },
+                genesis_digest48: &[2; 48],
+                activated_profile_set_commitment: &[3; 64],
+                target_namespace: "synw",
+                purpose: RuntimeIdentityCreationPurpose::AccountEnrollment,
+                custody_object_ref: "PUBLIC-FRESH-ACCOUNT-OPERATION-1",
+            },
+            role: "D",
+            algorithm: "ML-DSA-87",
+            key_generation: 1,
+            trust_domain: "PUBLIC-SYNTHETIC-ONLY",
+        };
+        let mut p = serde_json::json!({
+            "release_id":"PUBLIC-TEST", "manifest_sha256":"01".repeat(32),
+            "slot_ref":"PUBLIC-SLOT-1", "role":"D", "algorithm":"ML-DSA-87",
+            "key_generation":"1", "operation_nonce_hex":"02".repeat(32),
+            "creation_scope_frame_hex":super::hex(&binding.canonical_frame().unwrap()),
+            "creation_scope_commitment_hex":super::hex(&binding.commitment().unwrap()),
+            "provider_report_sha256":"04".repeat(32),
+            "profile_catalog_commitment_hex":"03".repeat(64)
+        });
+        let preview = super::inspect_parameters(&p.to_string()).unwrap();
+        assert_eq!(preview["runtime_authority_granted"], false);
+        assert_eq!(preview["inspection"]["authority_granted"], false);
+        assert_eq!(
+            preview["inspection"]["scope"]["scope_kind"],
+            "runtime_identity_creation"
+        );
+        assert_eq!(preview["inspection"]["scope"]["target_namespace"], "synw");
+        assert_eq!(
+            preview["inspection"]["scope"]["owner_raw48_hex"],
+            serde_json::Value::Null
+        );
+        p["authorized"] = true.into();
+        assert!(super::inspect_parameters(&p.to_string()).is_err());
+        p.as_object_mut().unwrap().remove("authorized");
+        p["creation_scope_commitment_hex"] = "ff".repeat(64).into();
+        assert!(super::inspect_parameters(&p.to_string()).is_err());
+        assert!(super::inspect_parameters(&" ".repeat(16 * 1024 + 1)).is_err());
+    }
+    #[test]
     fn public_status_of_absent_root_cannot_generate_or_create_state() {
-        let root=std::env::temp_dir().join(format!("synergy-no-r1-status-root-{}",std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("synergy-no-r1-status-root-{}", std::process::id()));
         assert!(!root.exists());
-        let result=super::inspect(&root,"PUBLIC-ROOT-SLOT-1",&"01".repeat(32)).unwrap();
-        assert_eq!(result["stage"],"absent");assert_eq!(result["runtime_authority_granted"],false);
+        let result = super::inspect(&root, "PUBLIC-ROOT-SLOT-1", &"01".repeat(32)).unwrap();
+        assert_eq!(result["stage"], "absent");
+        assert_eq!(result["runtime_authority_granted"], false);
         assert!(!root.exists());
     }
     #[test]
@@ -149,21 +307,20 @@ pub fn inspect(
     slot: &str,
     request_sha256: &str,
 ) -> Result<serde_json::Value, String> {
-    if request_sha256.len() != 64
-        || !request_sha256
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    {
-        return Err("Exact original native request SHA256 required".into());
-    }
-    let mut request = [0u8; 32];
-    for (i, b) in request.iter_mut().enumerate() {
-        *b = u8::from_str_radix(&request_sha256[2 * i..2 * i + 2], 16)
-            .map_err(|_| "Request digest differs")?;
-    }
+    let request = original_request_digest(request_sha256)?;
     use synergy_address::r1_custody::{CustodyJournalError, NativeCustodyJournal};
     let mut out = serde_json::json!({"schema":"synergy-r1-managed-key-status-v1","slot_ref":slot,"original_request_sha256":request_sha256,"runtime_authority_granted":false});
-    match NativeCustodyJournal::inspect_managed_pending(root, slot, &request) {
+    // A selected runtime is never searched through the bootstrap namespace.
+    // A missing platform root has no selected context and cannot contain state.
+    let context = match std::fs::symlink_metadata(root) {
+        Ok(_) => crate::r1_identity_context::load(root)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            crate::r1_identity_context::NativeContext::Bootstrap
+        }
+        Err(_) => return Err("Protected native status context unavailable".into()),
+    };
+    let network = context.network();
+    match NativeCustodyJournal::inspect_managed_pending_in_network(root, slot, &request, network) {
         Ok(None) => out["stage"] = "absent".into(),
         Err(CustodyJournalError::AmbiguousGeneration) => {
             out["stage"] = "generating_requires_reconciliation".into()

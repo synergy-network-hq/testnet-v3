@@ -19,6 +19,7 @@ mod node_identity;
 mod prepare_authority;
 mod provider;
 mod r1_identity_custody;
+mod r1_identity_context;
 mod release;
 mod rotation;
 mod validator_custody;
@@ -42,7 +43,25 @@ fn main() {
 fn run() -> Result<(), String> {
     let supplied = std::env::args().skip(1).collect::<Vec<_>>();
     let (arguments, engine) = selected_arguments(&supplied)?;
+    if let Some(completed)=r1_identity_custody::proof_rebind::dispatch(arguments)? {
+        use base64::Engine as _;
+        // Only Root's committed original public receipt. No generated report,
+        // approval/stage object, encrypted envelope or pre-CAS result is exposed.
+        let original=base64::engine::general_purpose::STANDARD.encode(completed.canonical_public_bytes());
+        println!("{}",serde_json::to_string(&original).map_err(|_|"Durable public receipt encoding failed")?);
+        return Ok(())
+    }
     match arguments {
+        [command,root,parameters] if command=="review-managed-r1-creation-context" => {
+            let result=r1_identity_context::review(Path::new(root),parameters)?;
+            println!("{}",serde_json::to_string(&result).map_err(|e|e.to_string())?);
+            return Ok(())
+        }
+        [command,parameters] if command=="inspect-managed-r1-creation" => {
+            let result=r1_identity_custody::inspect_parameters(parameters)?;
+            println!("{}",serde_json::to_string(&result).map_err(|e|e.to_string())?);
+            return Ok(())
+        }
         [command,root,slot,request_sha256] if command=="inspect-managed-r1-key" => {
             let result=r1_identity_custody::inspect(Path::new(root),slot,request_sha256)?;
             println!("{}",serde_json::to_string(&result).map_err(|e|e.to_string())?);
@@ -818,9 +837,13 @@ fn selected_arguments(
     }
     if matches!(
         command,
-        "gateway-admission-capability"
+        r1_identity_custody::proof_rebind::PROVE_COMMAND
+            | r1_identity_custody::proof_rebind::REBIND_COMMAND
+            | "gateway-admission-capability"
             | "create-managed-r1-key"
             | "inspect-managed-r1-key"
+            | "inspect-managed-r1-creation"
+            | "review-managed-r1-creation-context"
             | "inspect"
             | "prepare-fresh-authority"
             | "prepare-fresh-genesis"
@@ -903,6 +926,17 @@ fn selected_arguments(
 #[cfg(test)]
 mod native_policy_tests {
     use super::*;
+    #[test]
+    fn identity_proof_and_rebind_route_to_protected_receipt_before_any_provider_selection() {
+        for command in [r1_identity_custody::proof_rebind::PROVE_COMMAND,r1_identity_custody::proof_rebind::REBIND_COMMAND] {
+            let args=vec![command.to_owned(),"PUBLIC-NONEXISTENT-ROOT".into(),"PUBLIC-NONEXISTENT-RECEIPT".into(),"01".repeat(32)];
+            let (selected,engine)=selected_arguments(&args).unwrap();assert!(engine.is_none());
+            assert!(r1_identity_custody::proof_rebind::dispatch(selected).is_err());
+            let extra=[args.clone(),vec!["--apqe-report".into(),"must-not-load".into(),"--apqe-report-sha256".into(),"01".repeat(32)]].concat();
+            let (selected,engine)=selected_arguments(&extra).unwrap();assert!(engine.is_none());
+            assert!(r1_identity_custody::proof_rebind::dispatch(selected).is_err());
+        }
+    }
     #[test]
     fn gateway_commands_require_the_existing_authenticated_provider_route() {
         let args = vec!["gateway-admission-capability".to_string()];
