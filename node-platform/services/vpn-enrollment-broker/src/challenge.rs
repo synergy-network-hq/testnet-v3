@@ -7,10 +7,16 @@ pub struct EnrollmentChallenge {
     pub used: bool,
 }
 impl EnrollmentChallenge {
-    pub fn consume(&mut self, now: u64) -> Result<(), String> {
+    /// Checks challenge eligibility without consuming it before proof verification.
+    pub fn validate(&self, now: u64) -> Result<(), String> {
         if self.used || self.expires_at <= now || self.nonce.len() < 32 {
             return Err("invalid, expired, or replayed enrollment challenge".into());
         }
+        Ok(())
+    }
+
+    pub fn consume(&mut self, now: u64) -> Result<(), String> {
+        self.validate(now)?;
         self.used = true;
         Ok(())
     }

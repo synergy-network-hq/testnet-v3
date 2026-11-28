@@ -11,7 +11,7 @@ mod validator_link;
 
 pub use failover::select_validator_link;
 pub use filter::{SentryFilter, SentryFilterError};
-pub use forwarder::{SentryForwardError, SentryForwarder};
+pub use forwarder::{SentryForwardError, SentryForwarder, SentryIngressError};
 pub use metrics::SentryMetrics;
 pub use policy::SentryCapabilities;
 pub use public_peers::PublicPeerSet;
