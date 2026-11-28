@@ -2,13 +2,15 @@
 //!
 //! A [`NodeAddress`] is the only protocol identity for a Synergy node. Human-
 //! readable `<name>.node` NodeIDs resolve to this address and are never used
-//! directly for authorization.
+//! directly for authorization. Presentation parsing authenticates no network,
+//! birth policy, possession, current role, release or PoSy authority.
 
 use std::borrow::Borrow;
 use std::fmt;
 use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use synergy_address::r1_public::NativeIdentityPresentation;
 
 const PREFIX: &str = "synv";
 const CANONICAL_LENGTH: usize = 41;
@@ -54,12 +56,52 @@ pub struct NodeAddress {
 }
 
 impl NodeAddress {
-    /// Parses and validates a canonical Synergy node address.
+    /// Parses exact full-width R1 syntax for the independently selected node class.
+    /// This verifies presentation only, not birth derivation, network incarnation,
+    /// possession, current role authority, or profile activation.
+    pub fn parse_current(
+        value: impl Into<String>,
+        expected_class: NodeClass,
+    ) -> Result<Self, NodeAddressError> {
+        let parsed = Self::parse_current_presentation(value.into())?;
+        if parsed.class != expected_class {
+            return Err(NodeAddressError::InvalidClass);
+        }
+        Ok(parsed)
+    }
+
+    fn parse_current_presentation(value: String) -> Result<Self, NodeAddressError> {
+        let parsed = NativeIdentityPresentation::parse(&value)
+            .map_err(|_| NodeAddressError::InvalidCurrentEncoding)?;
+        let class = match parsed.namespace() {
+            "synv1" => NodeClass::ConsensusAndChainIntegrity,
+            "synv2" => NodeClass::Interoperability,
+            "synv3" => NodeClass::ExecutionDataAndCryptography,
+            "synv4" => NodeClass::AiAndIntelligence,
+            "synv5" => NodeClass::ServiceAndAccess,
+            _ => return Err(NodeAddressError::InvalidPrefix),
+        };
+        Ok(Self { value, class })
+    }
+
+    /// Recognizes either exact supported presentation without converting it.
+    /// The profile and namespace are syntax only; current callers independently
+    /// authenticate the network and bind the selected role/class through policy.
+    pub fn parse(value: impl Into<String>) -> Result<Self, NodeAddressError> {
+        let value = value.into();
+        if value.contains('.') {
+            Self::parse_current_presentation(value)
+        } else {
+            Self::parse_historical(value)
+        }
+    }
+
+    /// Parses the historical SNTS-01 node presentation for historical consumers.
     ///
     /// # Errors
     /// Returns [`NodeAddressError`] when the prefix, class, length, or address
     /// alphabet is invalid.
-    pub fn parse(value: impl Into<String>) -> Result<Self, NodeAddressError> {
+    pub fn parse_historical(value: impl Into<String>) -> Result<Self, NodeAddressError> {
         let value = value.into();
         if value.len() != CANONICAL_LENGTH {
             return Err(NodeAddressError::InvalidLength);
@@ -164,6 +206,7 @@ pub enum NodeAddressError {
     InvalidPrefix,
     InvalidClass,
     InvalidCharacter,
+    InvalidCurrentEncoding,
     InvalidEncoding,
 }
 
@@ -175,6 +218,9 @@ impl fmt::Display for NodeAddressError {
             Self::InvalidClass => "node address class must be one of 1 through 5",
             Self::InvalidCharacter => {
                 "node address remainder must contain only lowercase ASCII letters and digits"
+            }
+            Self::InvalidCurrentEncoding => {
+                "node address must use the exact full-width R1 presentation"
             }
             Self::InvalidEncoding => {
                 "node address must be a canonical SNTS-01 Bech32m validator address"
@@ -188,7 +234,7 @@ impl std::error::Error for NodeAddressError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{NodeAddress, NodeClass};
+    use super::{NodeAddress, NodeAddressError, NodeClass};
 
     #[test]
     fn parses_each_canonical_node_class() {
@@ -228,5 +274,63 @@ mod tests {
         ] {
             assert!(NodeAddress::parse(value).is_err(), "accepted {value}");
         }
+    }
+
+    #[test]
+    fn current_profile_preserves_all_five_classes_and_complete_text() {
+        for digit in 1..=5 {
+            let class = NodeClass::try_from(digit).unwrap();
+            let text = format!("synv{digit}.2.{}", "A".repeat(64));
+            let parsed = NodeAddress::parse_current(&text, class).unwrap();
+            assert_eq!(parsed.class(), class);
+            assert_eq!(parsed.as_str(), text);
+            assert_eq!(parsed.as_str().len(), 72);
+            assert!(NodeAddress::parse_historical(text).is_err());
+        }
+    }
+
+    #[test]
+    fn current_profile_payload_case_is_preserved_and_significant() {
+        let upper = format!("synv1.2.{}", "A".repeat(64));
+        let lower = format!("synv1.2.{}", "a".repeat(64));
+        let class = NodeClass::ConsensusAndChainIntegrity;
+        let a = NodeAddress::parse_current(&upper, class).unwrap();
+        let b = NodeAddress::parse_current(&lower, class).unwrap();
+        assert_ne!(a, b);
+        assert_eq!(a.as_str(), upper);
+        assert_eq!(b.as_str(), lower);
+    }
+
+    #[test]
+    fn current_profile_requires_selected_class_and_node_family() {
+        let sentry = format!("synv1.2.{}", "A".repeat(64));
+        assert_eq!(
+            NodeAddress::parse_current(sentry, NodeClass::ServiceAndAccess),
+            Err(NodeAddressError::InvalidClass)
+        );
+        let wallet = format!("synw.2.{}", "A".repeat(64));
+        assert_eq!(
+            NodeAddress::parse_current(wallet, NodeClass::ServiceAndAccess),
+            Err(NodeAddressError::InvalidPrefix)
+        );
+    }
+
+    #[test]
+    fn current_profile_rejects_historical_and_noncanonical_presentations() {
+        let class = NodeClass::ConsensusAndChainIntegrity;
+        let text = format!("synv1.2.{}", "A".repeat(64));
+        for value in [
+            "synv11lrh6jcxaejkj4zv994j7qwn2rk6u3ar4emn".to_owned(),
+            text.replace("synv1", "SYNV1"),
+            text.replace("synv1", "synv6"),
+            text.replace(".2.", ".3."),
+            format!("{text}="),
+            format!(" {text}"),
+            format!("{text}\n"),
+            text[..71].to_owned(),
+        ] {
+            assert!(NodeAddress::parse_current(value, class).is_err());
+        }
+        assert!(NodeAddress::parse("synv11lrh6jcxaejkj4zv994j7qwn2rk6u3ar4emn").is_ok());
     }
 }

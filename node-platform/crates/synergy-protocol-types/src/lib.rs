@@ -72,6 +72,20 @@ pub struct AuthenticatedPeer {
 }
 
 impl AuthenticatedPeer {
+    /// Builds a route value from the explicit current R1 presentation profile.
+    /// The native session owner must separately verify network, key possession,
+    /// session establishment and current capabilities; syntax grants no authority.
+    pub fn new_current(
+        node_address: impl Into<String>,
+        expected_class: NodeClass,
+        session_id: SessionId,
+        capabilities: Vec<String>,
+    ) -> Result<Self, PeerIdentityError> {
+        let node_address = NodeAddress::parse_current(node_address, expected_class)
+            .map_err(PeerIdentityError::InvalidNodeAddress)?;
+        Ok(Self { node_address, session_id, capabilities })
+    }
+
     pub fn new(
         node_address: impl Into<String>,
         session_id: SessionId,
@@ -106,13 +120,45 @@ impl std::error::Error for PeerIdentityError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthenticatedPeer, ProtocolKind, SessionId};
+    use super::{AuthenticatedPeer, NodeClass, ProtocolKind, SessionId};
 
     #[test]
     fn protocol_classification_never_grants_finality_authority() {
         assert!(!ProtocolKind::Posy.may_determine_finality());
         assert!(!ProtocolKind::Etdag.may_determine_finality());
         assert!(!ProtocolKind::Sync.may_determine_finality());
+    }
+
+    #[test]
+    fn current_peer_preserves_full_identifier_and_requires_selected_class() {
+        let text = format!("synv5.2.{}", "A".repeat(64));
+        let peer = AuthenticatedPeer::new_current(&text, NodeClass::ServiceAndAccess,
+                                                SessionId(7), vec![]).unwrap();
+        assert_eq!(peer.node_address.as_str(), text);
+        assert_eq!(peer.session_id, SessionId(7));
+        assert!(AuthenticatedPeer::new_current(text, NodeClass::ConsensusAndChainIntegrity,
+                                               SessionId(7), vec![]).is_err());
+    }
+
+    #[test]
+    fn current_peer_existing_constructor_and_serde_preserve_full_case_sensitive_text() {
+        for digit in 1..=5 {
+            let text=format!("synv{digit}.2.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v");
+            let peer=AuthenticatedPeer::new(&text,SessionId(7),vec!["status".into()]).unwrap();
+            assert_eq!(peer.node_address.as_str(),text);
+            let encoded=serde_json::to_string(&peer).unwrap();
+            let decoded:AuthenticatedPeer=serde_json::from_str(&encoded).unwrap();
+            assert_eq!(decoded,peer);
+            assert!(super::NodeAddress::parse_historical(text).is_err());
+        }
+    }
+
+    #[test]
+    fn current_peer_rejects_historical_identity_without_changing_old_constructor() {
+        let historical = "synv11lrh6jcxaejkj4zv994j7qwn2rk6u3ar4emn";
+        assert!(AuthenticatedPeer::new_current(historical, NodeClass::ConsensusAndChainIntegrity,
+                                              SessionId(7), vec![]).is_err());
+        assert!(AuthenticatedPeer::new(historical, SessionId(7), vec![]).is_ok());
     }
 
     #[test]

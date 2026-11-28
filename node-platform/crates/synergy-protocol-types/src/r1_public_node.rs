@@ -52,7 +52,7 @@ mod tests {
                 R1NodePresentation::parse(&lower, class).unwrap().raw48(),
                 parsed.raw48()
             );
-            assert!(crate::NodeAddress::parse(text).is_err());
+            assert!(crate::NodeAddress::parse_historical(text).is_err());
         }
     }
     #[test]
