@@ -122,6 +122,8 @@ pub fn create(
                 )
             }
             .map_err(|_| "Qualified current R1 native provider unavailable")?;
+            cap.ensure_current()
+                .map_err(|_| "Native creation expired; generation remains fenced")?;
             // Existing private native custody owns this factor. It never leaves
             // the platform root and cannot confer activation/current authority.
             let directory = root.join("keys/apqe/r1/unlock");
@@ -149,6 +151,8 @@ pub fn create(
                 hex(&cap.creation_scope_commitment()),
                 generation
             ));
+            cap.ensure_current()
+                .map_err(|_| "Native creation expired; generation remains fenced")?;
             let mut output = OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -158,11 +162,15 @@ pub fn create(
                 .map_err(|_| "Prior native factor requires reconciliation")?;
             // First entropy occurs only after consumed native grant+durable CAS.
             let mut entropy = vec![0u8; 32];
+            cap.ensure_current()
+                .map_err(|_| "Native creation expired; generation remains fenced")?;
             let random = Primitives.random_bytes(&mut entropy);
             // Transfer ownership before checking the RNG result, so even a
             // partially filled failure buffer is wiped by the secret owner.
             let entropy = SecretBytes::from_bytes(entropy);
             random.map_err(|_| "Native secure randomness unavailable")?;
+            cap.ensure_current()
+                .map_err(|_| "Native creation expired; generation remains fenced")?;
             const HEX: &[u8; 16] = b"0123456789abcdef";
             let factor = SecretBytes::from_bytes(
                 entropy
@@ -171,6 +179,8 @@ pub fn create(
                     .flat_map(|byte| [HEX[(byte >> 4) as usize], HEX[(byte & 15) as usize]])
                     .collect(),
             );
+            cap.ensure_current()
+                .map_err(|_| "Native creation expired; generation remains fenced")?;
             output
                 .write_all(factor.as_bytes())
                 .and_then(|_| output.sync_all())
