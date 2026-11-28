@@ -629,6 +629,18 @@ pub fn compile_genesis(input: &R1GenesisStateInput) -> Result<ComputedGenesisSta
         .map_err(|_| R1StateError::CeremonyRequired)?;
     recompute_received_genesis_state(input)
 }
+/// Complete schema2 accounting uses the SAME pure state compiler, then the
+/// explicit zero-valued native cumulative fee initialization before its root.
+/// This is received-data recomputation only, never ceremony or issuance authority.
+pub fn recompute_received_complete_genesis_state(
+    input: &R1GenesisStateInput,
+) -> Result<ComputedGenesisState, R1StateError> {
+    let mut result = recompute_received_genesis_state(input)?;
+    crate::r1_fees::initialize_genesis(&mut result.state, input.network)?;
+    crate::r1_fees::read_fee_state(&result.state, input.network)?;
+    result.root = result.state.root()?;
+    Ok(result)
+}
 /// Pure recomputation of public received Genesis allocations and birth policies.
 /// This returns an untrusted in-memory calculation, never a native execution,
 /// issuance, persistence or activation capability. The actual Genesis verifier
@@ -798,6 +810,52 @@ pub fn recompute_received_genesis_state(
 #[cfg(test)]
 mod bounds_tests {
     use super::*;
+    #[test]
+    fn complete_genesis_initializes_zero_fee_accounting_without_changing_legacy_or_supply() {
+        let input = R1GenesisStateInput {
+            network: R1NetworkRef {
+                chain_id: u64::MAX - 1,
+                nic: [7; 64],
+            },
+            accounts: vec![],
+            allocations: vec![],
+            profile_definitions: vec![],
+            restricted_records: [
+                RestrictedRecordKind::Treasury,
+                RestrictedRecordKind::TreasuryRecovery,
+                RestrictedRecordKind::SecurityForfeiture,
+                RestrictedRecordKind::FeeRoundingEscrow,
+            ]
+            .into_iter()
+            .map(|kind| R1RestrictedOpening {
+                kind,
+                balance_nwei: 0,
+                policy_commitment: [9; 64],
+            })
+            .collect(),
+        };
+        let old = recompute_received_genesis_state(&input).unwrap();
+        let complete = recompute_received_complete_genesis_state(&input).unwrap();
+        assert_eq!(complete.state.len(), old.state.len() + 2);
+        assert_ne!(complete.root, old.root);
+        assert_eq!(complete.root, complete.state.root().unwrap());
+        assert_eq!(complete.total_issued_nwei, old.total_issued_nwei);
+        assert_eq!(complete.receipts_root, old.receipts_root);
+        let fee = crate::r1_fees::read_fee_state(&complete.state, input.network).unwrap();
+        assert_eq!(
+            (
+                fee.carry.q,
+                fee.escrow_nwei,
+                fee.validator_class_nwei,
+                fee.treasury_nwei
+            ),
+            (0, 0, 0, 0)
+        );
+        assert_eq!(
+            recompute_received_genesis_state(&input).unwrap().root,
+            old.root
+        );
+    }
     #[test]
     fn execution_delta_rejection_preserves_all_balances_and_replay_together() {
         let owner = NativeIdentityPresentation::from_raw("syns", [41; 48])
