@@ -10,6 +10,7 @@ pub mod formation;
 pub mod formation_fence;
 pub mod policy;
 pub mod profiles;
+pub mod stage_review;
 pub mod received_bundle;
 pub mod runtime_registry;
 use synergy_address_engine::apqe::{
