@@ -32,16 +32,41 @@ fn native(d: &mut Decoder<'_>) -> Result<String, GenesisError> {
         .map(|x| x.to_text())
         .map_err(|_| GenesisError::Identity)
 }
+#[cfg(test)]
 pub fn decode(bytes: &[u8], catalog: &ProfileCatalog) -> Result<GenesisCoreInput, GenesisError> {
+    let (base, formation) = decode_any(bytes, catalog)?;
+    if formation.is_some() {
+        return Err(GenesisError::Encoding);
+    }
+    Ok(base)
+}
+/// Closed schema selection: version1 has no formation extension; version2 has
+/// exactly one complete typed formation record before the computed roots.
+pub(super) fn decode_any(
+    bytes: &[u8],
+    catalog: &ProfileCatalog,
+) -> Result<
+    (
+        GenesisCoreInput,
+        Option<super::complete_formation::CompleteFormationCandidate>,
+    ),
+    GenesisError,
+> {
     let mut d = Decoder::new(bytes, MAX_CORE_BYTES)?;
-    if d.u16()? != 2 || d.ascii(128)? != "SYNERGY/GENESIS/01" || d.u16()? != 1 {
+    if d.u16()? != 2 || d.ascii(128)? != "SYNERGY/GENESIS/01" {
+        return Err(GenesisError::Encoding);
+    }
+    let schema = d.u16()?;
+    if !matches!(schema, 1 | 2) {
         return Err(GenesisError::Encoding);
     }
     let network = R1NetworkRef {
         chain_id: d.u64()?,
         nic: d.fixed()?,
     };
-    if network.chain_id == 0 { return Err(GenesisError::Identity); }
+    if network.chain_id == 0 {
+        return Err(GenesisError::Identity);
+    }
     let n = NetworkRef {
         chain_id: network.chain_id,
         nic: network.nic,
@@ -118,6 +143,11 @@ pub fn decode(bytes: &[u8], catalog: &ProfileCatalog) -> Result<GenesisCoreInput
             return Err(GenesisError::Registry);
         }
     }
+    let formation = if schema == 2 {
+        Some(super::complete_formation::CompleteFormationCandidate::decode_from(&mut d)?)
+    } else {
+        None
+    };
     profile(&mut d, STATE_PROFILE_NAME, STATE_PROFILE_REVISION)?;
     let _claimed_state_root = d.fixed::<48>()?;
     profile(&mut d, RECEIPT_PROFILE_NAME, RECEIPT_PROFILE_REVISION)?;
@@ -125,16 +155,19 @@ pub fn decode(bytes: &[u8], catalog: &ProfileCatalog) -> Result<GenesisCoreInput
     d.finish()?;
     // Caller MUST recompile and exact-byte compare. These two claimed roots are
     // never passed into the state constructor and can never choose its result.
-    Ok(GenesisCoreInput {
-        network,
-        genesis_time,
-        catalog: catalog.clone(),
-        nodes,
-        accounts,
-        initial_voters,
-        allocations,
-        restricted_records,
-    })
+    Ok((
+        GenesisCoreInput {
+            network,
+            genesis_time,
+            catalog: catalog.clone(),
+            nodes,
+            accounts,
+            initial_voters,
+            allocations,
+            restricted_records,
+        },
+        formation,
+    ))
 }
 #[cfg(test)]
 mod tests {
@@ -152,6 +185,15 @@ mod tests {
                 .collect(),
         )
         .unwrap();
+        // Unknown core tags are never interpreted as a legacy or complete core.
+        for schema in [0, 3, u16::MAX] {
+            let mut e = Encoder::with_domain("SYNERGY/GENESIS/01", MAX_CORE_BYTES).unwrap();
+            e.u16(schema).unwrap();
+            assert!(matches!(
+                decode_any(&e.finish().unwrap(), &catalog),
+                Err(GenesisError::Encoding)
+            ));
+        }
         let mut e = Encoder::with_domain("SYNERGY/GENESIS/01", MAX_CORE_BYTES).unwrap();
         e.u16(1).unwrap();
         e.u64(9969).unwrap();

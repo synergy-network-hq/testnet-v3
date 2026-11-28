@@ -654,5 +654,7 @@ pub mod r1_public {
     pub use synergy_address_engine::apqe::native_identity_presentation_r1::TransactionIdentifierPresentation;
     pub use synergy_address_engine::apqe::native_identifier;
     pub use synergy_address_engine::apqe::r1_framing::NetworkRef;
+    pub use synergy_address_engine::apqe::r1_framing as canonical_framing;
+    pub use synergy_address_engine::apqe::network_birth_r1::ProfileRef;
     pub use synergy_address_engine::apqe::preparation::require_nonproduction_fixture;
 }

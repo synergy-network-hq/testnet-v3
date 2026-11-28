@@ -14,7 +14,7 @@ use synergy_address_engine::{
             VerifiedApprovalPurpose, VerifiedBootstrapApprovals,
         },
         crypto_engine::CryptoEngine,
-        network_birth_r1::{CandidateNetworkBirth, NetworkBirth, ProfileRef},
+        network_birth_r1::{NetworkBirth, ProfileRef, ReceivedNetworkBirth},
         preparation::require_nonproduction_fixture,
         provider::SignOptions,
         r1_framing::{self as c, NetworkRef, Value},
@@ -120,7 +120,8 @@ impl FormationRegistration {
         n: NetworkRef,
         controller_authorization: bool,
     ) -> Result<Vec<u8>, FormationError> {
-        require_nonproduction_fixture(n.chain_id).map_err(|_| FormationError::Ceremony)?;
+        // Pure public received-frame recomputation; no key, identity or nonce
+        // is issued and no signature or ceremony permission is constructed.
         let id = self
             .node
             .validate_birth(n)
@@ -246,14 +247,27 @@ impl FormationRegistrySnapshot {
         registrations: Vec<FormationRegistration>,
         engine: &CryptoEngine,
     ) -> Result<Self, FormationError> {
+        require_nonproduction_fixture(nic.network().chain_id)
+            .map_err(|_| FormationError::Ceremony)?;
+        Self::recompute_received(nic, birth, catalog, population, registrations, engine)
+    }
+    /// Private full-data received verifier used by complete Genesis. A parsed
+    /// snapshot still requires a real indexed Formation-purpose root quorum.
+    pub(super) fn recompute_received(
+        nic: &VerifiedBootstrapApprovals,
+        birth: &NetworkBirth<'_>,
+        catalog: &super::profiles::ProfileCatalog,
+        population: Population,
+        registrations: Vec<FormationRegistration>,
+        engine: &CryptoEngine,
+    ) -> Result<Self, FormationError> {
         let n = nic.network();
-        require_nonproduction_fixture(n.chain_id).map_err(|_| FormationError::Ceremony)?;
         if nic.purpose() != VerifiedApprovalPurpose::Nic
             || birth.chain_id != n.chain_id
-            || CandidateNetworkBirth::derive(birth, MAX)
+            || ReceivedNetworkBirth::validate(birth, &n.nic, MAX)
                 .map_err(|_| FormationError::Context)?
-                .incarnation()
-                != &n.nic
+                .frame()
+                != nic.complete_network_birth_frame()
         {
             return Err(FormationError::Context);
         }
@@ -273,11 +287,18 @@ impl FormationRegistrySnapshot {
         // Checking only its own node permits cross-participant authority reuse.
         let mut all_node_keys = BTreeSet::new();
         for registration in &registrations {
-            for key in registration.node.possession_keys().map_err(|_| FormationError::Key)? {
+            for key in registration
+                .node
+                .possession_keys()
+                .map_err(|_| FormationError::Key)?
+            {
                 all_node_keys.insert(key.public_key.clone());
             }
         }
-        if registrations.iter().any(|r| all_node_keys.contains(&r.formation_key.public_key)) {
+        if registrations
+            .iter()
+            .any(|r| all_node_keys.contains(&r.formation_key.public_key))
+        {
             return Err(FormationError::Key);
         }
         let mut members = BTreeSet::new();
@@ -480,7 +501,9 @@ pub struct VerifiedFormationAuthority {
     registry: FormationRegistrySnapshot,
 }
 impl VerifiedFormationAuthority {
-    pub fn approvals(&self) -> &VerifiedBootstrapApprovals { &self.approvals }
+    pub fn approvals(&self) -> &VerifiedBootstrapApprovals {
+        &self.approvals
+    }
     pub fn registry(&self) -> &FormationRegistrySnapshot {
         &self.registry
     }
@@ -525,7 +548,10 @@ impl FormationRegistrySnapshot {
                 registry_commitment,
                 input_commitment,
             } if registry_commitment == self.commitment && input_commitment == input => {
-                Ok(VerifiedFormationAuthority { registry: self, approvals: token })
+                Ok(VerifiedFormationAuthority {
+                    registry: self,
+                    approvals: token,
+                })
             }
             _ => Err(FormationError::Context),
         }
@@ -549,6 +575,9 @@ pub struct VerifiedFormationSeed {
     network: NetworkRef,
     registry: [u8; 64],
     input: [u8; 64],
+    /// Qualified result-reference commitment; its normalization/construction is
+    /// not selected yet. Only the eventual real verifier may populate it.
+    reference: [u8; 64],
     output: Vec<u8>,
 }
 impl VerifiedFormationSeed {
@@ -563,6 +592,9 @@ impl VerifiedFormationSeed {
     }
     pub fn output(&self) -> &[u8] {
         &self.output
+    }
+    pub fn qualified_reference(&self) -> &[u8; 64] {
+        &self.reference
     }
 }
 fn verify_seed_evidence(

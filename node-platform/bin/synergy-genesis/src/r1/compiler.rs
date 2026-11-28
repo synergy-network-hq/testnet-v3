@@ -40,8 +40,14 @@ pub struct CompiledR1Genesis {
     initial_voters: Vec<InitialVoter>,
     nodes: Vec<NodeRecord>,
     catalog: ProfileCatalog,
+    formation: Option<super::complete_formation::VerifiedCompleteFormation>,
 }
 impl CompiledR1Genesis {
+    pub fn complete_formation(
+        &self,
+    ) -> Option<&super::complete_formation::VerifiedCompleteFormation> {
+        self.formation.as_ref()
+    }
     pub fn coordinate(&self) -> &R1NetworkCoordinate {
         &self.coordinate
     }
@@ -129,6 +135,34 @@ pub(super) fn recompute_received_core(
     independently_expected_catalog: &ProfileCatalog,
     engine: &CryptoEngine,
 ) -> Result<CompiledR1Genesis, GenesisError> {
+    recompute_core(input, independently_expected_catalog, engine, None)
+}
+pub(super) fn recompute_received_complete_core(
+    input: GenesisCoreInput,
+    independently_expected_catalog: &ProfileCatalog,
+    engine: &CryptoEngine,
+    formation: super::complete_formation::VerifiedCompleteFormation,
+) -> Result<CompiledR1Genesis, GenesisError> {
+    recompute_core(
+        input,
+        independently_expected_catalog,
+        engine,
+        Some(formation),
+    )
+}
+fn recompute_core(
+    input: GenesisCoreInput,
+    independently_expected_catalog: &ProfileCatalog,
+    engine: &CryptoEngine,
+    formation: Option<super::complete_formation::VerifiedCompleteFormation>,
+) -> Result<CompiledR1Genesis, GenesisError> {
+    if let Some(f) = &formation {
+        if f.registry().network().chain_id != input.network.chain_id
+            || f.registry().network().nic != input.network.nic
+        {
+            return Err(GenesisError::Profile);
+        }
+    }
     if input.network.chain_id == 0 {
         return Err(GenesisError::Identity);
     }
@@ -215,7 +249,11 @@ pub(super) fn recompute_received_core(
             .ok_or(GenesisError::Voter)?;
     }
     let mut e = Encoder::with_domain("SYNERGY/GENESIS/01", MAX_CORE_BYTES)?;
-    e.u16(1)?;
+    e.u16(if formation.is_some() {
+        super::complete_formation::COMPLETE_CORE_SCHEMA
+    } else {
+        1
+    })?;
     e.u64(input.network.chain_id)?;
     e.fixed(&input.network.nic)?;
     profile(&mut e, GENESIS_PROFILE, 1)?;
@@ -278,6 +316,9 @@ pub(super) fn recompute_received_core(
         e.u16(suffix)?;
         e.boolean(false)?;
     }
+    if let Some(f) = &formation {
+        f.candidate().encode_into(&mut e)?;
+    }
     let state_input = R1GenesisStateInput {
         network: input.network,
         accounts,
@@ -320,6 +361,7 @@ pub(super) fn recompute_received_core(
         initial_voters: input.initial_voters,
         nodes: input.nodes,
         catalog: input.catalog,
+        formation,
     })
 }
 #[cfg(test)]

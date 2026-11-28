@@ -4,6 +4,7 @@
 pub mod account;
 pub mod artifact_matrix;
 pub mod compiler;
+pub mod complete_formation;
 mod decode;
 pub mod formation;
 pub mod formation_fence;
@@ -88,10 +89,12 @@ impl VerifiedR1Genesis {
             InitialValidatorKey { identity: *identity.raw48(), weight: v.weight, consensus_key: key.key.clone() }
         }).collect()
     }
-    /// Complete frozen formation/seed binding remains a separate missing input;
-    /// registration snapshots alone may not mint it or trigger retirement.
+    /// Present only after the complete schema2 proof chain, including a private
+    /// qualified seed result; a registration snapshot can never supply this.
     pub fn formation_registry_commitment(&self) -> Option<&[u8; 64]> {
-        None
+        self.compiled
+            .complete_formation()
+            .map(|f| f.registry().commitment())
     }
     pub fn coordinate(&self) -> &R1NetworkCoordinate {
         self.compiled.coordinate()
@@ -144,8 +147,39 @@ pub fn verify_bytes(
     genesis_approvals: &[IndexedRootApproval<'_>],
     engine: &CryptoEngine,
 ) -> Result<VerifiedR1Genesis, GenesisError> {
-    let input = decode::decode(bytes, expected_catalog)?;
-    let compiled = compiler::recompute_received_core(input, expected_catalog, engine)?;
+    let (input, formation) = decode::decode_any(bytes, expected_catalog)?;
+    let compiled = if let Some(candidate) = formation {
+        // Authenticate the independent pre-Genesis root set before interpreting
+        // any registration or randomness input. Genesis approvals remain a
+        // separate mandatory quorum below; this NIC token is not activation.
+        if authority.network().chain_id != input.network.chain_id
+            || authority.network().nic != input.network.nic
+        {
+            return Err(GenesisError::Approval);
+        }
+        let nic = authority
+            .verify_approvals(engine, ApprovalPurpose::Nic, nic_approvals)
+            .map_err(|_| GenesisError::Approval)?;
+        let complete = synergy_address_engine::apqe::network_birth_r1::with_received_network_birth(
+            nic.complete_network_birth_frame(),
+            &input.network.nic,
+            1024 * 1024,
+            |birth| candidate.verify_received(&input, &nic, birth, authority, engine),
+        )
+        .map_err(|_| GenesisError::Approval)??;
+        compiler::recompute_received_complete_core(input, expected_catalog, engine, complete)?
+    } else {
+        // Schema1 is preserved for the isolated public fixtures. An actual
+        // incarnation must carry the complete schema2 formation proof chain.
+        if synergy_address_engine::apqe::preparation::require_nonproduction_fixture(
+            input.network.chain_id,
+        )
+        .is_err()
+        {
+            return Err(GenesisError::FormationUnavailable);
+        }
+        compiler::recompute_received_core(input, expected_catalog, engine)?
+    };
     if compiled.canonical_bytes() != bytes {
         return Err(GenesisError::Encoding);
     }
@@ -195,13 +229,12 @@ fn authenticate(
     if genesis.genesis_digest() != Some(&c.genesis.digest) {
         return Err(GenesisError::Approval);
     }
-    // Root signatures authenticate bytes; they cannot replace the mandatory
-    // frozen registry/preseed, qualified randomness, assignments and initial
-    // authority interval. That complete R1 formation binding is not yet in the
-    // executable core schema. Never promote a real incarnation to runtime trust
-    // merely because its bootstrap roots signed an incomplete core.
+    // Root signatures authenticate bytes, not missing formation. Actual
+    // incarnations require the private complete schema2 verifier output; its
+    // qualified HashRand gate remains unavailable until the owner qualifies it.
     if synergy_address_engine::apqe::preparation::require_nonproduction_fixture(c.network.chain_id)
         .is_err()
+        && compiled.complete_formation().is_none()
     {
         return Err(GenesisError::FormationUnavailable);
     }

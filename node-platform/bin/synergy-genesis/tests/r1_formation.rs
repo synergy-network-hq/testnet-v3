@@ -173,6 +173,199 @@ fn actual_five_member_registry_root_approval_and_cross_participant_isolation() {
         verified.approvals().purpose(),
         VerifiedApprovalPurpose::Formation { .. }
     ));
+    // Complete schema2 carries the actual five-member cryptographic registry,
+    // while a supplied candidate output still cannot manufacture a seed token.
+    {
+        use synergy_genesis::r1::{
+            compiler::{GenesisCoreInput, InitialVoter},
+            complete_formation::*,
+            GenesisError,
+        };
+        use synergy_state::r1::{R1GenesisAllocation, R1GenesisDestination};
+        let nodes = registrations
+            .iter()
+            .map(|r| r.node.clone())
+            .collect::<Vec<_>>();
+        let voters = nodes
+            .iter()
+            .map(|n| InitialVoter {
+                identity: n.identity.clone(),
+                weight: 1,
+            })
+            .collect::<Vec<_>>();
+        let make_allocations = || {
+            nodes
+                .iter()
+                .enumerate()
+                .map(|(i, n)| R1GenesisAllocation {
+                    allocation_id: format!("PUBLIC-FIXTURE-BOND-{i}"),
+                    amount_nwei: 50_000_000_000_000,
+                    destination: R1GenesisDestination::ValidatorBond {
+                        validator: n.identity.clone(),
+                        owner: "PUBLIC-NONACCOUNT-NOT-COMPILED".into(),
+                        beneficiary: "PUBLIC-NONACCOUNT-NOT-COMPILED".into(),
+                    },
+                })
+                .collect::<Vec<_>>()
+        };
+        let allocations = make_allocations();
+        let network = synergy_protocol_types::R1NetworkRef {
+            chain_id: n.chain_id,
+            nic: n.nic,
+        };
+        let profiles = synergy_protocol_types::R1ProfileSetReference {
+            profile: synergy_protocol_types::R1ProfileRef {
+                name: "APQE-PROFILE-SET".into(),
+                revision: 1,
+            },
+            commitment,
+        };
+        let protocol =
+            synergy_protocol_types::protocol_profile_r1::commitment(&network, &profiles).unwrap();
+        let mut candidate=CompleteFormationCandidate{
+            population:Population::ConditionalFive,
+            registrations:registrations.iter().enumerate().map(|(i,r)|Registration{node_index:i as u32,formation_key:r.formation_key.clone(),nonce:r.registration_nonce,possession:r.key_possession.clone(),controller_approvals:r.controller_approvals.clone()}).collect(),
+            registry:*verified.registry().commitment(),preseed:verified.registry().preseed_commitment().unwrap(),
+            root_approvals:approvals.iter().map(|a|IndexedProof{index:a.root_index,signature:a.signature.to_vec()}).collect(),
+            randomness:HashRandCandidate{qualified_reference:[1;64],public_completion_evidence:b"PUBLIC-NONPROOF-NOT-A-TRANSCRIPT".to_vec(),output:b"PUBLIC-NONPROOF-NOT-A-SEED".to_vec()},
+            cluster:UnifiedCluster{identity:synergy_address_engine::apqe::native_identity_presentation_r1::NativeIdentityPresentation::from_raw("syngrp",[1;48]).unwrap().to_text(),assignment_input:[1;64],members:(0..5).collect()},
+            proposer_inputs:(0..5).map(|i|ProposerInput{node_index:i,selection_score:1024}).collect(),permutation:(0..5).collect(),schedule:[1;48],
+            authority:InitialAuthority{epoch:1,first_height:1,last_height:1000,protocol_profile:protocol,members:nodes.iter().enumerate().map(|(i,n)|{let k=&n.role_keys.iter().find(|k|k.kind==synergy_genesis::r1::policy::RoleKeyKind::Consensus).unwrap().key;AuthorityMember{node_index:i as u32,key_id:synergy_posy::r1::consensus_key_id(&k.public_key,k.generation).unwrap(),key_generation:k.generation,weight:1}}).collect(),commitment:[1;48]},
+        };
+        candidate
+            .validate_structure(&nodes, &voters, &protocol)
+            .unwrap();
+        let schedule_context = synergy_posy::r1::R1ScheduleContext {
+            network,
+            activated_profiles: profiles.clone(),
+            seed_reference: candidate.randomness.qualified_reference,
+            registry_commitment: candidate.registry,
+            production_epoch: 1,
+            protocol_profile: protocol,
+        };
+        let assignment = candidate
+            .assignment_input_commitment(&schedule_context, &nodes, &voters)
+            .unwrap();
+        candidate.proposer_inputs[0].selection_score += 1;
+        assert_ne!(
+            assignment,
+            candidate
+                .assignment_input_commitment(&schedule_context, &nodes, &voters)
+                .unwrap()
+        );
+        candidate.proposer_inputs[0].selection_score -= 1;
+        let mut different_weight = voters.clone();
+        different_weight[0].weight += 1;
+        assert_ne!(
+            assignment,
+            candidate
+                .assignment_input_commitment(&schedule_context, &nodes, &different_weight)
+                .unwrap()
+        );
+
+        let scores = candidate
+            .validate_initial_scores(&nodes, &allocations)
+            .unwrap();
+        assert_eq!(scores.len(), 5);
+        assert!(scores
+            .iter()
+            .all(|s| s.stake == 2000 && s.reliability == 6400 && s.synergy_score == 1024));
+        candidate.proposer_inputs[0].selection_score = 1;
+        assert_eq!(
+            candidate.validate_initial_scores(&nodes, &allocations),
+            Err(GenesisError::Voter)
+        );
+        candidate.proposer_inputs[0].selection_score = 1024;
+        let mut extra = make_allocations();
+        extra.push(R1GenesisAllocation {
+            allocation_id: "NONVOTING-CANDIDATE-RESERVATION".into(),
+            amount_nwei: 50_000_000_000_000,
+            destination: R1GenesisDestination::UnassignedValidatorFunding,
+        });
+        assert_eq!(
+            candidate.validate_initial_scores(&nodes, &extra).unwrap(),
+            scores
+        );
+        // Unselected public candidate data is not an authenticated voter and
+        // does not enter the initial-five denominator. Full compilation still
+        // requires its own complete node/bond proofs; this only checks scoring.
+        let unselected=synergy_address_engine::apqe::native_identity_presentation_r1::NativeIdentityPresentation::from_raw("synv1",[0xfa;48]).unwrap().to_text();
+        assert!(nodes.iter().all(|n| n.identity != unselected));
+        extra.push(R1GenesisAllocation {
+            allocation_id: "PUBLIC-SIXTH-NONVOTING-BOND".into(),
+            amount_nwei: 50_000_000_000_000,
+            destination: R1GenesisDestination::ValidatorBond {
+                validator: unselected,
+                owner: "PUBLIC-NONACCOUNT-NOT-COMPILED".into(),
+                beneficiary: "PUBLIC-NONACCOUNT-NOT-COMPILED".into(),
+            },
+        });
+        assert_eq!(
+            candidate.validate_initial_scores(&nodes, &extra).unwrap(),
+            scores
+        );
+        let mut duplicate = make_allocations();
+        duplicate.push(make_allocations().remove(0));
+        assert_eq!(
+            candidate.validate_initial_scores(&nodes, &duplicate),
+            Err(GenesisError::Duplicate)
+        );
+        let mut wrong = make_allocations();
+        wrong[0].amount_nwei -= 1;
+        assert_eq!(
+            candidate.validate_initial_scores(&nodes, &wrong),
+            Err(GenesisError::State)
+        );
+        let mut encoder = synergy_protocol_types::c14n02::Encoder::new(1024 * 1024);
+        candidate.encode_into(&mut encoder).unwrap();
+        let encoded = encoder.finish().unwrap();
+        let mut decoder = Decoder::new(&encoded, 1024 * 1024).unwrap();
+        assert_eq!(
+            CompleteFormationCandidate::decode_from(&mut decoder).unwrap(),
+            candidate
+        );
+        decoder.finish().unwrap();
+        let mut unknown = encoded.clone();
+        unknown[..2].copy_from_slice(&3u16.to_be_bytes());
+        assert!(CompleteFormationCandidate::decode_from(
+            &mut Decoder::new(&unknown, 1024 * 1024).unwrap()
+        )
+        .is_err());
+        let mut invalid = candidate.clone();
+        invalid.authority.last_height = 1001;
+        assert_eq!(
+            invalid.validate_structure(&nodes, &voters, &protocol),
+            Err(GenesisError::Profile)
+        );
+        invalid = candidate.clone();
+        invalid.authority.members[0].key_generation += 1;
+        assert_eq!(
+            invalid.validate_structure(&nodes, &voters, &protocol),
+            Err(GenesisError::Policy)
+        );
+        invalid = candidate.clone();
+        invalid.proposer_inputs.pop();
+        invalid.permutation.pop();
+        assert_eq!(
+            invalid.validate_structure(&nodes, &voters, &protocol),
+            Err(GenesisError::Voter)
+        );
+        let base = GenesisCoreInput {
+            network,
+            genesis_time: 1,
+            catalog: catalog.clone(),
+            nodes,
+            accounts: vec![],
+            initial_voters: voters,
+            allocations,
+            restricted_records: vec![],
+        };
+        assert!(matches!(
+            candidate.verify_received(&base, &nic, &birth, &authority, &engine),
+            Err(GenesisError::FormationUnavailable)
+        ));
+    }
+
     // Consume the actual Core-verified original bytes through the APQE session
     // owner. Do not substitute fixture metadata or a candidate authority flag.
     let preseed = verified.registry().preseed_frame().unwrap();

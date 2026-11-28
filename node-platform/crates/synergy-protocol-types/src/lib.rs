@@ -171,3 +171,5 @@ mod tests {
 pub mod canonical_bytes;
 
 pub mod c14n02;
+
+pub mod protocol_profile_r1;
